@@ -93,8 +93,21 @@ def set_tests_meta(m):
     _set("tests_meta", m)
 
 def get_test_meta(tid):
+    """Faqat aktiv testlarni qaytaradi (foydalanuvchilar uchun)"""
+    return next((t for t in _get("tests_meta", [])
+                 if t.get("test_id") == tid
+                 and t.get("is_active", True)
+                 and not t.get("is_deleted", False)), {})
+
+def get_test_meta_any(tid):
+    """Har qanday holatdagi testni qaytaradi (admin uchun)"""
     return next((t for t in _get("tests_meta", [])
                  if t.get("test_id") == tid), {})
+
+def get_deleted_tests():
+    """Yaratuvchi o'chirgan testlar (admin ko'rishi uchun)"""
+    return [t for t in _get("tests_meta", [])
+            if t.get("is_deleted", False) and t.get("is_active", True)]
 
 def add_test_meta(meta):
     m = [x for x in _get("tests_meta", []) if x.get("test_id") != meta.get("test_id")]
@@ -109,11 +122,18 @@ def update_test_meta(tid, updates):
             break
     _set("tests_meta", m)
 
+def soft_delete_test(tid):
+    """Yaratuvchi o'chirganda — yashirin qiladi, lekin admin ko'radi"""
+    update_test_meta(tid, {"is_deleted": True})
+    _pop(f"qcache_{tid}")
+    log.info(f"RAM: test_{tid} soft-deleted")
+
 def delete_test_from_ram(tid):
+    """Admin o'chirganda — butunlay o'chiradi"""
     m = [t for t in _get("tests_meta", []) if t.get("test_id") != tid]
     _set("tests_meta", m)
     _pop(f"qcache_{tid}")
-    log.info(f"RAM: test_{tid} o'chirildi")
+    log.info(f"RAM: test_{tid} butunlay o'chirildi")
 
 def pause_test(tid, paused: bool):
     update_test_meta(tid, {"is_paused": paused})
