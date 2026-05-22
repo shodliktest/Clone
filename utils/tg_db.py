@@ -132,7 +132,7 @@ def is_dirty():
 # INDEX META — pinned kichik fayl
 # ══════════════════════════════════════════════════════════════
 
-async def _migrate_from_old_index() -> dict:
+async def _migrate_from_old_index(progress_callback=None) -> dict:
     """
     TO'LIQ KANAL SKANERLASH:
     Kanaldan barcha JSON fayllarni topib ma'lumotlarni tiklaydi.
@@ -156,7 +156,8 @@ async def _migrate_from_old_index() -> dict:
         cur   = probe.message_id
         await _bot.delete_message(_cid, cur)
 
-        for mid in range(cur - 1, max(1, cur - 3000), -1):
+        total_range = min(3000, cur - 1)
+        for i, mid in enumerate(range(cur - 1, max(1, cur - 3000), -1)):
             try:
                 fwd = await _bot.forward_message(_cid, _cid, mid)
                 doc = getattr(fwd, "document", None)
@@ -168,8 +169,16 @@ async def _migrate_from_old_index() -> dict:
                         "name": doc.file_name.lower(),
                         "fid":  doc.file_id,
                     }
-                await asyncio.sleep(0.05)
-            except: pass
+                # Polling ga joy berish — har 5 xabardan keyin
+                if i % 5 == 0:
+                    await asyncio.sleep(0)
+                else:
+                    await asyncio.sleep(0.03)
+                # Progress callback
+                if progress_callback and i % 50 == 0:
+                    await progress_callback(i, total_range, len(all_json_files), "scan")
+            except Exception:
+                await asyncio.sleep(0)
 
         log.info(f"Topilgan JSON fayllar: {len(all_json_files)} ta")
     except Exception as e:
@@ -395,7 +404,7 @@ async def _load_meta() -> dict:
                         log.info(f"index_meta topildi (msg {mid})")
                         await _pin_msg(mid)
                         return data
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0)
             except: pass
     except Exception as e:
         log.warning(f"Meta qidirish: {e}")
@@ -493,15 +502,107 @@ async def _background_full_rescan():
     """
     Background da to'liq kanal skanerlash.
     Bot polling ishlayotgan paytda amalga oshadi.
+    Admin ga progress xabarlari yuboriladi.
     """
-    await asyncio.sleep(3)   # Polling boshlangandan keyin
-    log.info("⬇️ Background to'liq skanerlash boshlandi...")
-    result = await _migrate_from_old_index()
-    if result:
-        log.info(f"✅ Background skanerlash tugadi: "
-                 f"{len(_index.get('tests_meta',[]))} test meta tiklandi")
-    else:
-        log.warning("Background skanerlash natija bermadi")
+    await asyncio.sleep(5)   # Polling boshlangandan keyin
+
+    from config import ADMIN_IDS
+    admin_id = ADMIN_IDS[0] if ADMIN_IDS else None
+
+    log.info("Background to'liq skanerlash boshlandi...")
+
+    # Admin ga boshlash xabari
+    progress_msg_id = None
+    if admin_id and _bot:
+        try:
+            msg = await _bot.send_message(
+                admin_id,
+                "🔍 <b>Kanal skanerlash boshlandi</b>\n\n"
+                "⏳ Bot testlar, userlar va guruhlarni tiklamoqda...\n"
+                "Bu 2-5 daqiqa davom etishi mumkin.\n\n"
+                "Bot shu paytda ham ishlayveradi ✅"
+            )
+            progress_msg_id = msg.message_id
+        except Exception: pass
+
+    result = await _migrate_from_old_index(
+        progress_callback=_make_progress_callback(admin_id, progress_msg_id)
+    )
+
+    tests_count = len(_index.get("tests_meta", []))
+    from utils import ram_cache as ram
+    users_count  = len(ram.get_users())
+    groups_count = len([g for g in ram.get_known_groups().values() if g.get("active")])
+
+    if admin_id and _bot and progress_msg_id:
+        try:
+            if result:
+                await _bot.edit_message_text(
+                    chat_id=admin_id,
+                    message_id=progress_msg_id,
+                    text=(
+                        f"✅ <b>Kanal skanerlash tugadi!</b>\n\n"
+                        f"📋 Testlar: <b>{tests_count} ta</b>\n"
+                        f"👥 Foydalanuvchilar: <b>{users_count} ta</b>\n"
+                        f"🏘 Guruhlar: <b>{groups_count} ta</b>\n\n"
+                        f"Bot to'liq tayyor! 🚀"
+                    )
+                )
+            else:
+                await _bot.edit_message_text(
+                    chat_id=admin_id,
+                    message_id=progress_msg_id,
+                    text="⚠️ Skanerlash natija bermadi. Kanal bo'sh bo'lishi mumkin."
+                )
+        except Exception: pass
+
+    log.info(f"Background skanerlash tugadi: {tests_count} test, "
+             f"{users_count} user, {groups_count} guruh")
+
+
+def _make_progress_callback(admin_id, msg_id):
+    """Progress callback — har 50 xabardan keyin admin ga yangilash"""
+    if not admin_id or not msg_id or not _bot:
+        return None
+
+    last_update = [0]
+
+    async def callback(scanned: int, total: int, found: int, stage: str):
+        import time
+        now = time.time()
+        if now - last_update[0] < 10:   # 10 soniyada 1 marta yangilash
+            return
+        last_update[0] = now
+
+        bar_len   = 20
+        filled    = int(bar_len * scanned / total) if total > 0 else 0
+        bar       = "█" * filled + "░" * (bar_len - filled)
+        pct       = int(100 * scanned / total) if total > 0 else 0
+
+        stage_txt = {
+            "scan":   "📡 Kanal skanerlash...",
+            "index":  "📋 Index chunklar...",
+            "tests":  "📝 Test fayllar...",
+            "users":  "👥 Foydalanuvchilar...",
+            "groups": "🏘 Guruhlar...",
+        }.get(stage, "⏳ Yuklanmoqda...")
+
+        try:
+            await _bot.edit_message_text(
+                chat_id=admin_id,
+                message_id=msg_id,
+                text=(
+                    f"🔍 <b>Kanal skanerlash</b>\n\n"
+                    f"{stage_txt}\n"
+                    f"<code>[{bar}]</code> {pct}%\n"
+                    f"📨 {scanned}/{total} xabar ko'rildi\n"
+                    f"✅ {found} ta topildi\n\n"
+                    f"Bot ishlayveradi ✅"
+                )
+            )
+        except Exception: pass
+
+    return callback
 
 
 async def _load_all_index_chunks():
@@ -605,7 +706,7 @@ async def _recover_index_from_channel() -> list:
                         if fname not in chunk_names:
                             chunk_names[fname] = (mid, doc.file_id)
                             log.info(f"  index_chunk topildi: {doc.file_name} (msg {mid})")
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0)
             except: pass
 
         # Har bir chunk ni yuklash
@@ -821,7 +922,7 @@ async def _recover_users_from_channel():
                                     "count": len(data["users"]),
                                 })
                                 log.info(f"  users_list topildi: {len(data['users'])} user")
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0)
             except: pass
 
         if all_users:
@@ -1587,7 +1688,7 @@ async def load_known_groups():
                             _meta["known_groups_fid"]    = doc.file_id
                             log.info(f"known_groups kanaldan topildi (msg {scan_mid})")
                             break
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0)
                 except: pass
         except Exception as e:
             log.warning(f"load_known_groups kanal skani: {e}")
