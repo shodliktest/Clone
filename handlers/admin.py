@@ -885,26 +885,62 @@ async def cmd_rescan(message: Message):
     if not is_admin(message.from_user.id):
         return
     from utils import tg_db, ram_cache as ram
+    import time as _time
+
+    before_tests  = len(ram.get_all_tests_meta())
+    before_users  = len(ram.get_users())
+    before_groups = len([g for g in ram.get_known_groups().values() if g.get("active")])
+
     msg = await message.answer(
-        "🔍 <b>To'liq kanal skanerlash boshlandi...</b>\n"
-        "3000 xabar skanerlash ~2-4 daqiqa davom etadi.\n"
-        "⏳ Kuting..."
+        "🔍 <b>Kanal skanerlash boshlandi</b>\n\n"
+        "<code>[░░░░░░░░░░░░░░░░░░░░]</code> 0%\n"
+        "📨 0/3000 xabar ko'rildi\n"
+        "✅ 0 ta topildi\n\n"
+        "Bot ishlayveradi ✅"
     )
-    before_tests = len(ram.get_all_tests_meta())
-    before_users = len(ram.get_users())
 
-    # To'liq skanerlash
-    result = await tg_db._migrate_from_old_index()
+    # Progress callback
+    last_edit = [0]
+    async def on_progress(scanned, total, found, stage):
+        now = _time.time()
+        if now - last_edit[0] < 8:
+            return
+        last_edit[0] = now
+        bar_len = 20
+        filled  = int(bar_len * scanned / total) if total > 0 else 0
+        bar     = "█" * filled + "░" * (bar_len - filled)
+        pct     = int(100 * scanned / total) if total > 0 else 0
+        stage_txt = {
+            "scan":   "📡 Kanal skanerlash...",
+            "index":  "📋 Index chunklar...",
+            "tests":  "📝 Test fayllar...",
+            "users":  "👥 Foydalanuvchilar...",
+            "groups": "🏘 Guruhlar...",
+        }.get(stage, "⏳ Yuklanmoqda...")
+        try:
+            await msg.edit_text(
+                f"🔍 <b>Kanal skanerlash</b>\n\n"
+                f"{stage_txt}\n"
+                f"<code>[{bar}]</code> {pct}%\n"
+                f"📨 {scanned}/{total} xabar ko'rildi\n"
+                f"✅ {found} ta topildi\n\n"
+                f"Bot ishlayveradi ✅"
+            )
+        except Exception: pass
 
-    after_tests = len(ram.get_all_tests_meta())
-    after_users = len(ram.get_users())
+    result = await tg_db._migrate_from_old_index(progress_callback=on_progress)
+
+    after_tests  = len(ram.get_all_tests_meta())
+    after_users  = len(ram.get_users())
+    after_groups = len([g for g in ram.get_known_groups().values() if g.get("active")])
 
     if result:
         await msg.edit_text(
-            f"✅ <b>To'liq skanerlash yakunlandi!</b>\n\n"
+            f"✅ <b>Skanerlash yakunlandi!</b>\n\n"
             f"📋 Testlar: <b>{before_tests}</b> → <b>{after_tests}</b> ta\n"
-            f"👥 Userlar: <b>{before_users}</b> → <b>{after_users}</b> ta\n\n"
-            f"Endi barcha ma'lumotlar tiklanib saqlandi. ✅"
+            f"👥 Userlar: <b>{before_users}</b> → <b>{after_users}</b> ta\n"
+            f"🏘 Guruhlar: <b>{before_groups}</b> → <b>{after_groups}</b> ta\n\n"
+            f"✅ Hammasi tiklanib saqlandi!"
         )
     else:
         await msg.edit_text(
