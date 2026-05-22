@@ -1007,3 +1007,113 @@ async def cmd_reindex(message: Message):
         )
     except Exception:
         pass
+
+
+# ── Forward rejimi ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_forward_mode_users = set()   # Forward rejimda turgan adminlar
+
+@router.callback_query(F.data == "admin_forward_mode")
+async def enter_forward_mode(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    await callback.answer()
+    uid = callback.from_user.id
+    _forward_mode_users.add(uid)
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="❌ Forward rejimdan chiqish",
+                               callback_data="exit_forward_mode"))
+    try:
+        await callback.message.edit_text(
+            "📨 <b>Forward rejimi YOQILDI</b>\n\n"
+            "Endi siz yuborgan har qanday xabar —\n"
+            "rasm, video, hujjat, matn —\n"
+            "<b>screenshot va forward qilish mumkin</b> holda qayta yuboriladi.\n\n"
+            "📌 Qo\'llanish:\n"
+            "• Xabarni menga yuboring → men uni forward qilish mumkin holda qayta yubora men\n"
+            "• /cancel — rejimdan chiqish\n\n"
+            "<i>Bu rejimda protect_content=False ishlaydi</i>",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+
+
+@router.callback_query(F.data == "exit_forward_mode")
+async def exit_forward_mode_cb(callback: CallbackQuery):
+    uid = callback.from_user.id
+    _forward_mode_users.discard(uid)
+    await callback.answer("✅ Rejimdan chiqildi.")
+    try:
+        await callback.message.edit_text(
+            "📨 Forward rejimi <b>o\'chirildi</b>.",
+        )
+    except TelegramBadRequest: pass
+
+
+@router.message(Command("cancel"))
+async def cancel_forward(message: Message):
+    uid = message.from_user.id
+    if uid in _forward_mode_users:
+        _forward_mode_users.discard(uid)
+        await message.answer("✅ Forward rejimdan chiqildi.")
+
+
+@router.message(F.from_user.func(lambda u: u.id in _forward_mode_users))
+async def forward_mode_handler(message: Message):
+    """
+    Forward rejimda: admin yuborgan har qanday xabarni
+    protect_content=False bilan qayta yuboradi.
+    Screenshot va forward qilish mumkin bo'ladi.
+    """
+    uid = message.from_user.id
+    if uid not in _forward_mode_users:
+        return
+
+    try:
+        # Xabar turini aniqlash
+        if message.text and not message.text.startswith("/"):
+            sent = await message.bot.send_message(
+                uid, message.text,
+                parse_mode="HTML", protect_content=False
+            )
+        elif message.photo:
+            sent = await message.bot.send_photo(
+                uid, message.photo[-1].file_id,
+                caption=message.caption or "", protect_content=False
+            )
+        elif message.video:
+            sent = await message.bot.send_video(
+                uid, message.video.file_id,
+                caption=message.caption or "", protect_content=False
+            )
+        elif message.document:
+            sent = await message.bot.send_document(
+                uid, message.document.file_id,
+                caption=message.caption or "", protect_content=False
+            )
+        elif message.voice:
+            sent = await message.bot.send_voice(
+                uid, message.voice.file_id,
+                caption=message.caption or "", protect_content=False
+            )
+        elif message.sticker:
+            sent = await message.bot.send_sticker(
+                uid, message.sticker.file_id, protect_content=False
+            )
+        elif message.video_note:
+            sent = await message.bot.send_video_note(
+                uid, message.video_note.file_id, protect_content=False
+            )
+        else:
+            return
+
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="❌ Rejimdan chiqish",
+                                   callback_data="exit_forward_mode"))
+        await message.answer(
+            "✅ Yuborildi. Endi screenshot va forward qilish mumkin.\n"
+            "Yana xabar yuboring yoki rejimdan chiqing.",
+            reply_markup=b.as_markup()
+        )
+    except Exception as e:
+        await message.answer(f"❌ Xato: {e}")
+

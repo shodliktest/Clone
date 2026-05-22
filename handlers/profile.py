@@ -12,7 +12,7 @@ from utils.db import (get_user, get_my_tests, get_user_results,
                       get_analysis, get_test_full, get_test_stats_for_user,
                       pause_test, get_test_solvers)
 from utils.states import AllowedUsersState, EditTestTitle
-from utils.ram_cache import get_test_by_id, get_test_meta
+from utils.ram_cache import get_test_by_id, get_test_meta, get_test_meta_any
 from keyboards.keyboards import main_kb, analysis_kb, mytest_settings_kb, CAT_ICONS, get_cat_icon
 
 log = logging.getLogger(__name__)
@@ -405,15 +405,17 @@ async def mytest_settings_cb(callback: CallbackQuery):
     await callback.answer()
     tid  = callback.data[16:]
     uid  = callback.from_user.id
-    meta = get_test_meta(tid)
+    meta = get_test_meta_any(tid)
     if not meta:
         return await callback.answer("❌ Test topilmadi.", show_alert=True)
     from config import ADMIN_IDS
     if uid != meta.get("creator_id") and uid not in ADMIN_IDS:
         return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
-    await _show_test_settings(callback.message, meta, tid, edit=True)
+    await _show_test_settings(callback.message, meta, tid, edit=True, viewer_uid=uid)
 
-async def _show_test_settings(msg, meta, tid, edit=False):
+async def _show_test_settings(msg, meta, tid, edit=False, viewer_uid=None):
+    from config import ADMIN_IDS as _AIDS
+    _is_admin = viewer_uid in _AIDS if viewer_uid else False
     vis_m  = {"public":"🌍 Ommaviy","link":"🔗 Ssilka orqali","private":"🔒 Shaxsiy"}
     diff_m = {"easy":"🟢 Oson","medium":"🟡 O'rtacha","hard":"🔴 Qiyin","expert":"⚡ Ekspert"}
     paused = meta.get("is_paused",False)
@@ -443,7 +445,7 @@ async def _show_test_settings(msg, meta, tid, edit=False):
         text += f"\n🔐 <b>Kirish nazorati:</b> {len(allowed)} ta foydalanuvchi"
     else:
         text += "\n🔓 Kirish nazorati: <i>hammaga ochiq</i>"
-    kb = mytest_settings_kb(tid, is_paused=paused)
+    kb = mytest_settings_kb(tid, is_paused=paused, is_admin=_is_admin)
     try:
         if edit: await msg.edit_text(text, reply_markup=kb)
         else:    await msg.answer(text, reply_markup=kb)
@@ -457,7 +459,7 @@ async def edit_title_cb(callback: CallbackQuery, state: FSMContext):
     tid = callback.data[11:]
     uid = callback.from_user.id
     from config import ADMIN_IDS
-    meta = get_test_meta(tid)
+    meta = get_test_meta_any(tid)
     if not meta:
         return await callback.answer("❌ Test topilmadi.", show_alert=True)
     if uid != meta.get("creator_id") and uid not in ADMIN_IDS:
@@ -492,7 +494,7 @@ async def edit_title_input(message: Message, state: FSMContext):
         await tg_db.update_test_meta_tg(tid, {"title": new_title})
     except Exception as e:
         log.error(f"edit_title TG save xato: {e}")
-    meta = get_test_meta(tid) or {}
+    meta = get_test_meta_any(tid) or {}
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="⚙️ Sozlamalar", callback_data=f"mytest_settings_{tid}"))
     b.row(InlineKeyboardButton(text="⬅️ Mening testlarim", callback_data="back_to_mytests"))
@@ -533,7 +535,7 @@ async def set_att_cb(callback: CallbackQuery):
     update_test_meta(tid, {"max_attempts": new_att})
     asyncio.create_task(tg_db.update_test_meta_tg(tid, {"max_attempts": new_att}))
     att_t = f"{new_att} marta" if new_att else "Cheksiz"
-    meta  = get_test_meta(tid) or {}
+    meta  = get_test_meta_any(tid) or {}
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"mytest_settings_{tid}"))
     await callback.message.edit_text(
@@ -548,7 +550,7 @@ async def set_att_cb(callback: CallbackQuery):
 async def edit_poll_time_cb(callback: CallbackQuery):
     await callback.answer()
     tid  = callback.data[15:]
-    meta = get_test_meta(tid) or {}
+    meta = get_test_meta_any(tid) or {}
     cur  = meta.get("poll_time", 30)
     b    = InlineKeyboardBuilder()
     for sec in [10, 15, 20, 30, 45, 60, 90, 120]:
@@ -594,7 +596,7 @@ async def set_poll_time_cb(callback: CallbackQuery):
         except Exception as e:
             log.error(f"set_poll_time TG save xato: {e}")
     asyncio.create_task(_save_poll_time())
-    meta = get_test_meta(tid) or {}
+    meta = get_test_meta_any(tid) or {}
     b    = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="⚙️ Sozlamalar", callback_data=f"mytest_settings_{tid}"))
     b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"edit_poll_time_{tid}"))
@@ -615,7 +617,7 @@ async def edit_allowed_cb(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     tid  = callback.data[13:]
     uid  = callback.from_user.id
-    meta = get_test_meta(tid) or {}
+    meta = get_test_meta_any(tid) or {}
     from config import ADMIN_IDS
 
     # Ruxsat: o'z testi yoki admin
@@ -657,7 +659,7 @@ async def allowed_clear_cb(callback: CallbackQuery):
     await callback.answer()
     tid  = callback.data[14:]
     uid  = callback.from_user.id
-    meta = get_test_meta(tid) or {}
+    meta = get_test_meta_any(tid) or {}
     from config import ADMIN_IDS
     from utils.roles import get_role, ROLE_LEVELS
     if uid not in ADMIN_IDS and meta.get("creator_id") != uid:
@@ -682,7 +684,7 @@ async def allowed_del_cb(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     tid  = callback.data[12:]
     uid  = callback.from_user.id
-    meta = get_test_meta(tid) or {}
+    meta = get_test_meta_any(tid) or {}
     from config import ADMIN_IDS
     from utils.roles import get_role, ROLE_LEVELS
     if uid not in ADMIN_IDS and meta.get("creator_id") != uid:
@@ -712,7 +714,7 @@ async def allowed_replace_cb(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     tid  = callback.data[16:]
     uid  = callback.from_user.id
-    meta = get_test_meta(tid) or {}
+    meta = get_test_meta_any(tid) or {}
     from config import ADMIN_IDS
     from utils.roles import get_role, ROLE_LEVELS
     if uid not in ADMIN_IDS and meta.get("creator_id") != uid:
@@ -742,7 +744,7 @@ async def allowed_add_cb(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     tid = callback.data[12:]
     uid = callback.from_user.id
-    meta = get_test_meta(tid) or {}
+    meta = get_test_meta_any(tid) or {}
     from config import ADMIN_IDS
     from utils.roles import get_role, ROLE_LEVELS
     role = get_role(uid)
@@ -865,27 +867,164 @@ async def my_test_to_txt(callback: CallbackQuery):
     )
 
 
+
+
+# ── Admin: Quiz Poll export (raqamsiz) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@router.callback_query(F.data.startswith("quiz_poll_export_"))
+async def quiz_poll_export(callback: CallbackQuery, state: FSMContext):
+    """
+    Admin uchun: testni @quiz bot uchun raqamsiz poll formatida yuboradi.
+    Har bir savol alohida poll — raqam va [X/Y] belgisi yo'q.
+    Faqat savol matni + variantlar.
+    """
+    from config import ADMIN_IDS
+    uid = callback.from_user.id
+    if uid not in ADMIN_IDS:
+        return await callback.answer("⚠️ Faqat admin!", show_alert=True)
+
+    await callback.answer("⏳ Poll export tayyorlanmoqda...")
+    tid  = callback.data[17:]
+    test = await get_test_full(tid) or get_test_by_id(tid)
+    if not test or not test.get("questions"):
+        return await callback.message.answer("❌ Test topilmadi yoki savollar yo'q.")
+
+    qs    = test.get("questions", [])
+    title = test.get("title", tid)
+    total = len(qs)
+
+    # Kirish xabari
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⏹ Bekor qilish", callback_data="quiz_poll_cancel"))
+    info = await callback.message.answer(
+        f"📨 <b>Quiz Poll export</b>\n\n"
+        f"📝 {title}\n"
+        f"📋 {total} ta savol yuborilmoqda...\n\n"
+        f"<i>Har bir savol alohida poll sifatida yuboriladi.</i>",
+        reply_markup=b.as_markup()
+    )
+
+    import re as _re, random as _rnd, copy as _cp, asyncio as _aio
+
+    def _strip(o): return _re.sub(r"^[A-Ha-h]\s*[).]\s*", "", str(o)).strip()
+    def _clean_q(t): return _re.sub(r"^\[\d+/\d+\]\s*", "", str(t)).strip()
+
+    sent = 0
+    for i, q in enumerate(qs):
+        # Savol matni — raqamsiz
+        qtxt = _clean_q(q.get("question", q.get("q", q.get("text", "Savol?"))))
+        if len(qtxt) > 295:
+            qtxt = qtxt[:292] + "..."
+
+        # Variantlar — prefiks olib tashlanadi
+        raw_opts = q.get("options", [])
+        opts = [_strip(o) for o in raw_opts]
+        opts = [o[:95] + "..." if len(o) > 95 else o for o in opts if o]
+
+        if not opts or len(opts) < 2:
+            continue
+
+        # To'g'ri javob indeksini aniqlash
+        corr = q.get("correct", q.get("correct_index", 0))
+        if isinstance(corr, int):
+            ci = max(0, min(corr, len(opts) - 1))
+        else:
+            m  = _re.match(r"^([A-Za-z])", str(corr).strip())
+            ci = (ord(m.group(1).upper()) - ord("A")) if m else 0
+        ci = max(0, min(ci, len(opts) - 1))
+
+        expl = q.get("explanation", "") or None
+        if expl in (None, "Izoh kiritilmagan.", "Izoh yo'q", "Izoh kiritilmagan"):
+            expl = None
+        if expl and len(expl) > 195:
+            expl = expl[:195] + "..."
+
+        try:
+            await callback.bot.send_poll(
+                chat_id=uid,
+                question=qtxt,
+                options=opts,
+                type="quiz",
+                correct_option_id=ci,
+                explanation=expl,
+                is_anonymous=False,
+                open_period=None,       # Vaqt limiti yo'q
+                protect_content=False,  # Forward qilish uchun
+            )
+            sent += 1
+            await _aio.sleep(0.3)
+        except Exception as e:
+            log.error(f"Quiz poll export xato {i}: {e}")
+            await _aio.sleep(1)
+
+    try:
+        await info.edit_text(
+            f"✅ <b>Quiz Poll export tugadi!</b>\n\n"
+            f"📝 {title}\n"
+            f"✅ Yuborildi: <b>{sent}/{total}</b> ta poll\n\n"
+            f"<i>Yuqoridagi polllarni @quiz botiga forward qiling.</i>"
+        )
+    except Exception: pass
+
+
+@router.callback_query(F.data == "quiz_poll_cancel")
+async def quiz_poll_cancel(callback: CallbackQuery):
+    await callback.answer("Bekor qilindi.")
+    try:
+        await callback.message.edit_text("❌ Quiz Poll export bekor qilindi.")
+    except Exception: pass
+
+
+# ── Admin: Forward/Screenshot rejimi ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@router.callback_query(F.data == "admin_forward_mode")
+async def admin_forward_mode(callback: CallbackQuery, state: FSMContext):
+    """Admin boshqa kanalga/guruhga xabarlarni yuborish rejimi"""
+    from config import ADMIN_IDS
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("⚠️ Faqat admin!", show_alert=True)
+    await callback.answer()
+
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="❌ Chiqish", callback_data="exit_forward_mode"))
+    try:
+        await callback.message.edit_text(
+            "📨 <b>Forward rejimi</b>\n\n"
+            "Xabar, rasm, video, hujjat yuboring.\n"
+            "Bot ularni <b>protect_content=False</b> bilan qayta yuboradi —\n"
+            "ya'ni screenshot va forward qilish imkoni ochiladi.\n\n"
+            "Qaysi chat ID ga yuborishni ko'rsating yoki\n"
+            "/cancel deb yozing.",
+            reply_markup=b.as_markup()
+        )
+    except Exception: pass
+
 # ── Test o'chirish (faqat mening testlarim dan) ━━━━━━━━━━━━━━━━━━━━━━━━
 @router.callback_query(F.data.startswith("del_mytest_"))
 async def del_mytest_confirm(callback: CallbackQuery):
     tid  = callback.data[11:]
     uid  = callback.from_user.id
-    meta = get_test_meta(tid)
+    from utils import ram_cache as ram
+    meta = ram.get_test_meta_any(tid)
     if not meta:
         return await callback.answer("❌ Test topilmadi.", show_alert=True)
     from config import ADMIN_IDS
-    if uid != meta.get("creator_id") and uid not in ADMIN_IDS:
+    is_admin = uid in ADMIN_IDS
+    is_owner = uid == meta.get("creator_id")
+    if not is_admin and not is_owner:
         return await callback.answer("⚠️ Faqat test egasi o'chira oladi!", show_alert=True)
     b = InlineKeyboardBuilder()
     b.row(
         InlineKeyboardButton(text="✅ Ha, o'chirish", callback_data=f"del_mytest_ok_{tid}"),
         InlineKeyboardButton(text="❌ Yo'q",          callback_data=f"mytest_settings_{tid}"),
     )
+    note = "Test <b>butunlay o'chiriladi</b> (Admin)." if is_admin else \
+           "Test sizning ro'yxatingizdan <b>yashiriladi</b>.\nAdmin ko'rishda qoladi."
     try:
         await callback.message.edit_text(
             f"⚠️ <b>O'CHIRISH TASDIQLASH</b>\n\n"
             f"📝 {meta.get('title','?')} [{tid}]\n\n"
-            f"Test RAMdan va TG bazadan <b>butunlay o'chiriladi</b>.\n"
+            f"{note}\n"
             f"Bu amalni qaytarib bo'lmaydi!",
             reply_markup=b.as_markup()
         )
@@ -897,22 +1036,33 @@ async def del_mytest_confirm(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("del_mytest_ok_"))
 async def del_mytest_exec(callback: CallbackQuery):
-    await callback.answer("⏳ O'chirilmoqda...")   # DARHOL javob
-    tid = callback.data[14:]
-    uid = callback.from_user.id
-    meta= get_test_meta(tid)
+    await callback.answer("⏳ O'chirilmoqda...")
+    tid  = callback.data[14:]
+    uid  = callback.from_user.id
+    from utils import ram_cache as ram
+    meta = ram.get_test_meta_any(tid)
     from config import ADMIN_IDS
-    if uid != (meta or {}).get("creator_id") and uid not in ADMIN_IDS:
+    is_admin = uid in ADMIN_IDS
+    is_owner = uid == (meta or {}).get("creator_id")
+    if not is_admin and not is_owner:
         return
-    from utils.db import delete_test
-    await delete_test(tid)
-    try:
-        await callback.message.edit_text(
-            f"✅ <b>{meta.get('title','?')} [{tid}]</b> muvaffaqiyatli o'chirildi.\n"
-            f"Backup TG ga yuborildi."
+    if is_admin:
+        from utils.db import delete_test
+        await delete_test(tid)
+        result_text = (
+            f"✅ <b>{meta.get('title','?')}</b> butunlay o'chirildi.\n"
+            f"🗑 Bazadan, RAMdan, TG dan tozalandi."
         )
+    else:
+        from utils.db import creator_delete_test
+        await creator_delete_test(tid)
+        result_text = (
+            f"✅ <b>{meta.get('title','?')}</b> sizning ro'yxatingizdan yashirildi.\n"
+            f"ℹ️ Admin ko'rishda qoladi."
+        )
+    try:
+        await callback.message.edit_text(result_text)
     except: pass
-    # Fanlar sahifasiga qaytish
     await _show_mytest_cats(callback.message, uid)
 
 
@@ -924,7 +1074,7 @@ async def test_solvers_cb(callback: CallbackQuery):
     tid   = parts[0]
     page  = int(parts[1]) if len(parts)>1 else 0
     uid   = callback.from_user.id
-    meta  = get_test_meta(tid)
+    meta  = get_test_meta_any(tid)
     if not meta:
         return await callback.answer("❌ Test topilmadi.", show_alert=True)
     from config import ADMIN_IDS
@@ -989,7 +1139,7 @@ async def solver_detail_cb(callback: CallbackQuery):
     tid     = parts[0]
     uid_str = parts[1] if len(parts)>1 else ""
     viewer  = callback.from_user.id
-    meta    = get_test_meta(tid)
+    meta    = get_test_meta_any(tid)
     from config import ADMIN_IDS
     if viewer != meta.get("creator_id") and viewer not in ADMIN_IDS:
         return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
@@ -1025,7 +1175,7 @@ async def solvers_txt_cb(callback: CallbackQuery):
     await callback.answer("⏳ TXT tayyorlanmoqda...")
     tid  = callback.data[12:]
     uid  = callback.from_user.id
-    meta = get_test_meta(tid)
+    meta = get_test_meta_any(tid)
     from config import ADMIN_IDS
     if uid != meta.get("creator_id") and uid not in ADMIN_IDS:
         return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
