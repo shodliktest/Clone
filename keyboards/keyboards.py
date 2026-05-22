@@ -104,7 +104,8 @@ def main_kb(uid=None, chat_type="private"):
 
 
 # ── Test kartochkasi (katalogda) ──────────────────────────────
-def test_info_kb(tid, creator_id=None, viewer_uid=None, back_cb="back_to_cats"):
+def test_info_kb(tid, creator_id=None, viewer_uid=None, back_cb="back_to_cats",
+                 poll_only=False):
     from utils.ram_cache import get_test_meta
     from config import ADMIN_IDS
     b      = InlineKeyboardBuilder()
@@ -116,6 +117,9 @@ def test_info_kb(tid, creator_id=None, viewer_uid=None, back_cb="back_to_cats"):
         b.row(InlineKeyboardButton(text="⚠️ Vaqtincha to'xtatilgan", callback_data="noop"))
         if is_own:
             b.row(InlineKeyboardButton(text="▶️ Qayta boshlash", callback_data=f"test_resume_{tid}"))
+    elif poll_only:
+        # Faqat Quiz Poll tugmasi
+        b.row(InlineKeyboardButton(text="📊 Quiz Poll boshlash", callback_data=f"start_poll_{tid}"))
     else:
         b.row(
             InlineKeyboardButton(text="▶️ Inline test", callback_data=f"start_test_{tid}"),
@@ -216,6 +220,9 @@ def admin_kb():
         InlineKeyboardButton(text="💾 JSON export", callback_data="adm_export_json"),
         InlineKeyboardButton(text="🗂 Backuplar",   callback_data="adm_backups"),
     )
+    b.row(
+        InlineKeyboardButton(text="📨 Forward rejimi", callback_data="admin_forward_mode"),
+    )
     b.row(InlineKeyboardButton(text="🏠 Menyu", callback_data="main_menu"))
     return b.as_markup()
 
@@ -255,7 +262,7 @@ def visibility_kb():
     b.row(InlineKeyboardButton(text="❌ Bekor",          callback_data="cancel_create"))
     return b.as_markup()
 
-def mytest_settings_kb(tid, is_paused=False):
+def mytest_settings_kb(tid, is_paused=False, is_admin=False):
     """Mening testlarim — test sozlamalari"""
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="👁 Ko'rish",          callback_data=f"mytest_view_{tid}"))
@@ -267,6 +274,11 @@ def mytest_settings_kb(tid, is_paused=False):
         InlineKeyboardButton(text="📊 Kim yechgan",        callback_data=f"test_solvers_{tid}_0"),
         InlineKeyboardButton(text="📄 TXT yuklab olish",   callback_data=f"mytest_txt_{tid}"),
     )
+    if is_admin:
+        b.row(
+            InlineKeyboardButton(text="📨 Quiz Poll export",
+                                 callback_data=f"quiz_poll_export_{tid}"),
+        )
     b.row(
         InlineKeyboardButton(
             text="▶️ Davom ettirish" if is_paused else "⏸ To'xtatib qo'yish",
