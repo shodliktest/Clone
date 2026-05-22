@@ -124,27 +124,30 @@ async def cmd_start(message: Message, state: FSMContext):
             test = get_test_by_id(tid) or await _gtf(tid)
             if test:
                 await message.answer(welcome, reply_markup=main_kb(uid, chat_type))
-                b = InlineKeyboardBuilder()
-                b.row(InlineKeyboardButton(
-                    text="🔍 Demo (Inline)",
-                    callback_data=f"start_demo_{tid}"
-                ))
-                b.row(InlineKeyboardButton(
-                    text="🔍 Demo (Poll)",
-                    callback_data=f"start_demopoll_{tid}"
-                ))
                 from config import ADMIN_USERNAME
+                from handlers.inline_mode import DEMO_MIN, DEMO_MAX
+                qc     = len(test.get("questions",[])) or test.get("question_count",0)
+                demo_q = min(DEMO_MAX, max(DEMO_MIN, qc // 3))
+                title  = test.get("title","?")
+                cat    = test.get("category","")
+                b = InlineKeyboardBuilder()
+                b.row(
+                    InlineKeyboardButton(text=f"▶️ Demo Inline ({demo_q} savol)",
+                                         callback_data=f"start_demo_{tid}"),
+                    InlineKeyboardButton(text=f"📊 Demo Poll ({demo_q} savol)",
+                                         callback_data=f"start_demopoll_{tid}"),
+                )
                 b.row(InlineKeyboardButton(
                     text="📩 To'liq test olish",
                     url=f"https://t.me/{ADMIN_USERNAME}"
                 ))
-                qc = len(test.get("questions",[])) or test.get("question_count",0)
-                from handlers.inline_mode import DEMO_MIN, DEMO_MAX
-                demo_q = min(DEMO_MAX, max(DEMO_MIN, qc // 3))
                 await message.answer(
-                    f"🔍 <b>[DEMO] {test.get('title')}</b>\n\n"
-                    f"Bu sinov rejimi — faqat <b>{demo_q} ta</b> savol yechish mumkin.\n"
-                    f"To'liq test uchun adminga murojat qiling.",
+                    f"🔍 <b>[DEMO] {title}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📁 Fan: <b>{cat}</b>\n" if cat else "" +
+                    f"📋 Jami savollar: <b>{qc} ta</b>\n"
+                    f"🔍 Demo: faqat <b>{demo_q} ta</b> savol\n\n"
+                    f"⚠️ Bu sinov rejimi. To'liq test uchun @{ADMIN_USERNAME} ga murojat qiling.",
                     reply_markup=b.as_markup()
                 )
             return
@@ -154,13 +157,29 @@ async def cmd_start(message: Message, state: FSMContext):
             test = get_test_by_id(tid) or await _gtf(tid)
             if test:
                 await message.answer(welcome, reply_markup=main_kb(uid, chat_type))
+                from config import ADMIN_USERNAME
+                from handlers.inline_mode import DEMO_MIN, DEMO_MAX
+                qc     = len(test.get("questions",[])) or test.get("question_count",0)
+                demo_q = min(DEMO_MAX, max(DEMO_MIN, qc // 3))
+                title  = test.get("title","?")
+                cat    = test.get("category","")
                 b = InlineKeyboardBuilder()
                 b.row(InlineKeyboardButton(
-                    text="🔍 Demo Poll boshlash",
+                    text=f"📊 Demo Poll boshlash ({demo_q} savol)",
                     callback_data=f"start_demopoll_{tid}"
                 ))
+                b.row(InlineKeyboardButton(
+                    text="📩 To'liq test olish",
+                    url=f"https://t.me/{ADMIN_USERNAME}"
+                ))
+                cat_line = f"📁 Fan: <b>{cat}</b>\n" if cat else ""
                 await message.answer(
-                    f"🔍 <b>[DEMO] {test.get('title')}</b>",
+                    f"📊 <b>[DEMO POLL] {title}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"{cat_line}"
+                    f"📋 Jami savollar: <b>{qc} ta</b>\n"
+                    f"🔍 Demo: faqat <b>{demo_q} ta</b> savol\n\n"
+                    f"⚠️ Bu sinov rejimi. To'liq test uchun @{ADMIN_USERNAME} ga murojat qiling.",
                     reply_markup=b.as_markup()
                 )
             return

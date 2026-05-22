@@ -483,9 +483,24 @@ async def start_inline_test(callback: CallbackQuery, state: FSMContext):
         "cid": cid, "t0": time.time(), "uid": uid,
         "via_link": test.get("visibility") == "link",
         "no_ans_streak": 0, "q_msg_id": None,
+        "is_demo": is_demo,
     })
 
-    # Test kartochkasini o'chirmasdan, YANGI xabar sifatida birinchi savol
+    # Demo yoki oddiy: test nomini ko'rsatamiz
+    title = test.get("title", "?")
+    prefix = "🔍 [DEMO] " if is_demo else "📝 "
+    qc_total = len(test.get("questions", []))
+    demo_count = len(qs) if is_demo else qc_total
+    demo_note = (
+        f"\n⚠️ Sinov rejimi: <b>{demo_count} ta</b> savol yechish mumkin"
+        f" (jami {qc_total} ta)" if is_demo else ""
+    )
+    try:
+        await callback.message.answer(
+            f"{prefix}<b>{title}</b>{demo_note}"
+        )
+    except Exception: pass
+
     await _send_question_new(callback.bot, cid, state, uid)
 
 

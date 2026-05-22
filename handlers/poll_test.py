@@ -15,7 +15,7 @@ from keyboards.keyboards import main_kb, result_kb, poll_pause_kb
 log    = logging.getLogger(__name__)
 router = Router()
 LT     = ["A","B","C","D","E","F","G","H","I","J"]
-POLL_TYPES = ("multiple_choice", "true_false", "multi_select")
+POLL_TYPES = ("multiple_choice", "multiple", "true_false", "multi_select", "quiz")
 _poll_timers: dict = {}
 
 COUNT_EMOJIS = ["3️⃣","2️⃣","1️⃣","🚀"]
@@ -80,7 +80,7 @@ async def route_poll_answer(poll_answer: PollAnswer, state: FSMContext, bot=None
 
 # ── Boshlash ──────────────────────────────────────────────────
 
-@router.callback_query(F.data.startswith("start_poll_"))
+@router.callback_query(F.data.startswith("start_poll_") | F.data.startswith("start_demopoll_"))
 async def start_poll(callback: CallbackQuery, state: FSMContext):
     if callback.message and callback.message.chat.type in ("group","supergroup"):
         return await callback.answer(
@@ -90,7 +90,8 @@ async def start_poll(callback: CallbackQuery, state: FSMContext):
         )
 
     await callback.answer()
-    raw    = callback.data[11:]
+    is_demo_poll = callback.data.startswith("start_demopoll_")
+    raw    = callback.data[15:] if is_demo_poll else callback.data[11:]
     via_link = raw.endswith("_link")
     tid    = raw[:-5].upper() if via_link else raw.upper()
     uid    = callback.from_user.id
@@ -186,10 +187,11 @@ async def start_poll(callback: CallbackQuery, state: FSMContext):
     try: await msg.delete()
     except Exception: pass
 
-    await _begin_poll(callback.bot, state, uid, chat_id, tid, via_link, test)
+    await _begin_poll(callback.bot, state, uid, chat_id, tid, via_link, test,
+                      is_demo=is_demo_poll)
 
 
-async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None):
+async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, is_demo=False):
     """Poll testni boshlash — state allaqachon tozalangan bo'lishi kerak."""
     import random, copy, re as _re
 
@@ -205,6 +207,12 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None):
     all_qs_raw = test.get("questions", [])
     all_qs = copy.deepcopy(all_qs_raw)
     random.shuffle(all_qs)
+
+    # Demo rejimda savollar sonini cheklaymiz
+    if is_demo:
+        from handlers.inline_mode import DEMO_MIN, DEMO_MAX
+        demo_count = min(DEMO_MAX, max(DEMO_MIN, len(all_qs) // 3))
+        all_qs = all_qs[:demo_count]
 
     # Variantlarni aralashtirish + savol matni variantdan olib tashlash
     LABELS = ["A","B","C","D","E","F","G","H"]
@@ -252,10 +260,14 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None):
         "cid": chat_id, "t0": time.time(), "pt": pt,
         "uid": uid, "answered_this": False,
         "via_link": via_link,
+        "is_demo": is_demo,
     })
 
     try:
-        countdown = await bot.send_message(chat_id, f"📝 <b>{test.get('title')}</b>")
+        title_txt = f"📝 <b>{test.get('title','?')}</b>"
+        if is_demo:
+            title_txt = f"🔍 <b>[DEMO] {test.get('title','?')}</b>"
+        countdown = await bot.send_message(chat_id, title_txt)
         for emoji in COUNT_EMOJIS:
             await asyncio.sleep(0.8)
             try: await countdown.edit_text(emoji)
@@ -274,7 +286,7 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None):
     try:
         info = await bot.send_message(
             chat_id,
-            f"<b>📊 POLL TEST</b> | {len(qs)} savol | ⏱ {pt}s{skip_txt}",
+            f"{'🔍 [DEMO] ' if is_demo else ''}📊 <b>{test.get('title','POLL TEST')}</b> | {len(qs)} savol | ⏱ {pt}s{skip_txt}",
             reply_markup=b.as_markup()
         )
         await state.update_data(info_msg_id=info.message_id)
@@ -497,12 +509,13 @@ async def force_start_poll(callback: CallbackQuery, state: FSMContext):
 # ── Yakunlash ─────────────────────────────────────────────────
 
 async def _finish_poll(bot, cid, state, d):
-    test    = d["test"]
-    qs      = d["qs"]
-    ans     = d.get("ans", {})
-    elapsed = int(time.time() - d.get("t0", time.time()))
-    uid     = d.get("uid", cid)
-    via_link= d.get("via_link", False)
+    test     = d["test"]
+    qs       = d["qs"]
+    ans      = d.get("ans", {})
+    elapsed  = int(time.time() - d.get("t0", time.time()))
+    uid      = d.get("uid", cid)
+    via_link = d.get("via_link", False)
+    is_demo  = d.get("is_demo", False)
     _cancel_timer(cid)
 
     mid = d.get("info_msg_id")
@@ -515,13 +528,14 @@ async def _finish_poll(bot, cid, state, d):
         "time_spent":    elapsed,
         "passing_score": test.get("passing_score", 60),
         "mode":          "poll",
+        "demo":          is_demo,
     })
-    rid = save_result(uid, test.get("test_id",""), scored, via_link=via_link)
+    tid = test.get("test_id", "")
+    rid = save_result(uid, tid, scored, via_link=via_link)
     await state.clear()
 
     daily   = get_daily()
     pct     = scored.get("percentage", 0)
-    tid     = test.get("test_id","")
     all_pct = [
         max(v.get("by_test",{}).get(tid,{}).get("all_pcts",[0]))
         for v in daily.values()
@@ -531,8 +545,24 @@ async def _finish_poll(bot, cid, state, d):
     rank     = next((i+1 for i, p in enumerate(all_pct) if p <= pct), len(all_pct))
     rank_txt = f"\n🏅 <b>Reyting: {rank}/{len(all_pct)} o'rin</b>" if len(all_pct) > 1 else ""
 
-    await bot.send_message(
-        cid,
-        format_result(scored, test) + rank_txt,
-        reply_markup=result_kb(tid, rid)
-    )
+    result_text = format_result(scored, test) + rank_txt
+
+    if is_demo:
+        from config import ADMIN_USERNAME
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="📩 To'liq test olish",
+                                   url=f"https://t.me/{ADMIN_USERNAME}"))
+        b.row(InlineKeyboardButton(text="🤖 Bot orqali murojat",
+                                   callback_data="contact_admin"))
+        demo_text = (
+            f"{result_text}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔍 <b>Bu sinov (demo) rejimi edi!</b>\n\n"
+            f"To'liq testni olish uchun:\n"
+            f"• @{ADMIN_USERNAME} ga yozing\n"
+            f"• Yoki quyidagi tugmani bosing 👇"
+        )
+        await bot.send_message(cid, demo_text, reply_markup=b.as_markup())
+        return
+
+    await bot.send_message(cid, result_text, reply_markup=result_kb(tid, rid))
