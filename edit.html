@@ -2,1295 +2,718 @@
 <html lang="uz">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Test Tahrirlash</title>
 <style>
-/* ══ ASOSIY O'ZGARUVCHILAR ══════════════════════════════════ */
 :root {
-  --bg:        #0a0e1a;
-  --surface:   #111827;
-  --surface2:  #1a2234;
-  --border:    rgba(255,255,255,0.08);
-  --accent:    #00d4ff;
-  --accent2:   #7c3aed;
-  --green:     #10b981;
-  --red:       #ef4444;
-  --yellow:    #f59e0b;
-  --text:      #f1f5f9;
-  --muted:     #64748b;
-  --radius:    14px;
-  --shadow:    0 8px 32px rgba(0,0,0,0.4);
+  --bg:#0a0e1a; --surface:#111827; --surface2:#1a2234;
+  --border:rgba(255,255,255,0.08); --accent:#00d4ff;
+  --green:#10b981; --red:#ef4444; --yellow:#f59e0b;
+  --text:#f1f5f9; --muted:#64748b; --r:14px;
 }
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
+/* HEADER */
+.hdr{position:sticky;top:0;z-index:100;background:rgba(10,14,26,.97);
+  backdrop-filter:blur(12px);border-bottom:1px solid var(--border);
+  padding:10px 14px;display:flex;align-items:center;gap:10px}
+.hdr-back{width:34px;height:34px;border-radius:10px;background:var(--surface2);
+  border:1px solid var(--border);color:var(--text);display:flex;
+  align-items:center;justify-content:center;cursor:pointer;font-size:18px;flex-shrink:0}
+.hdr-title{flex:1;font-size:1rem;font-weight:700;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.hdr-cnt{background:var(--surface2);border:1px solid var(--border);
+  border-radius:20px;padding:3px 10px;font-size:.8rem;color:var(--accent);
+  flex-shrink:0}
 
-body {
-  font-family: 'Segoe UI', system-ui, sans-serif;
-  background: var(--bg);
-  color: var(--text);
-  min-height: 100vh;
-  overflow-x: hidden;
-}
+/* TOOLBAR */
+.tbar{display:flex;gap:7px;padding:8px 14px;background:var(--surface);
+  border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none}
+.tbar::-webkit-scrollbar{display:none}
+.tbtn{flex-shrink:0;display:flex;align-items:center;gap:5px;
+  padding:7px 13px;border-radius:10px;border:1px solid var(--border);
+  background:var(--surface2);color:var(--text);font-size:.8rem;
+  font-weight:600;cursor:pointer;white-space:nowrap;transition:.2s}
+.tbtn:active{opacity:.7}
+.tbtn.p{background:var(--accent);color:#000;border-color:var(--accent)}
+.tbtn.g{background:rgba(16,185,129,.15);color:var(--green);border-color:rgba(16,185,129,.3)}
+.tbtn.r{background:rgba(239,68,68,.15);color:var(--red);border-color:rgba(239,68,68,.3)}
+.tbtn.v{background:rgba(124,58,237,.15);color:#a78bfa;border-color:rgba(124,58,237,.3)}
 
-/* ══ HEADER ════════════════════════════════════════════════ */
-.header {
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  background: rgba(10,14,26,0.95);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--border);
-  padding: 12px 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
+/* SEARCH */
+.sbar{display:flex;gap:8px;padding:8px 14px;background:var(--surface);
+  border-bottom:1px solid var(--border)}
+.sinp{flex:1;padding:9px 13px;border-radius:10px;border:1px solid var(--border);
+  background:var(--surface2);color:var(--text);font-size:.88rem;outline:none}
+.sinp:focus{border-color:var(--accent)}
+.sinp::placeholder{color:var(--muted)}
+.abtn{padding:9px 16px;border-radius:10px;border:none;background:var(--accent);
+  color:#000;font-weight:700;font-size:.88rem;cursor:pointer;
+  display:flex;align-items:center;gap:5px;white-space:nowrap}
 
-.header-back {
-  width: 36px; height: 36px;
-  border-radius: 10px;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  display: flex; align-items: center; justify-content: center;
-  cursor: pointer; font-size: 18px;
-  transition: background 0.2s;
-}
-.header-back:hover { background: var(--surface); }
+/* QUESTIONS */
+.qlist{padding:10px 14px;display:flex;flex-direction:column;
+  gap:11px;padding-bottom:90px}
 
-.header-title {
-  flex: 1;
-  font-size: 1.1rem;
-  font-weight: 600;
-}
+.qcard{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);overflow:hidden}
+.qcard:hover{border-color:rgba(0,212,255,.25)}
 
-.header-counter {
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 4px 12px;
-  font-size: 0.85rem;
-  color: var(--accent);
-}
+.qhdr{display:flex;align-items:center;padding:9px 13px;
+  background:var(--surface2);border-bottom:1px solid var(--border);gap:8px}
+.qnum{font-weight:700;color:var(--accent);font-size:.82rem;min-width:72px}
+.qacts{margin-left:auto;display:flex;gap:5px}
+.qab{width:28px;height:28px;border-radius:8px;border:1px solid var(--border);
+  background:transparent;color:var(--muted);display:flex;align-items:center;
+  justify-content:center;cursor:pointer;font-size:13px;transition:.2s}
+.qab:hover{background:rgba(255,255,255,.08);color:var(--text)}
+.qab.d:hover{background:rgba(239,68,68,.15);color:var(--red)}
 
-/* ══ TOOLBAR ═══════════════════════════════════════════════ */
-.toolbar {
-  display: flex;
-  gap: 8px;
-  padding: 10px 16px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.toolbar::-webkit-scrollbar { display: none; }
+.qbody{padding:11px 13px}
 
-.tool-btn {
-  flex-shrink: 0;
-  display: flex; align-items: center; gap: 6px;
-  padding: 8px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--surface2);
-  color: var(--text);
-  font-size: 0.82rem;
-  font-weight: 500;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.2s;
-}
-.tool-btn:hover { background: rgba(255,255,255,0.08); }
-.tool-btn.primary { background: var(--accent); color: #000; border-color: var(--accent); }
-.tool-btn.danger  { background: rgba(239,68,68,0.15); color: var(--red); border-color: rgba(239,68,68,0.3); }
-.tool-btn.success { background: rgba(16,185,129,0.15); color: var(--green); border-color: rgba(16,185,129,0.3); }
-.tool-btn.purple  { background: rgba(124,58,237,0.15); color: #a78bfa; border-color: rgba(124,58,237,0.3); }
+/* Rasm zone */
+.imgz{border:2px dashed rgba(255,255,255,.1);border-radius:10px;
+  padding:14px;text-align:center;color:var(--muted);font-size:.82rem;
+  cursor:pointer;margin-bottom:9px;transition:.2s;position:relative}
+.imgz:hover{border-color:var(--accent);color:var(--accent)}
+.imgz.has{border:2px solid var(--accent);padding:0}
+.imgz img{width:100%;border-radius:9px;display:block;max-height:160px;object-fit:cover}
+.imgdel{position:absolute;top:5px;right:5px;background:rgba(239,68,68,.9);
+  color:#fff;border:none;border-radius:6px;padding:3px 8px;
+  font-size:11px;cursor:pointer}
 
-/* ══ SEARCH ════════════════════════════════════════════════ */
-.search-bar {
-  display: flex; gap: 8px;
-  padding: 10px 16px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-}
+/* Savol input */
+.qtxt{width:100%;padding:9px 11px;border-radius:10px;
+  border:1px solid var(--border);background:var(--surface2);
+  color:var(--text);font-size:.9rem;resize:vertical;min-height:58px;
+  outline:none;margin-bottom:9px;font-family:inherit;line-height:1.5}
+.qtxt:focus{border-color:var(--accent)}
 
-.search-input {
-  flex: 1;
-  padding: 9px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--surface2);
-  color: var(--text);
-  font-size: 0.9rem;
-  outline: none;
-}
-.search-input:focus { border-color: var(--accent); }
-.search-input::placeholder { color: var(--muted); }
+/* Options */
+.opts{display:flex;flex-direction:column;gap:6px}
+.orow{display:flex;align-items:center;gap:7px}
+.olbl{width:28px;height:28px;border-radius:8px;display:flex;
+  align-items:center;justify-content:center;font-weight:700;
+  font-size:.8rem;flex-shrink:0;cursor:pointer;transition:.2s;
+  border:2px solid var(--border);color:var(--muted)}
+.olbl.ok{background:var(--green);border-color:var(--green);color:#fff}
+.oinp{flex:1;padding:8px 10px;border-radius:8px;border:1px solid var(--border);
+  background:var(--surface2);color:var(--text);font-size:.86rem;outline:none}
+.orow.ok .oinp{border-color:rgba(16,185,129,.4);background:rgba(16,185,129,.07)}
 
-.add-btn {
-  padding: 9px 18px;
-  border-radius: 10px;
-  border: none;
-  background: var(--accent);
-  color: #000;
-  font-weight: 600;
-  font-size: 0.9rem;
-  cursor: pointer;
-  display: flex; align-items: center; gap: 6px;
-  white-space: nowrap;
-  transition: opacity 0.2s;
-}
-.add-btn:hover { opacity: 0.9; }
+/* MODAL */
+.mover{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);
+  backdrop-filter:blur(4px);z-index:1000;justify-content:center;
+  align-items:flex-end;padding:14px}
+.mover.on{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);
+  border-radius:18px 18px 14px 14px;padding:22px;width:100%;
+  max-width:460px;max-height:82vh;overflow-y:auto}
+.mtitle{font-size:1rem;font-weight:700;margin-bottom:18px;color:var(--accent)}
+.mrow{display:flex;gap:9px;margin-top:14px}
 
-/* ══ SAVOLLAR ══════════════════════════════════════════════ */
-.questions-list {
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding-bottom: 100px;
-}
+/* Segment */
+.seg{display:flex;background:var(--surface2);border-radius:10px;padding:3px;margin-bottom:14px}
+.sbtn{flex:1;padding:7px;border:none;background:transparent;color:var(--muted);
+  border-radius:8px;cursor:pointer;font-size:.8rem;font-weight:600;transition:.2s}
+.sbtn.on{background:var(--accent);color:#000}
 
-.question-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  transition: border-color 0.2s;
-}
-.question-card:hover { border-color: rgba(0,212,255,0.3); }
+/* Form */
+.flbl{font-size:.8rem;color:var(--muted);margin-bottom:5px;display:block}
+.finp{width:100%;padding:9px 13px;border-radius:10px;border:1px solid var(--border);
+  background:var(--surface2);color:var(--text);font-size:.88rem;outline:none;
+  transition:.2s;margin-bottom:10px}
+.finp:focus{border-color:var(--accent)}
 
-.q-header {
-  display: flex;
-  align-items: center;
-  padding: 10px 14px;
-  background: var(--surface2);
-  border-bottom: 1px solid var(--border);
-  gap: 8px;
-}
+/* Btn */
+.btn{padding:10px 18px;border-radius:10px;border:none;font-size:.88rem;
+  font-weight:600;cursor:pointer;transition:.2s;flex:1}
+.btn-p{background:var(--accent);color:#000}
+.btn-o{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn-r{background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.3)}
 
-.q-num {
-  font-weight: 700;
-  color: var(--accent);
-  font-size: 0.85rem;
-  min-width: 70px;
-}
+/* Split preview */
+.sprev{background:var(--surface2);border-radius:10px;padding:12px;margin-top:10px;font-size:.82rem}
+.srow{display:flex;justify-content:space-between;padding:3px 0;
+  border-bottom:1px solid var(--border)}
+.srow:last-child{border:none}
+.srow span:last-child{color:var(--accent);font-weight:600}
 
-.q-actions {
-  margin-left: auto;
-  display: flex; gap: 6px;
-}
+/* Export opts */
+.exopts{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:13px}
+.exopt{padding:11px;border-radius:10px;border:1px solid var(--border);
+  background:var(--surface2);cursor:pointer;text-align:center;font-size:.8rem;transition:.2s}
+.exopt:hover,.exopt.on{border-color:var(--accent);background:rgba(0,212,255,.08);color:var(--accent)}
+.exopt .ic{font-size:1.4rem;display:block;margin-bottom:3px}
 
-.q-act-btn {
-  width: 30px; height: 30px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--muted);
-  display: flex; align-items: center; justify-content: center;
-  cursor: pointer;
-  font-size: 14px;
-  transition: all 0.2s;
-}
-.q-act-btn:hover { background: rgba(255,255,255,0.08); color: var(--text); }
-.q-act-btn.del:hover { background: rgba(239,68,68,0.15); color: var(--red); border-color: rgba(239,68,68,0.3); }
+/* TOAST */
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(60px);
+  background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:9px 18px;font-size:.85rem;font-weight:600;z-index:2000;
+  transition:transform .3s;white-space:nowrap;display:flex;align-items:center;gap:7px}
+.toast.show{transform:translateX(-50%) translateY(0)}
+.toast.ok{border-color:rgba(16,185,129,.4);color:var(--green)}
+.toast.err{border-color:rgba(239,68,68,.4);color:var(--red)}
 
-.q-body { padding: 12px 14px; }
+/* LOADING */
+.load{display:flex;flex-direction:column;align-items:center;
+  justify-content:center;padding:60px 20px;color:var(--muted);gap:12px}
+.spin{width:34px;height:34px;border:3px solid var(--border);
+  border-top-color:var(--accent);border-radius:50%;
+  animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
 
-/* Rasm */
-.img-zone {
-  border: 2px dashed rgba(255,255,255,0.1);
-  border-radius: 10px;
-  padding: 16px;
-  text-align: center;
-  color: var(--muted);
-  font-size: 0.85rem;
-  cursor: pointer;
-  margin-bottom: 10px;
-  transition: border-color 0.2s;
-  position: relative;
-  overflow: hidden;
-}
-.img-zone:hover { border-color: var(--accent); color: var(--accent); }
-.img-zone.has-img { border-style: solid; border-color: var(--accent); padding: 0; }
-.img-zone img { width: 100%; border-radius: 8px; display: block; max-height: 180px; object-fit: cover; }
-.img-remove {
-  position: absolute; top: 6px; right: 6px;
-  background: rgba(239,68,68,0.9);
-  color: white; border: none; border-radius: 6px;
-  padding: 3px 8px; font-size: 12px; cursor: pointer;
-}
+/* BOTTOM */
+.bbar{position:fixed;bottom:0;left:0;right:0;
+  background:rgba(10,14,26,.97);backdrop-filter:blur(12px);
+  border-top:1px solid var(--border);padding:10px 14px;display:flex;gap:8px}
 
-/* Savol matni */
-.q-text-input {
-  width: 100%;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--surface2);
-  color: var(--text);
-  font-size: 0.92rem;
-  resize: vertical;
-  min-height: 60px;
-  outline: none;
-  margin-bottom: 10px;
-  font-family: inherit;
-  line-height: 1.5;
-}
-.q-text-input:focus { border-color: var(--accent); }
-
-/* Variantlar */
-.options-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.option-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.opt-label {
-  width: 28px; height: 28px;
-  border-radius: 8px;
-  display: flex; align-items: center; justify-content: center;
-  font-weight: 700;
-  font-size: 0.82rem;
-  flex-shrink: 0;
-  cursor: pointer;
-  transition: all 0.2s;
-  border: 2px solid var(--border);
-  color: var(--muted);
-}
-.opt-label.correct {
-  background: var(--green);
-  border-color: var(--green);
-  color: white;
-}
-
-.opt-input {
-  flex: 1;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface2);
-  color: var(--text);
-  font-size: 0.88rem;
-  outline: none;
-  transition: border-color 0.2s;
-}
-.opt-input:focus { border-color: rgba(255,255,255,0.2); }
-.option-row.correct .opt-input {
-  border-color: rgba(16,185,129,0.4);
-  background: rgba(16,185,129,0.08);
-}
-
-/* ══ MODAL ══════════════════════════════════════════════════ */
-.modal-overlay {
-  display: none;
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.7);
-  backdrop-filter: blur(4px);
-  z-index: 1000;
-  justify-content: center;
-  align-items: flex-end;
-  padding: 16px;
-}
-.modal-overlay.open { display: flex; }
-
-.modal {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 20px 20px 16px 16px;
-  padding: 24px;
-  width: 100%;
-  max-width: 480px;
-  max-height: 85vh;
-  overflow-y: auto;
-}
-
-.modal-title {
-  font-size: 1.1rem;
-  font-weight: 700;
-  margin-bottom: 20px;
-  color: var(--accent);
-}
-
-.modal-row {
-  display: flex;
-  gap: 10px;
-  margin-top: 16px;
-}
-
-/* ══ SEGMENT CONTROL ═══════════════════════════════════════ */
-.seg-control {
-  display: flex;
-  background: var(--surface2);
-  border-radius: 10px;
-  padding: 4px;
-  margin-bottom: 16px;
-}
-.seg-btn {
-  flex: 1;
-  padding: 8px;
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 0.85rem;
-  font-weight: 500;
-  transition: all 0.2s;
-}
-.seg-btn.active {
-  background: var(--accent);
-  color: #000;
-}
-
-/* ══ INPUT/LABEL ═══════════════════════════════════════════ */
-.form-label {
-  font-size: 0.82rem;
-  color: var(--muted);
-  margin-bottom: 6px;
-  display: block;
-}
-.form-input {
-  width: 100%;
-  padding: 10px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--surface2);
-  color: var(--text);
-  font-size: 0.9rem;
-  outline: none;
-  transition: border-color 0.2s;
-}
-.form-input:focus { border-color: var(--accent); }
-
-/* ══ BTN ═══════════════════════════════════════════════════ */
-.btn {
-  padding: 11px 20px;
-  border-radius: 10px;
-  border: none;
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-  flex: 1;
-}
-.btn-primary { background: var(--accent); color: #000; }
-.btn-primary:hover { opacity: 0.9; }
-.btn-outline {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text);
-}
-.btn-outline:hover { background: rgba(255,255,255,0.06); }
-.btn-danger { background: rgba(239,68,68,0.15); color: var(--red); border: 1px solid rgba(239,68,68,0.3); }
-.btn-success { background: rgba(16,185,129,0.15); color: var(--green); border: 1px solid rgba(16,185,129,0.3); }
-
-/* ══ TOAST ══════════════════════════════════════════════════ */
-.toast {
-  position: fixed;
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%) translateY(60px);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 10px 20px;
-  font-size: 0.88rem;
-  font-weight: 500;
-  z-index: 2000;
-  transition: transform 0.3s ease;
-  white-space: nowrap;
-  display: flex; align-items: center; gap: 8px;
-}
-.toast.show { transform: translateX(-50%) translateY(0); }
-.toast.success { border-color: rgba(16,185,129,0.4); color: var(--green); }
-.toast.error   { border-color: rgba(239,68,68,0.4); color: var(--red); }
-
-/* ══ LOADING ════════════════════════════════════════════════ */
-.loading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 60px 20px;
-  color: var(--muted);
-  gap: 14px;
-}
-.spinner {
-  width: 36px; height: 36px;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
-
-/* ══ BOTTOM SAFE AREA ══════════════════════════════════════ */
-.bottom-bar {
-  position: fixed;
-  bottom: 0; left: 0; right: 0;
-  background: rgba(10,14,26,0.97);
-  backdrop-filter: blur(12px);
-  border-top: 1px solid var(--border);
-  padding: 12px 16px;
-  display: flex; gap: 8px;
-}
-
-/* ══ PROGRESS BAR ══════════════════════════════════════════ */
-.progress-bar {
-  height: 3px;
-  background: var(--surface2);
-  position: fixed;
-  top: 0; left: 0; right: 0;
-  z-index: 200;
-}
-.progress-fill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--accent), var(--accent2));
-  transition: width 0.3s ease;
-  width: 0%;
-}
-
-/* ══ CHECKED SPLIT ══════════════════════════════════════════ */
-.split-preview {
-  background: var(--surface2);
-  border-radius: 10px;
-  padding: 14px;
-  margin-top: 12px;
-  font-size: 0.85rem;
-  color: var(--muted);
-}
-.split-row {
-  display: flex;
-  justify-content: space-between;
-  padding: 4px 0;
-  border-bottom: 1px solid var(--border);
-}
-.split-row:last-child { border-bottom: none; }
-.split-row span:last-child { color: var(--accent); font-weight: 600; }
-
-/* ══ WORD EXPORT ════════════════════════════════════════════ */
-.export-opts {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-.export-opt {
-  padding: 12px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--surface2);
-  cursor: pointer;
-  text-align: center;
-  font-size: 0.82rem;
-  transition: all 0.2s;
-}
-.export-opt:hover, .export-opt.selected {
-  border-color: var(--accent);
-  background: rgba(0,212,255,0.08);
-  color: var(--accent);
-}
-.export-opt .icon { font-size: 1.5rem; display: block; margin-bottom: 4px; }
-
-/* ══ MOBILE ══════════════════════════════════════════════ */
-@media (max-width: 480px) {
-  .header { padding: 10px 12px; }
-  .questions-list { padding: 10px 12px; padding-bottom: 90px; }
-  .toolbar { padding: 8px 12px; }
-  .search-bar { padding: 8px 12px; }
-}
+/* Progress */
+.prog{height:2px;background:var(--surface2);position:fixed;top:0;left:0;right:0;z-index:200}
+.pfill{height:100%;background:linear-gradient(90deg,var(--accent),#7c3aed);transition:width .3s}
 </style>
 </head>
 <body>
+<div class="prog"><div class="pfill" id="pf" style="width:0%"></div></div>
 
-<div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
-
-<!-- HEADER -->
-<div class="header">
-  <button class="header-back" onclick="goBack()">←</button>
-  <div class="header-title" id="headerTitle">Savollarni tahrirlash</div>
-  <div class="header-counter" id="headerCounter">0/1000</div>
+<div class="hdr">
+  <button class="hdr-back" onclick="history.back()">←</button>
+  <div class="hdr-title" id="hTitle">Savollarni tahrirlash</div>
+  <div class="hdr-cnt" id="hCnt">0/1000</div>
 </div>
 
-<!-- TOOLBAR -->
-<div class="toolbar">
-  <button class="tool-btn primary" onclick="openSaveModal()">💾 Saqlash</button>
-  <button class="tool-btn" onclick="openSplitModal()">✂️ Bo'lish</button>
-  <button class="tool-btn purple" onclick="openExportModal()">📥 Word</button>
-  <button class="tool-btn success" onclick="addQuestion()">➕ Savol</button>
-  <button class="tool-btn danger" onclick="confirmDeleteSelected()">🗑 O'chirish</button>
+<div class="tbar">
+  <button class="tbtn p" onclick="openModal('saveM')">💾 Saqlash</button>
+  <button class="tbtn" onclick="openSplit()">✂️ Bo'lish</button>
+  <button class="tbtn v" onclick="openModal('expM')">📥 Word</button>
+  <button class="tbtn g" onclick="addQ()">➕ Savol</button>
+  <button class="tbtn r" onclick="delAllConfirm()">🗑 O'chirish</button>
 </div>
 
-<!-- SEARCH -->
-<div class="search-bar">
-  <input class="search-input" id="searchInput" type="text"
-    placeholder="Savol raqami yoki matn..." oninput="filterQuestions()">
-  <button class="add-btn" onclick="addQuestion()">
-    ➕ Qo'shish
-  </button>
+<div class="sbar">
+  <input class="sinp" id="srch" placeholder="Savol raqami yoki matn..." oninput="filterQ()">
+  <button class="abtn" onclick="addQ()">➕ Qo'shish</button>
 </div>
 
-<!-- SAVOLLAR RO'YXATI -->
-<div class="questions-list" id="questionsList">
-  <div class="loading" id="loadingEl">
-    <div class="spinner"></div>
-    <span>Testlar yuklanmoqda...</span>
+<div class="qlist" id="qList">
+  <div class="load" id="loadEl">
+    <div class="spin"></div><span>Yuklanmoqda...</span>
   </div>
 </div>
 
-<!-- BOTTOM BAR -->
-<div class="bottom-bar">
-  <button class="btn btn-outline" onclick="openSplitModal()">✂️ Bo'lish</button>
-  <button class="btn btn-primary" onclick="openSaveModal()">💾 Saqlash</button>
-</div>
-
-<!-- ══ MODALLAR ════════════════════════════════════════════ -->
-
-<!-- BO'LISH MODAL -->
-<div class="modal-overlay" id="splitModal">
-  <div class="modal">
-    <div class="modal-title">✂️ Testni Bo'lish</div>
-
-    <div class="seg-control">
-      <button class="seg-btn active" id="seg-count" onclick="setSplitMode('count')">Qismlar soni</button>
-      <button class="seg-btn" id="seg-size" onclick="setSplitMode('size')">Savollar soni</button>
-      <button class="seg-btn" id="seg-manual" onclick="setSplitMode('manual')">Qo'lda</button>
-    </div>
-
-    <!-- Qismlar soni -->
-    <div id="splitModeCount">
-      <label class="form-label">Nechta qismga bo'linsin?</label>
-      <input class="form-input" type="number" id="splitCount" value="2" min="2" max="50"
-        oninput="updateSplitPreview()">
-    </div>
-
-    <!-- Savollar soni -->
-    <div id="splitModeSize" style="display:none">
-      <label class="form-label">Har bir qismda nechta savol?</label>
-      <input class="form-input" type="number" id="splitSize" value="10" min="1" max="500"
-        oninput="updateSplitPreview()">
-    </div>
-
-    <!-- Qo'lda -->
-    <div id="splitModeManual" style="display:none">
-      <label class="form-label">Qism chegaralarini kiriting (masalan: 1-50, 51-100)</label>
-      <input class="form-input" type="text" id="splitManual"
-        placeholder="1-50, 51-100, 101-150" oninput="updateSplitPreview()">
-    </div>
-
-    <div class="split-preview" id="splitPreview"></div>
-
-    <div class="modal-row">
-      <button class="btn btn-outline" onclick="closeModal('splitModal')">Bekor qilish</button>
-      <button class="btn btn-primary" onclick="executeSplit()">Bo'lishni tasdiqlash</button>
-    </div>
-  </div>
+<div class="bbar">
+  <button class="btn btn-o" onclick="openSplit()">✂️ Bo'lish</button>
+  <button class="btn btn-p" onclick="openModal('saveM')">💾 Saqlash</button>
 </div>
 
 <!-- SAQLASH MODAL -->
-<div class="modal-overlay" id="saveModal">
+<div class="mover" id="saveM">
   <div class="modal">
-    <div class="modal-title">💾 Testni Saqlash</div>
-    <label class="form-label">Test nomi</label>
-    <input class="form-input" id="saveTitle" style="margin-bottom:12px">
-    <label class="form-label">Fan / Kategoriya</label>
-    <input class="form-input" id="saveCategory" placeholder="Masalan: Biologiya">
-    <div class="modal-row" style="margin-top:16px">
-      <button class="btn btn-outline" onclick="closeModal('saveModal')">Bekor</button>
-      <button class="btn btn-primary" onclick="saveTest()">💾 Saqlash</button>
+    <div class="mtitle">💾 Saqlash</div>
+    <label class="flbl">Test nomi</label>
+    <input class="finp" id="svTitle">
+    <label class="flbl">Fan / Kategoriya</label>
+    <input class="finp" id="svCat" placeholder="Masalan: Biologiya">
+    <div class="mrow">
+      <button class="btn btn-o" onclick="closeModal('saveM')">Bekor</button>
+      <button class="btn btn-p" onclick="doSave()">💾 Saqlash</button>
     </div>
   </div>
 </div>
 
-<!-- WORD EXPORT MODAL -->
-<div class="modal-overlay" id="exportModal">
+<!-- BO'LISH MODAL -->
+<div class="mover" id="splitM">
   <div class="modal">
-    <div class="modal-title">📥 Word Formatda Yuklab Olish</div>
-
-    <label class="form-label">Format tanlang:</label>
-    <div class="export-opts">
-      <div class="export-opt selected" id="expFmt-numbered" onclick="selectExportFmt('numbered')">
-        <span class="icon">📋</span>
-        Raqamlangan
-      </div>
-      <div class="export-opt" id="expFmt-clean" onclick="selectExportFmt('clean')">
-        <span class="icon">✨</span>
-        Tozalangan
-      </div>
-      <div class="export-opt" id="expFmt-answer" onclick="selectExportFmt('answer')">
-        <span class="icon">✅</span>
-        Javoblar bilan
-      </div>
-      <div class="export-opt" id="expFmt-teacher" onclick="selectExportFmt('teacher')">
-        <span class="icon">🎓</span>
-        O'qituvchi uchun
-      </div>
+    <div class="mtitle">✂️ Testni Bo'lish</div>
+    <div class="seg">
+      <button class="sbtn on" id="sg-count" onclick="setSplitMode('count')">Qismlar soni</button>
+      <button class="sbtn" id="sg-size" onclick="setSplitMode('size')">Savollar soni</button>
+      <button class="sbtn" id="sg-manual" onclick="setSplitMode('manual')">Qo'lda</button>
     </div>
-
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-      <input type="checkbox" id="expIncludeImages" style="width:18px;height:18px;cursor:pointer">
-      <label for="expIncludeImages" style="font-size:0.9rem;cursor:pointer">
-        Rasmlarni ham qo'shish
-      </label>
+    <div id="sm-count">
+      <label class="flbl">Nechta qismga?</label>
+      <input class="finp" type="number" id="spCnt" value="2" min="2" max="50" oninput="updateSpPrev()">
     </div>
-
-    <div class="modal-row">
-      <button class="btn btn-outline" onclick="closeModal('exportModal')">Bekor</button>
-      <button class="btn btn-primary" onclick="doExport()">📥 Yuklab olish</button>
+    <div id="sm-size" style="display:none">
+      <label class="flbl">Har qismda nechta savol?</label>
+      <input class="finp" type="number" id="spSz" value="10" min="1" max="500" oninput="updateSpPrev()">
+    </div>
+    <div id="sm-manual" style="display:none">
+      <label class="flbl">Qism chegaralari (masalan: 1-50, 51-100)</label>
+      <input class="finp" id="spMan" placeholder="1-50, 51-100" oninput="updateSpPrev()">
+    </div>
+    <div class="sprev" id="spPrev"></div>
+    <div class="mrow">
+      <button class="btn btn-o" onclick="closeModal('splitM')">Bekor</button>
+      <button class="btn btn-p" onclick="execSplit()">Bo'lishni tasdiqlash</button>
     </div>
   </div>
 </div>
 
-<!-- RASM MODAL (preview) -->
-<div class="modal-overlay" id="imgModal">
+<!-- WORD EXPORT -->
+<div class="mover" id="expM">
   <div class="modal">
-    <div class="modal-title">🖼 Rasm qo'shish</div>
-    <p style="font-size:0.85rem;color:var(--muted);margin-bottom:14px">
-      Savol uchun rasm yuklang. JPG, PNG, WebP (max 5MB)
-    </p>
-    <input type="file" id="imgFileInput" accept="image/*" onchange="handleImgUpload(event)"
-      style="width:100%;padding:10px;background:var(--surface2);border:1px solid var(--border);
-             border-radius:10px;color:var(--text);cursor:pointer">
-    <div id="imgPreviewWrap" style="margin-top:12px;display:none">
-      <img id="imgPreviewEl" style="width:100%;border-radius:10px;max-height:200px;object-fit:cover">
+    <div class="mtitle">📥 Word Yuklab Olish</div>
+    <div class="exopts">
+      <div class="exopt on" id="ef-numbered" onclick="setExpFmt('numbered')"><span class="ic">📋</span>Raqamlangan</div>
+      <div class="exopt" id="ef-clean" onclick="setExpFmt('clean')"><span class="ic">✨</span>Tozalangan</div>
+      <div class="exopt" id="ef-answer" onclick="setExpFmt('answer')"><span class="ic">✅</span>Javoblar bilan</div>
+      <div class="exopt" id="ef-teacher" onclick="setExpFmt('teacher')"><span class="ic">🎓</span>O'qituvchi</div>
     </div>
-    <div class="modal-row">
-      <button class="btn btn-outline" onclick="closeModal('imgModal')">Bekor</button>
-      <button class="btn btn-primary" onclick="applyImage()">✅ Qo'llash</button>
+    <div style="display:flex;align-items:center;gap:9px;margin-bottom:12px">
+      <input type="checkbox" id="exImgs" style="width:17px;height:17px;cursor:pointer">
+      <label for="exImgs" style="font-size:.88rem;cursor:pointer">Rasmlarni qo'shish</label>
+    </div>
+    <div class="mrow">
+      <button class="btn btn-o" onclick="closeModal('expM')">Bekor</button>
+      <button class="btn btn-p" onclick="doExport()">📥 Yuklab olish</button>
+    </div>
+  </div>
+</div>
+
+<!-- RASM MODAL -->
+<div class="mover" id="imgM">
+  <div class="modal">
+    <div class="mtitle">🖼 Rasm qo'shish</div>
+    <p style="font-size:.82rem;color:var(--muted);margin-bottom:12px">JPG, PNG (max 5MB)</p>
+    <input type="file" id="imgFile" accept="image/*" onchange="onImgFile(event)"
+      style="width:100%;padding:9px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;color:var(--text);cursor:pointer">
+    <div id="imgPrevWrap" style="margin-top:10px;display:none">
+      <img id="imgPrevEl" style="width:100%;border-radius:10px;max-height:180px;object-fit:cover">
+    </div>
+    <div class="mrow">
+      <button class="btn btn-o" onclick="closeModal('imgM')">Bekor</button>
+      <button class="btn btn-p" onclick="applyImg()">✅ Qo'llash</button>
     </div>
   </div>
 </div>
 
 <!-- O'CHIRISH TASDIQLASH -->
-<div class="modal-overlay" id="deleteModal">
+<div class="mover" id="delM">
   <div class="modal">
-    <div class="modal-title">🗑 O'chirishni tasdiqlash</div>
-    <p style="font-size:0.9rem;color:var(--muted);margin-bottom:16px" id="deleteModalMsg"></p>
-    <div class="modal-row">
-      <button class="btn btn-outline" onclick="closeModal('deleteModal')">Bekor</button>
-      <button class="btn btn-danger" onclick="execDelete()">O'chirish</button>
+    <div class="mtitle">🗑 O'chirishni tasdiqlash</div>
+    <p id="delMsg" style="font-size:.88rem;color:var(--muted);margin-bottom:14px"></p>
+    <div class="mrow">
+      <button class="btn btn-o" onclick="closeModal('delM')">Bekor</button>
+      <button class="btn btn-r" onclick="execDel()">O'chirish</button>
     </div>
   </div>
 </div>
 
-<!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<!-- ══ JAVASCRIPT ══════════════════════════════════════════ -->
 <script>
-// ─── STATE ────────────────────────────────────────────────
-let TEST_DATA   = null;   // {test_id, title, category, questions:[...]}
-let questions   = [];     // working copy
-let filteredIdx = null;   // null = show all
-let splitMode   = 'count';
-let exportFmt   = 'numbered';
-let imgTargetQi = null;   // qaysi savol uchun rasm yuklanmoqda
-let imgBase64   = null;
-let deleteTarget= null;   // {type:'q'|'selected', qi}
+// ─── STATE ───────────────────────────────────────────────────
+let qs=[], testData=null, splitMode='count', expFmt='numbered';
+let imgTargetI=null, imgB64=null, delTarget=null, filteredIdx=null;
 
-// ─── URL PARAMS ────────────────────────────────────────────
-const params   = new URLSearchParams(location.search);
-const TEST_ID  = params.get('id') || params.get('test_id') || '';
-const API_BASE = params.get('api') || '';   // Streamlit URL
+// ─── URL PARAMS ──────────────────────────────────────────────
+const P  = new URLSearchParams(location.search);
+const TID = P.get('id')||P.get('test_id')||'';
+const API = P.get('api')||'';
 
-// ─── INIT ──────────────────────────────────────────────────
-window.addEventListener('DOMContentLoaded', () => {
-  loadTest();
-});
+// ─── INIT ────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', loadTest);
 
-async function loadTest() {
-  if (!TEST_ID) {
-    // Demo ma'lumotlar
-    loadDemoData();
-    return;
-  }
-  try {
-    let url = API_BASE
-      ? `${API_BASE}/?api=test&id=${encodeURIComponent(TEST_ID)}`
-      : `/?api=test&id=${encodeURIComponent(TEST_ID)}`;
-    const res  = await fetch(url);
+async function loadTest(){
+  document.getElementById('loadEl').style.display='flex';
+  if(!TID && !API){ loadDemo(); return; }
+
+  // API URL dan testni yuklaymiz
+  const apiUrl = API
+    ? API.replace(/\/?$/, '') + '/?api=test&id=' + encodeURIComponent(TID)
+    : '/?api=test&id=' + encodeURIComponent(TID);
+
+  try{
+    const res  = await fetch(apiUrl, {cache:'no-cache'});
     const text = await res.text();
-    const data = parseJSON(text);
-    if (data && data.test && data.test.questions) {
-      initWithData(data.test);
+    const data = parseStreamlit(text);
+    if(data && data.ok && data.test && data.test.questions && data.test.questions.length){
+      initData(data.test);
     } else {
-      loadDemoData();
+      // Retry: ba'zan streamlit JSON ni code block ichida qaytaradi
+      const d2 = tryParseJson(text);
+      if(d2 && d2.test){ initData(d2.test); }
+      else { loadDemo(); toast('⚠️ API ulanmadi — demo rejim','err'); }
     }
-  } catch (e) {
-    loadDemoData();
+  } catch(e){
+    loadDemo();
+    toast('⚠️ Ulanish xatosi: '+e.message,'err');
   }
 }
 
-function loadDemoData() {
-  const demo = {
-    test_id:   'DEMO',
-    title:     'Demo Test',
-    category:  'Biologiya',
-    questions: Array.from({length: 5}, (_, i) => ({
-      q:       `Savol ${i+1}: Bu namuna savol?`,
-      options: ['A variant', 'B variant', 'C variant', 'D variant'],
-      correct: 0,
-      image:   null,
-      explanation: ''
+function loadDemo(){
+  initData({
+    test_id:'DEMO', title:'Demo Test', category:'Namuna',
+    questions: Array.from({length:3},(_,i)=>({
+      q:`Savol ${i+1}: Namuna savol matni?`,
+      options:['Birinchi variant','Ikkinchi variant','Uchinchi variant','To\'rtinchi variant'],
+      correct:0, image:null, explanation:''
+    }))
+  });
+}
+
+function initData(d){
+  testData = d;
+  qs = (d.questions||[]).map((q,i)=>({
+    i, q: q.q||q.question||q.text||'',
+    options:[...(q.options||['','','',''])],
+    correct: typeof q.correct==='number'?q.correct:
+             (typeof q.correct_index==='number'?q.correct_index:0),
+    image: q.image||null,
+    explanation: q.explanation||'',
+  }));
+  document.getElementById('hTitle').textContent = d.title||'Tahrirlash';
+  document.getElementById('svTitle').value = d.title||'';
+  document.getElementById('svCat').value   = d.category||'';
+  document.getElementById('loadEl').style.display='none';
+  updCnt();
+  render();
+}
+
+// ─── RENDER ──────────────────────────────────────────────────
+function render(){
+  const list = document.getElementById('qList');
+  list.innerHTML='';
+  const show = filteredIdx!==null ? filteredIdx : qs.map((_,i)=>i);
+  if(!show.length){
+    list.innerHTML='<div class="load"><span>Hech narsa topilmadi 🔍</span></div>';
+    return;
+  }
+  show.forEach(i=>list.appendChild(mkCard(qs[i],i)));
+}
+
+const LBL=['A','B','C','D','E','F','G','H'];
+
+function mkCard(q,i){
+  const d=document.createElement('div');
+  d.className='qcard'; d.id='qc-'+i;
+
+  const imgHtml = q.image
+    ? `<div class="imgz has" onclick="openImgModal(${i})">
+         <img src="${q.image}">
+         <button class="imgdel" onclick="event.stopPropagation();rmImg(${i})">✕</button>
+       </div>`
+    : `<div class="imgz" onclick="openImgModal(${i})">➕ Rasm qo'shish</div>`;
+
+  const opts = q.options.map((o,oi)=>`
+    <div class="orow ${oi===q.correct?'ok':''}" id="or-${i}-${oi}">
+      <div class="olbl ${oi===q.correct?'ok':''}" id="ol-${i}-${oi}"
+           onclick="setOk(${i},${oi})" title="To'g'ri javob qilish">${LBL[oi]||oi}</div>
+      <input class="oinp" id="oi-${i}-${oi}" value="${esc(o)}"
+             placeholder="Variant ${LBL[oi]||oi}"
+             oninput="upOpt(${i},${oi},this.value)">
+    </div>`).join('');
+
+  d.innerHTML=`
+    <div class="qhdr">
+      <span class="qnum">SAVOL #${i+1}</span>
+      <div class="qacts">
+        <button class="qab" onclick="mvQ(${i},-1)" title="Yuqoriga">↑</button>
+        <button class="qab" onclick="mvQ(${i},1)"  title="Pastga">↓</button>
+        <button class="qab d" onclick="delQ(${i})" title="O'chirish">🗑</button>
+      </div>
+    </div>
+    <div class="qbody">
+      ${imgHtml}
+      <textarea class="qtxt" id="qt-${i}" placeholder="Savol matni..."
+        oninput="upQ(${i},this.value)">${esc(q.q)}</textarea>
+      <div class="opts">${opts}</div>
+    </div>`;
+  return d;
+}
+
+// ─── UPDATE ──────────────────────────────────────────────────
+function upQ(i,v){ qs[i].q=v; }
+function upOpt(i,oi,v){ qs[i].options[oi]=v; }
+function updCnt(){
+  document.getElementById('hCnt').textContent=qs.length+'/1000';
+  document.getElementById('pf').style.width=Math.min(qs.length/10,100)+'%';
+}
+
+function setOk(i,oi){
+  const prev=qs[i].correct; qs[i].correct=oi;
+  [prev,oi].forEach(x=>{
+    const r=document.getElementById(`or-${i}-${x}`);
+    const l=document.getElementById(`ol-${i}-${x}`);
+    if(!r||!l) return;
+    const ok=x===oi;
+    r.className='orow'+(ok?' ok':'');
+    l.className='olbl'+(ok?' ok':'');
+    l.textContent=LBL[x]||x;
+  });
+  toast('✅ '+LBL[oi]+' — to\'g\'ri javob','ok');
+}
+
+// ─── SEARCH ──────────────────────────────────────────────────
+function filterQ(){
+  const v=document.getElementById('srch').value.trim().toLowerCase();
+  if(!v){ filteredIdx=null; render(); return; }
+  const n=parseInt(v);
+  if(!isNaN(n)&&n>=1&&n<=qs.length){ filteredIdx=[n-1]; }
+  else { filteredIdx=qs.map((q,i)=>q.q.toLowerCase().includes(v)?i:-1).filter(x=>x>=0); }
+  render();
+}
+
+// ─── ADD / DELETE / MOVE ─────────────────────────────────────
+function addQ(){
+  qs.push({i:qs.length,q:'',options:['','','',''],correct:0,image:null,explanation:''});
+  filteredIdx=null;
+  updCnt(); render();
+  setTimeout(()=>document.getElementById('qc-'+(qs.length-1))?.scrollIntoView({behavior:'smooth'}),100);
+}
+
+function delQ(i){
+  delTarget={type:'q',i};
+  document.getElementById('delMsg').textContent=`${i+1}-savol o'chiriladi. Davom etilsinmi?`;
+  openModal('delM');
+}
+function delAllConfirm(){
+  delTarget={type:'all'};
+  document.getElementById('delMsg').textContent='BARCHA savollar o\'chiriladi!';
+  openModal('delM');
+}
+function execDel(){
+  closeModal('delM');
+  if(!delTarget) return;
+  if(delTarget.type==='q'){ qs.splice(delTarget.i,1); qs.forEach((q,i)=>q.i=i); }
+  else if(delTarget.type==='all'){ qs=[]; }
+  updCnt(); render();
+  toast('🗑 O\'chirildi','ok');
+}
+
+function mvQ(i,d){
+  const j=i+d;
+  if(j<0||j>=qs.length) return;
+  [qs[i],qs[j]]=[qs[j],qs[i]];
+  qs.forEach((q,x)=>q.i=x);
+  render();
+  setTimeout(()=>document.getElementById('qc-'+j)?.scrollIntoView({block:'nearest'}),50);
+}
+
+// ─── IMAGE ───────────────────────────────────────────────────
+function openImgModal(i){
+  imgTargetI=i; imgB64=qs[i].image||null;
+  const p=document.getElementById('imgPrevWrap');
+  const img=document.getElementById('imgPrevEl');
+  if(imgB64){ img.src=imgB64; p.style.display='block'; }
+  else p.style.display='none';
+  openModal('imgM');
+}
+function onImgFile(e){
+  const f=e.target.files[0];
+  if(!f) return;
+  if(f.size>5*1024*1024){ toast('❌ 5MB dan oshmasin','err'); return; }
+  const r=new FileReader();
+  r.onload=ev=>{
+    imgB64=ev.target.result;
+    document.getElementById('imgPrevEl').src=imgB64;
+    document.getElementById('imgPrevWrap').style.display='block';
+  };
+  r.readAsDataURL(f);
+}
+function applyImg(){
+  if(imgTargetI===null) return;
+  qs[imgTargetI].image=imgB64;
+  closeModal('imgM'); render();
+  toast('🖼 Rasm qo\'shildi','ok');
+}
+function rmImg(i){ qs[i].image=null; render(); toast('🗑 Rasm o\'chirildi'); }
+
+// ─── SPLIT ───────────────────────────────────────────────────
+function openSplit(){ updateSpPrev(); openModal('splitM'); }
+
+function setSplitMode(m){
+  splitMode=m;
+  ['count','size','manual'].forEach(x=>{
+    document.getElementById('sm-'+x).style.display=x===m?'block':'none';
+    document.getElementById('sg-'+x).className='sbtn'+(x===m?' on':'');
+  });
+  updateSpPrev();
+}
+
+function updateSpPrev(){
+  const n=qs.length;
+  let parts=[];
+  if(splitMode==='count'){
+    const c=parseInt(document.getElementById('spCnt')?.value)||2;
+    const s=Math.ceil(n/c);
+    for(let i=0;i<c;i++){
+      const f=i*s,t=Math.min(f+s,n);
+      if(f>=n) break;
+      parts.push({label:`Qism ${i+1}`,f,t,cnt:t-f});
+    }
+  } else if(splitMode==='size'){
+    const s=parseInt(document.getElementById('spSz')?.value)||10;
+    for(let i=0;i*s<n;i++){
+      const f=i*s,t=Math.min(f+s,n);
+      parts.push({label:`Qism ${i+1}`,f,t,cnt:t-f});
+    }
+  } else {
+    const raw=document.getElementById('spMan')?.value||'';
+    parts=raw.split(',').map((seg,i)=>{
+      const m=seg.trim().match(/^(\d+)-(\d+)$/);
+      if(!m) return null;
+      const f=parseInt(m[1])-1,t=parseInt(m[2]);
+      return{label:`Qism ${i+1}`,f,t,cnt:t-f};
+    }).filter(Boolean);
+  }
+  const p=document.getElementById('spPrev');
+  if(!parts.length){p.innerHTML='';return;}
+  p.innerHTML=`<div style="font-size:.78rem;color:var(--muted);margin-bottom:7px">
+    ${n} ta savol → ${parts.length} ta qism</div>`+
+    parts.map(x=>`<div class="srow"><span>${x.label} (${x.f+1}–${x.t})</span><span>${x.cnt} ta</span></div>`).join('');
+}
+
+function execSplit(){
+  const n=qs.length;
+  let parts=[];
+  if(splitMode==='count'){
+    const c=parseInt(document.getElementById('spCnt').value)||2;
+    const s=Math.ceil(n/c);
+    for(let i=0;i<c;i++) parts.push(qs.slice(i*s,Math.min((i+1)*s,n)));
+  } else if(splitMode==='size'){
+    const s=parseInt(document.getElementById('spSz').value)||10;
+    for(let i=0;i*s<n;i++) parts.push(qs.slice(i*s,Math.min((i+1)*s,n)));
+  } else {
+    const raw=document.getElementById('spMan').value||'';
+    parts=raw.split(',').map(seg=>{
+      const m=seg.trim().match(/^(\d+)-(\d+)$/);
+      return m?qs.slice(parseInt(m[1])-1,parseInt(m[2])):null;
+    }).filter(Boolean);
+  }
+  if(!parts.length){toast('❌ Qism topilmadi','err');return;}
+  closeModal('splitM');
+  const title=testData?.title||'Test';
+  parts.forEach((part,i)=>dlTxt(part,`${title} — Qism ${i+1}`));
+  toast(`✂️ ${parts.length} ta qism yuklandi!`,'ok');
+}
+
+// ─── EXPORT WORD ─────────────────────────────────────────────
+function setExpFmt(f){
+  expFmt=f;
+  document.querySelectorAll('.exopt').forEach(e=>e.classList.remove('on'));
+  document.getElementById('ef-'+f)?.classList.add('on');
+}
+
+function doExport(){
+  closeModal('expM');
+  const title=testData?.title||'Test';
+  const inclImg=document.getElementById('exImgs').checked;
+  let html=`<html><head><meta charset="UTF-8">
+    <style>body{font-family:Arial,sans-serif;font-size:12pt;line-height:1.6}
+    h1{font-size:15pt;text-align:center;margin-bottom:18px}
+    .q{margin-bottom:16px;page-break-inside:avoid}
+    .qn{font-weight:bold}.opt{margin-left:18px}
+    .opt.ok{font-weight:bold}.ak{border-top:2px solid #000;margin-top:28px;padding-top:12px}
+    img{max-width:180px;max-height:130px}</style>
+    </head><body><h1>${esc(title)}</h1>`;
+
+  qs.forEach((q,i)=>{
+    html+=`<div class="q"><p class="qn">${i+1}. ${esc(q.q)}</p>`;
+    if(inclImg&&q.image) html+=`<p><img src="${q.image}"></p>`;
+    q.options.forEach((o,oi)=>{
+      const ok=oi===q.correct;
+      const show=expFmt==='answer'||expFmt==='teacher';
+      html+=`<p class="opt${show&&ok?' ok':''}">${show&&ok?'✓ ':''}${LBL[oi]}) ${esc(o)}</p>`;
+    });
+    if(expFmt==='teacher'&&q.explanation)
+      html+=`<p style="color:#555;font-style:italic;margin-left:18px">Izoh: ${esc(q.explanation)}</p>`;
+    html+=`</div>`;
+  });
+  if(expFmt==='teacher'||expFmt==='answer'){
+    html+=`<div class="ak"><h2>Javoblar kaliti</h2><p>
+      ${qs.map((q,i)=>`${i+1}-${LBL[q.correct]}`).join(' | ')}</p></div>`;
+  }
+  html+=`</body></html>`;
+  const blob=new Blob([html],{type:'application/msword'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download=title+'.doc'; a.click();
+  toast('📥 Word fayl yuklandi!','ok');
+}
+
+// ─── SAVE ────────────────────────────────────────────────────
+async function doSave(){
+  const title=document.getElementById('svTitle').value.trim();
+  const cat  =document.getElementById('svCat').value.trim();
+  if(!title){toast('❌ Test nomini kiriting','err');return;}
+  closeModal('saveM');
+
+  const payload={
+    ...(testData||{}), title, category:cat,
+    questions: qs.map(q=>({
+      q:q.q, question:q.q, options:q.options,
+      correct:q.correct, correct_index:q.correct,
+      image:q.image||null, explanation:q.explanation||''
     }))
   };
-  initWithData(demo);
-  showToast('⚠️ Demo rejim — haqiqiy test yuklanmadi', 'error');
-}
 
-function initWithData(data) {
-  TEST_DATA = data;
-  questions = (data.questions || []).map((q, i) => ({
-    qi:          i,
-    q:           q.q || q.question || q.text || '',
-    options:     [...(q.options || [])],
-    correct:     typeof q.correct === 'number' ? q.correct :
-                 (typeof q.correct_index === 'number' ? q.correct_index : 0),
-    image:       q.image || null,
-    explanation: q.explanation || '',
-    _dirty:      false,
-  }));
-  document.getElementById('headerTitle').textContent = data.title || 'Tahrirlash';
-  document.getElementById('saveTitle').value    = data.title || '';
-  document.getElementById('saveCategory').value = data.category || '';
-  updateCounter();
-  renderAll();
-  document.getElementById('loadingEl').style.display = 'none';
-}
-
-// ─── RENDER ────────────────────────────────────────────────
-function renderAll() {
-  const list   = document.getElementById('questionsList');
-  const show   = filteredIdx !== null ? filteredIdx : questions.map((_,i) => i);
-  list.innerHTML = '';
-  if (!show.length) {
-    list.innerHTML = '<div class="loading"><span>Hech narsa topilmadi 🔍</span></div>';
-    return;
-  }
-  show.forEach(i => list.appendChild(buildCard(questions[i], i)));
-}
-
-function buildCard(q, i) {
-  const LABELS = ['A','B','C','D','E','F','G','H'];
-  const div = document.createElement('div');
-  div.className  = 'question-card';
-  div.id         = `q-card-${i}`;
-  div.dataset.qi = i;
-
-  // Image base64 or url
-  const imgHtml = q.image
-    ? `<div class="img-zone has-img" onclick="openImgModal(${i})">
-         <img src="${q.image}" alt="rasm">
-         <button class="img-remove" onclick="event.stopPropagation();removeImage(${i})">✕</button>
-       </div>`
-    : `<div class="img-zone" onclick="openImgModal(${i})">
-         ➕ Rasm qo'shish
-       </div>`;
-
-  const optionsHtml = q.options.map((opt, oi) => `
-    <div class="option-row ${oi === q.correct ? 'correct' : ''}" id="opt-row-${i}-${oi}">
-      <div class="opt-label ${oi === q.correct ? 'correct' : ''}"
-           id="opt-lbl-${i}-${oi}"
-           onclick="setCorrect(${i},${oi})"
-           title="To'g'ri javob qilish">
-        ${LABELS[oi] || oi}
-      </div>
-      <input class="opt-input"
-             id="opt-${i}-${oi}"
-             value="${escHtml(opt)}"
-             placeholder="Variant ${LABELS[oi] || oi}"
-             oninput="updateOption(${i},${oi},this.value)"
-             onkeydown="optKeyNav(event,${i},${oi})">
-    </div>
-  `).join('');
-
-  div.innerHTML = `
-    <div class="q-header">
-      <span class="q-num">SAVOL #${i+1}</span>
-      <div class="q-actions">
-        <button class="q-act-btn" onclick="moveQ(${i},-1)" title="Yuqoriga">↑</button>
-        <button class="q-act-btn" onclick="moveQ(${i},1)" title="Pastga">↓</button>
-        <button class="q-act-btn del" onclick="confirmDeleteQ(${i})" title="O'chirish">🗑</button>
-      </div>
-    </div>
-    <div class="q-body">
-      ${imgHtml}
-      <textarea class="q-text-input"
-                id="q-text-${i}"
-                placeholder="Savol matni..."
-                oninput="updateQText(${i},this.value)">${escHtml(q.q)}</textarea>
-      <div class="options-list">${optionsHtml}</div>
-    </div>
-  `;
-  return div;
-}
-
-// ─── UPDATE FUNCTIONS ──────────────────────────────────────
-function updateQText(i, val) {
-  questions[i].q = val;
-  questions[i]._dirty = true;
-  setProgress();
-}
-
-function updateOption(i, oi, val) {
-  questions[i].options[oi] = val;
-  questions[i]._dirty = true;
-}
-
-function setCorrect(i, oi) {
-  const prev = questions[i].correct;
-  questions[i].correct = oi;
-  questions[i]._dirty  = true;
-
-  // Visual update without full re-render
-  const LABELS = ['A','B','C','D','E','F','G','H'];
-  [prev, oi].forEach(idx => {
-    const row = document.getElementById(`opt-row-${i}-${idx}`);
-    const lbl = document.getElementById(`opt-lbl-${i}-${idx}`);
-    if (!row || !lbl) return;
-    const isCorr = idx === oi;
-    row.className = 'option-row' + (isCorr ? ' correct' : '');
-    lbl.className = 'opt-label'  + (isCorr ? ' correct' : '');
-    lbl.textContent = LABELS[idx] || idx;
-  });
-  showToast(`✅ ${LABELS[oi]} — to'g'ri javob`, 'success');
-}
-
-function updateCounter() {
-  document.getElementById('headerCounter').textContent =
-    `${questions.length}/1000`;
-  setProgress();
-}
-
-function setProgress() {
-  const pct = Math.min(questions.length / 10, 100);
-  document.getElementById('progressFill').style.width = pct + '%';
-}
-
-// ─── SEARCH ────────────────────────────────────────────────
-function filterQuestions() {
-  const q = document.getElementById('searchInput').value.trim().toLowerCase();
-  if (!q) {
-    filteredIdx = null;
-    renderAll();
-    return;
-  }
-  const num = parseInt(q);
-  if (!isNaN(num) && num >= 1 && num <= questions.length) {
-    filteredIdx = [num - 1];
-  } else {
-    filteredIdx = questions
-      .map((qo, i) => qo.q.toLowerCase().includes(q) ? i : -1)
-      .filter(i => i >= 0);
-  }
-  renderAll();
-}
-
-// ─── ADD / DELETE / MOVE ───────────────────────────────────
-function addQuestion() {
-  const newQ = {
-    qi:    questions.length,
-    q:     '',
-    options: ['', '', '', ''],
-    correct: 0,
-    image:  null,
-    explanation: '',
-    _dirty: true,
-  };
-  questions.push(newQ);
-  updateCounter();
-  renderAll();
-  // Scroll to new
-  setTimeout(() => {
-    const el = document.getElementById(`q-card-${questions.length - 1}`);
-    if (el) el.scrollIntoView({ behavior: 'smooth' });
-  }, 100);
-}
-
-function confirmDeleteQ(i) {
-  deleteTarget = { type: 'q', qi: i };
-  document.getElementById('deleteModalMsg').textContent =
-    `${i+1}-savol o'chiriladi. Bu amalni qaytarib bo'lmaydi!`;
-  openModal('deleteModal');
-}
-
-function confirmDeleteSelected() {
-  deleteTarget = { type: 'selected' };
-  document.getElementById('deleteModalMsg').textContent =
-    `Tanlangan barcha savollar o'chiriladi. Davom etilsinmi?`;
-  openModal('deleteModal');
-}
-
-function execDelete() {
-  closeModal('deleteModal');
-  if (!deleteTarget) return;
-  if (deleteTarget.type === 'q') {
-    questions.splice(deleteTarget.qi, 1);
-    questions.forEach((q, i) => q.qi = i);
-    showToast('🗑 Savol o\'chirildi', 'success');
-  }
-  updateCounter();
-  renderAll();
-}
-
-function moveQ(i, dir) {
-  const j = i + dir;
-  if (j < 0 || j >= questions.length) return;
-  [questions[i], questions[j]] = [questions[j], questions[i]];
-  questions.forEach((q, idx) => q.qi = idx);
-  renderAll();
-  // Keep scroll position
-  setTimeout(() => {
-    document.getElementById(`q-card-${j}`)?.scrollIntoView({ block: 'nearest' });
-  }, 50);
-}
-
-// ─── IMAGE ─────────────────────────────────────────────────
-function openImgModal(i) {
-  imgTargetQi = i;
-  imgBase64   = questions[i].image || null;
-  const prev  = document.getElementById('imgPreviewWrap');
-  const img   = document.getElementById('imgPreviewEl');
-  if (imgBase64) {
-    img.src = imgBase64;
-    prev.style.display = 'block';
-  } else {
-    prev.style.display = 'none';
-  }
-  openModal('imgModal');
-}
-
-function handleImgUpload(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  if (file.size > 5 * 1024 * 1024) {
-    showToast('❌ Rasm hajmi 5MB dan oshmasin', 'error');
-    return;
-  }
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    imgBase64 = e.target.result;
-    const prev = document.getElementById('imgPreviewWrap');
-    const img  = document.getElementById('imgPreviewEl');
-    img.src = imgBase64;
-    prev.style.display = 'block';
-  };
-  reader.readAsDataURL(file);
-}
-
-function applyImage() {
-  if (imgTargetQi === null) return;
-  questions[imgTargetQi].image = imgBase64;
-  questions[imgTargetQi]._dirty = true;
-  closeModal('imgModal');
-  renderAll();
-  showToast('🖼 Rasm qo\'shildi', 'success');
-}
-
-function removeImage(i) {
-  questions[i].image = null;
-  questions[i]._dirty = true;
-  renderAll();
-  showToast('🗑 Rasm o\'chirildi');
-}
-
-// ─── SPLIT ─────────────────────────────────────────────────
-function setSplitMode(mode) {
-  splitMode = mode;
-  ['count','size','manual'].forEach(m => {
-    document.getElementById(`splitMode${m.charAt(0).toUpperCase()+m.slice(1)}`).style.display =
-      m === mode ? 'block' : 'none';
-    document.getElementById(`seg-${m}`).className =
-      'seg-btn' + (m === mode ? ' active' : '');
-  });
-  updateSplitPreview();
-}
-
-function openSplitModal() {
-  updateSplitPreview();
-  openModal('splitModal');
-}
-
-function updateSplitPreview() {
-  const n = questions.length;
-  let parts = [];
-
-  if (splitMode === 'count') {
-    const cnt = parseInt(document.getElementById('splitCount')?.value) || 2;
-    const sz  = Math.ceil(n / cnt);
-    for (let i = 0; i < cnt; i++) {
-      const from = i * sz;
-      const to   = Math.min(from + sz, n);
-      if (from >= n) break;
-      parts.push({ label: `Qism ${i+1}`, from, to, count: to - from });
-    }
-  } else if (splitMode === 'size') {
-    const sz = parseInt(document.getElementById('splitSize')?.value) || 10;
-    for (let i = 0; i * sz < n; i++) {
-      const from = i * sz;
-      const to   = Math.min(from + sz, n);
-      parts.push({ label: `Qism ${i+1}`, from, to, count: to - from });
-    }
-  } else {
-    const raw = document.getElementById('splitManual')?.value || '';
-    parts = raw.split(',').map((seg, i) => {
-      const m = seg.trim().match(/^(\d+)-(\d+)$/);
-      if (!m) return null;
-      const from = parseInt(m[1]) - 1;
-      const to   = parseInt(m[2]);
-      return { label: `Qism ${i+1}`, from, to, count: to - from };
-    }).filter(Boolean);
+  let saved=false;
+  if(API && TID){
+    try{
+      const r=await fetch(API.replace(/\/?$/,'')+'/?api=save_test',{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)
+      });
+      const t=await r.text();
+      const d=parseStreamlit(t);
+      if(d&&d.ok) saved=true;
+    } catch(e){}
   }
 
-  const prev = document.getElementById('splitPreview');
-  if (!parts.length) { prev.innerHTML = ''; return; }
-
-  prev.innerHTML = '<div style="font-size:0.82rem;color:var(--muted);margin-bottom:8px">' +
-    `Jami: ${n} ta savol → ${parts.length} ta qism` +
-  '</div>' +
-  parts.map(p =>
-    `<div class="split-row">
-      <span>${p.label} (${p.from+1}–${p.to})</span>
-      <span>${p.count} ta savol</span>
-    </div>`
-  ).join('');
+  // TXT ham yuklaymiz
+  dlTxt(qs, title);
+  toast(saved?'✅ Saqlandi va TXT yuklab olindi!':'✅ TXT yuklab olindi!','ok');
 }
 
-function executeSplit() {
-  const n = questions.length;
-  let parts = [];
-
-  if (splitMode === 'count') {
-    const cnt = parseInt(document.getElementById('splitCount').value) || 2;
-    const sz  = Math.ceil(n / cnt);
-    for (let i = 0; i < cnt; i++) {
-      const from = i * sz, to = Math.min(from + sz, n);
-      if (from >= n) break;
-      parts.push(questions.slice(from, to));
-    }
-  } else if (splitMode === 'size') {
-    const sz = parseInt(document.getElementById('splitSize').value) || 10;
-    for (let i = 0; i * sz < n; i++) {
-      parts.push(questions.slice(i * sz, Math.min((i+1)*sz, n)));
-    }
-  } else {
-    const raw = document.getElementById('splitManual').value || '';
-    parts = raw.split(',').map(seg => {
-      const m = seg.trim().match(/^(\d+)-(\d+)$/);
-      if (!m) return null;
-      return questions.slice(parseInt(m[1])-1, parseInt(m[2]));
-    }).filter(Boolean);
-  }
-
-  if (!parts.length) { showToast('❌ Qism topilmadi', 'error'); return; }
-
-  closeModal('splitModal');
-
-  parts.forEach((part, i) => {
-    const title = (TEST_DATA?.title || 'Test') + ` — Qism ${i+1}`;
-    downloadTxtFile(part, title);
-  });
-
-  showToast(`✂️ ${parts.length} ta qism yuklandi!`, 'success');
-}
-
-function downloadTxtFile(qs, title) {
-  const LABELS = ['A','B','C','D','E','F','G','H'];
-  const lines  = [`Test: ${title}`, '='.repeat(50), ''];
-  qs.forEach((q, i) => {
+// ─── HELPERS ─────────────────────────────────────────────────
+function dlTxt(qArr,title){
+  const lines=[`Test: ${title}`,'='.repeat(50),''];
+  qArr.forEach((q,i)=>{
     lines.push(`${i+1}. ${q.q}`);
-    q.options.forEach((opt, oi) => {
-      const mark = oi === q.correct ? '*' : ' ';
-      lines.push(`${mark}${LABELS[oi]}) ${opt}`);
+    q.options.forEach((o,oi)=>{
+      lines.push(`${oi===q.correct?'*':' '}${LBL[oi]}) ${o}`);
     });
-    if (q.explanation) lines.push(`   Izoh: ${q.explanation}`);
+    if(q.explanation) lines.push(`   Izoh: ${q.explanation}`);
     lines.push('');
   });
-  downloadText(lines.join('\n'), `${title}.txt`);
+  const blob=new Blob([lines.join('\n')],{type:'text/plain;charset=utf-8'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download=title+'.txt'; a.click();
 }
 
-// ─── EXPORT (WORD via HTML→Blob) ──────────────────────────
-function selectExportFmt(fmt) {
-  exportFmt = fmt;
-  document.querySelectorAll('.export-opt').forEach(el => el.classList.remove('selected'));
-  document.getElementById(`expFmt-${fmt}`)?.classList.add('selected');
-}
-
-function openExportModal() { openModal('exportModal'); }
-
-function doExport() {
-  closeModal('exportModal');
-  const title    = TEST_DATA?.title || 'Test';
-  const inclImgs = document.getElementById('expIncludeImages').checked;
-  const LABELS   = ['A','B','C','D','E','F','G','H'];
-
-  let html = `
-    <html><head><meta charset="UTF-8">
-    <style>
-      body { font-family: Arial, sans-serif; font-size: 12pt; line-height: 1.6; }
-      h1   { font-size: 16pt; text-align: center; margin-bottom: 20px; }
-      .q   { margin-bottom: 18px; page-break-inside: avoid; }
-      .q-num { font-weight: bold; }
-      .opt   { margin-left: 20px; }
-      .opt.correct { font-weight: bold; }
-      .ans-key { border-top: 2px solid #000; margin-top: 30px; padding-top: 15px; }
-      img  { max-width: 200px; max-height: 150px; }
-    </style>
-    </head><body>
-    <h1>${escHtml(title)}</h1>
-  `;
-
-  questions.forEach((q, i) => {
-    html += `<div class="q">`;
-    html += `<p class="q-num">${i+1}. ${escHtml(q.q)}</p>`;
-    if (inclImgs && q.image) {
-      html += `<p><img src="${q.image}"></p>`;
-    }
-    q.options.forEach((opt, oi) => {
-      const isCorr = oi === q.correct;
-      const showCorr = exportFmt === 'answer' || exportFmt === 'teacher';
-      html += `<p class="opt ${showCorr && isCorr ? 'correct' : ''}">`;
-      if (showCorr && isCorr) html += '✓ ';
-      html += `${LABELS[oi]}) ${escHtml(opt)}</p>`;
-    });
-    if (exportFmt === 'teacher' && q.explanation) {
-      html += `<p style="color:#555;font-style:italic;margin-left:20px">Izoh: ${escHtml(q.explanation)}</p>`;
-    }
-    html += `</div>`;
-  });
-
-  // Answer key
-  if (exportFmt === 'teacher' || exportFmt === 'answer') {
-    html += `<div class="ans-key"><h2>Javoblar kaliti</h2><p>`;
-    html += questions.map((q, i) =>
-      `${i+1}-${LABELS[q.correct]}`
-    ).join('  |  ');
-    html += `</p></div>`;
-  }
-
-  html += `</body></html>`;
-
-  const blob = new Blob([html], { type: 'application/msword' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = `${title}.doc`;
-  a.click();
-  URL.revokeObjectURL(url);
-  showToast('📥 Word fayl yuklandi!', 'success');
-}
-
-// ─── SAVE ──────────────────────────────────────────────────
-function openSaveModal() { openModal('saveModal'); }
-
-async function saveTest() {
-  const title    = document.getElementById('saveTitle').value.trim();
-  const category = document.getElementById('saveCategory').value.trim();
-
-  if (!title) { showToast('❌ Test nomini kiriting', 'error'); return; }
-
-  closeModal('saveModal');
-
-  const payload = {
-    ...(TEST_DATA || {}),
-    title,
-    category,
-    questions: questions.map(q => ({
-      q:           q.q,
-      question:    q.q,
-      options:     q.options,
-      correct:     q.correct,
-      correct_index: q.correct,
-      image:       q.image || null,
-      explanation: q.explanation || '',
-    }))
-  };
-
-  // TXT sifatida yuklab olish
-  downloadTxtFile(questions, title);
-
-  // Agar bot API mavjud bo'lsa — saqlaymiz
-  if (API_BASE) {
-    try {
-      await fetch(`${API_BASE}/?api=save_test`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      showToast('✅ Saqlandi!', 'success');
-    } catch {
-      showToast('✅ TXT yuklab olindi (offline rejim)', 'success');
-    }
-  } else {
-    showToast('✅ TXT yuklab olindi!', 'success');
-  }
-}
-
-// ─── KEYBOARD NAV ──────────────────────────────────────────
-function optKeyNav(event, i, oi) {
-  if (event.key === 'Enter') {
-    event.preventDefault();
-    const next = document.getElementById(`opt-${i}-${oi+1}`) ||
-                 document.getElementById(`q-text-${i+1}`);
-    next?.focus();
-  }
-}
-
-// ─── UTILS ─────────────────────────────────────────────────
-function goBack() {
-  if (window.history.length > 1) history.back();
-  else window.close();
-}
-
-function openModal(id) {
-  document.getElementById(id).classList.add('open');
-}
-function closeModal(id) {
-  document.getElementById(id).classList.remove('open');
-}
-
-function showToast(msg, type = '') {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.className   = `toast ${type}`;
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 2800);
-}
-
-function escHtml(str) {
-  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function downloadText(content, filename) {
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href = url; a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-function parseJSON(html) {
-  try { return JSON.parse(html.trim()); } catch {}
-  const m = html.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (m) { try { return JSON.parse(m[1].trim()); } catch {} }
-  const m2 = html.match(/(\{"ok"[\s\S]*?\})\s*(?:<|\n|$)/);
-  if (m2) { try { return JSON.parse(m2[1]); } catch {} }
+function parseStreamlit(html){
+  // 1. To'g'ri JSON
+  try{ return JSON.parse(html.trim()); } catch{}
+  // 2. ```json...``` blok
+  const m1=html.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if(m1){try{return JSON.parse(m1[1].trim());}catch{}}
+  // 3. {...} pattern
+  const m2=html.match(/(\{[\s\S]*\})/);
+  if(m2){try{return JSON.parse(m2[1]);}catch{}}
   return null;
 }
 
-// Close modal on overlay click
-document.querySelectorAll('.modal-overlay').forEach(el => {
-  el.addEventListener('click', e => {
-    if (e.target === el) el.classList.remove('open');
-  });
+function tryParseJson(t){
+  try{return JSON.parse(t.trim());}catch{}
+  return null;
+}
+
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function openModal(id){ document.getElementById(id).classList.add('on'); }
+function closeModal(id){ document.getElementById(id).classList.remove('on'); }
+
+function toast(msg,type=''){
+  const e=document.getElementById('toast');
+  e.textContent=msg; e.className='toast '+(type==='ok'?'ok':type==='err'?'err':'');
+  e.classList.add('show');
+  setTimeout(()=>e.classList.remove('show'),2800);
+}
+
+document.querySelectorAll('.mover').forEach(el=>{
+  el.addEventListener('click',e=>{ if(e.target===el) el.classList.remove('on'); });
 });
 </script>
 </body>
