@@ -6,30 +6,57 @@ from utils import ram_cache as ram
 from handlers import webauth
 
 
+async def _send_blocked_msg(bot, uid: int):
+    """Bloklangan userga xabar + tugmalar yuborish."""
+    from config import ADMIN_USERNAME
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(
+        text="📩 Adminga murojat",
+        url=f"https://t.me/{ADMIN_USERNAME}"
+    ))
+    b.row(InlineKeyboardButton(
+        text="🤖 Bot orqali yozish",
+        callback_data="contact_admin"
+    ))
+    try:
+        await bot.send_message(
+            uid,
+            "🚫 <b>Hisobingiz bloklangan</b>\n\n"
+            "Botdan foydalanish imkoni to\'xtatilgan.\n\n"
+            "Muammo bo\'lsa yoki to\'lov qilgan bo\'lsangiz\n"
+            "admin bilan bog\'laning 👇",
+            reply_markup=b.as_markup()
+        )
+    except Exception:
+        pass
+
+
 class BlockedUserMiddleware(BaseMiddleware):
     """
     Bloklangan foydalanuvchilar botdan umuman foydalana olmasin.
-    is_user_blocked() — O(1) tez tekshiruv (set orqali).
+    Message, CallbackQuery, PollAnswer — barcha eventlar tekshiriladi.
     """
     async def __call__(self, handler, event, data):
+        from aiogram.types import PollAnswer as _PA
         uid = None
         if isinstance(event, Message):
             uid = event.from_user.id if event.from_user else None
         elif isinstance(event, CallbackQuery):
             uid = event.from_user.id if event.from_user else None
+        elif isinstance(event, _PA):
+            uid = event.user.id if event.user else None
 
         if uid and ram.is_user_blocked(uid):
-            if isinstance(event, Message):
+            # contact_admin callback — bloklangan user ham murojat qilsin
+            if isinstance(event, CallbackQuery) and event.data == "contact_admin":
+                return await handler(event, data)
+
+            bot = data.get("bot")
+            if bot:
+                await _send_blocked_msg(bot, uid)
+            if isinstance(event, CallbackQuery):
                 try:
-                    await event.answer(
-                        "🚫 Siz botdan bloklangansiz.\n"
-                        "Muammo bo'lsa admin bilan bog'laning."
-                    )
-                except Exception:
-                    pass
-            elif isinstance(event, CallbackQuery):
-                try:
-                    await event.answer("🚫 Siz bloklangansiz.", show_alert=True)
+                    await event.answer("🚫 Hisobingiz bloklangan!", show_alert=True)
                 except Exception:
                     pass
             return   # Handler ga o'tkazmaymiz
@@ -151,6 +178,7 @@ async def main():
     dp  = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(BlockedUserMiddleware())
     dp.callback_query.middleware(BlockedUserMiddleware())
+    dp.poll_answer.middleware(BlockedUserMiddleware())
     dp.message.middleware(ClearMenuMiddleware())
     dp.callback_query.middleware(ClearMenuMiddleware())
     dp.message.middleware(GroupTrackerMiddleware())
