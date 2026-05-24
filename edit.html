@@ -1,0 +1,1297 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Test Tahrirlash</title>
+<style>
+/* ══ ASOSIY O'ZGARUVCHILAR ══════════════════════════════════ */
+:root {
+  --bg:        #0a0e1a;
+  --surface:   #111827;
+  --surface2:  #1a2234;
+  --border:    rgba(255,255,255,0.08);
+  --accent:    #00d4ff;
+  --accent2:   #7c3aed;
+  --green:     #10b981;
+  --red:       #ef4444;
+  --yellow:    #f59e0b;
+  --text:      #f1f5f9;
+  --muted:     #64748b;
+  --radius:    14px;
+  --shadow:    0 8px 32px rgba(0,0,0,0.4);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ══ HEADER ════════════════════════════════════════════════ */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(10,14,26,0.95);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-back {
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; font-size: 18px;
+  transition: background 0.2s;
+}
+.header-back:hover { background: var(--surface); }
+
+.header-title {
+  flex: 1;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.header-counter {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 4px 12px;
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+
+/* ══ TOOLBAR ═══════════════════════════════════════════════ */
+.toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.toolbar::-webkit-scrollbar { display: none; }
+
+.tool-btn {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+.tool-btn:hover { background: rgba(255,255,255,0.08); }
+.tool-btn.primary { background: var(--accent); color: #000; border-color: var(--accent); }
+.tool-btn.danger  { background: rgba(239,68,68,0.15); color: var(--red); border-color: rgba(239,68,68,0.3); }
+.tool-btn.success { background: rgba(16,185,129,0.15); color: var(--green); border-color: rgba(16,185,129,0.3); }
+.tool-btn.purple  { background: rgba(124,58,237,0.15); color: #a78bfa; border-color: rgba(124,58,237,0.3); }
+
+/* ══ SEARCH ════════════════════════════════════════════════ */
+.search-bar {
+  display: flex; gap: 8px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.search-input {
+  flex: 1;
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.9rem;
+  outline: none;
+}
+.search-input:focus { border-color: var(--accent); }
+.search-input::placeholder { color: var(--muted); }
+
+.add-btn {
+  padding: 9px 18px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: #000;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+  white-space: nowrap;
+  transition: opacity 0.2s;
+}
+.add-btn:hover { opacity: 0.9; }
+
+/* ══ SAVOLLAR ══════════════════════════════════════════════ */
+.questions-list {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 100px;
+}
+
+.question-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: border-color 0.2s;
+}
+.question-card:hover { border-color: rgba(0,212,255,0.3); }
+
+.q-header {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  gap: 8px;
+}
+
+.q-num {
+  font-weight: 700;
+  color: var(--accent);
+  font-size: 0.85rem;
+  min-width: 70px;
+}
+
+.q-actions {
+  margin-left: auto;
+  display: flex; gap: 6px;
+}
+
+.q-act-btn {
+  width: 30px; height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.2s;
+}
+.q-act-btn:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+.q-act-btn.del:hover { background: rgba(239,68,68,0.15); color: var(--red); border-color: rgba(239,68,68,0.3); }
+
+.q-body { padding: 12px 14px; }
+
+/* Rasm */
+.img-zone {
+  border: 2px dashed rgba(255,255,255,0.1);
+  border-radius: 10px;
+  padding: 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  margin-bottom: 10px;
+  transition: border-color 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+.img-zone:hover { border-color: var(--accent); color: var(--accent); }
+.img-zone.has-img { border-style: solid; border-color: var(--accent); padding: 0; }
+.img-zone img { width: 100%; border-radius: 8px; display: block; max-height: 180px; object-fit: cover; }
+.img-remove {
+  position: absolute; top: 6px; right: 6px;
+  background: rgba(239,68,68,0.9);
+  color: white; border: none; border-radius: 6px;
+  padding: 3px 8px; font-size: 12px; cursor: pointer;
+}
+
+/* Savol matni */
+.q-text-input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.92rem;
+  resize: vertical;
+  min-height: 60px;
+  outline: none;
+  margin-bottom: 10px;
+  font-family: inherit;
+  line-height: 1.5;
+}
+.q-text-input:focus { border-color: var(--accent); }
+
+/* Variantlar */
+.options-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.option-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.opt-label {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700;
+  font-size: 0.82rem;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 2px solid var(--border);
+  color: var(--muted);
+}
+.opt-label.correct {
+  background: var(--green);
+  border-color: var(--green);
+  color: white;
+}
+
+.opt-input {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.88rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.opt-input:focus { border-color: rgba(255,255,255,0.2); }
+.option-row.correct .opt-input {
+  border-color: rgba(16,185,129,0.4);
+  background: rgba(16,185,129,0.08);
+}
+
+/* ══ MODAL ══════════════════════════════════════════════════ */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(4px);
+  z-index: 1000;
+  justify-content: center;
+  align-items: flex-end;
+  padding: 16px;
+}
+.modal-overlay.open { display: flex; }
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px 20px 16px 16px;
+  padding: 24px;
+  width: 100%;
+  max-width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.modal-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-bottom: 20px;
+  color: var(--accent);
+}
+
+.modal-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+/* ══ SEGMENT CONTROL ═══════════════════════════════════════ */
+.seg-control {
+  display: flex;
+  background: var(--surface2);
+  border-radius: 10px;
+  padding: 4px;
+  margin-bottom: 16px;
+}
+.seg-btn {
+  flex: 1;
+  padding: 8px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+.seg-btn.active {
+  background: var(--accent);
+  color: #000;
+}
+
+/* ══ INPUT/LABEL ═══════════════════════════════════════════ */
+.form-label {
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin-bottom: 6px;
+  display: block;
+}
+.form-input {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.form-input:focus { border-color: var(--accent); }
+
+/* ══ BTN ═══════════════════════════════════════════════════ */
+.btn {
+  padding: 11px 20px;
+  border-radius: 10px;
+  border: none;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex: 1;
+}
+.btn-primary { background: var(--accent); color: #000; }
+.btn-primary:hover { opacity: 0.9; }
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.btn-outline:hover { background: rgba(255,255,255,0.06); }
+.btn-danger { background: rgba(239,68,68,0.15); color: var(--red); border: 1px solid rgba(239,68,68,0.3); }
+.btn-success { background: rgba(16,185,129,0.15); color: var(--green); border: 1px solid rgba(16,185,129,0.3); }
+
+/* ══ TOAST ══════════════════════════════════════════════════ */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(60px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 20px;
+  font-size: 0.88rem;
+  font-weight: 500;
+  z-index: 2000;
+  transition: transform 0.3s ease;
+  white-space: nowrap;
+  display: flex; align-items: center; gap: 8px;
+}
+.toast.show { transform: translateX(-50%) translateY(0); }
+.toast.success { border-color: rgba(16,185,129,0.4); color: var(--green); }
+.toast.error   { border-color: rgba(239,68,68,0.4); color: var(--red); }
+
+/* ══ LOADING ════════════════════════════════════════════════ */
+.loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  color: var(--muted);
+  gap: 14px;
+}
+.spinner {
+  width: 36px; height: 36px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ══ BOTTOM SAFE AREA ══════════════════════════════════════ */
+.bottom-bar {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  background: rgba(10,14,26,0.97);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid var(--border);
+  padding: 12px 16px;
+  display: flex; gap: 8px;
+}
+
+/* ══ PROGRESS BAR ══════════════════════════════════════════ */
+.progress-bar {
+  height: 3px;
+  background: var(--surface2);
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 200;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  transition: width 0.3s ease;
+  width: 0%;
+}
+
+/* ══ CHECKED SPLIT ══════════════════════════════════════════ */
+.split-preview {
+  background: var(--surface2);
+  border-radius: 10px;
+  padding: 14px;
+  margin-top: 12px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.split-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.split-row:last-child { border-bottom: none; }
+.split-row span:last-child { color: var(--accent); font-weight: 600; }
+
+/* ══ WORD EXPORT ════════════════════════════════════════════ */
+.export-opts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.export-opt {
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  cursor: pointer;
+  text-align: center;
+  font-size: 0.82rem;
+  transition: all 0.2s;
+}
+.export-opt:hover, .export-opt.selected {
+  border-color: var(--accent);
+  background: rgba(0,212,255,0.08);
+  color: var(--accent);
+}
+.export-opt .icon { font-size: 1.5rem; display: block; margin-bottom: 4px; }
+
+/* ══ MOBILE ══════════════════════════════════════════════ */
+@media (max-width: 480px) {
+  .header { padding: 10px 12px; }
+  .questions-list { padding: 10px 12px; padding-bottom: 90px; }
+  .toolbar { padding: 8px 12px; }
+  .search-bar { padding: 8px 12px; }
+}
+</style>
+</head>
+<body>
+
+<div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+
+<!-- HEADER -->
+<div class="header">
+  <button class="header-back" onclick="goBack()">←</button>
+  <div class="header-title" id="headerTitle">Savollarni tahrirlash</div>
+  <div class="header-counter" id="headerCounter">0/1000</div>
+</div>
+
+<!-- TOOLBAR -->
+<div class="toolbar">
+  <button class="tool-btn primary" onclick="openSaveModal()">💾 Saqlash</button>
+  <button class="tool-btn" onclick="openSplitModal()">✂️ Bo'lish</button>
+  <button class="tool-btn purple" onclick="openExportModal()">📥 Word</button>
+  <button class="tool-btn success" onclick="addQuestion()">➕ Savol</button>
+  <button class="tool-btn danger" onclick="confirmDeleteSelected()">🗑 O'chirish</button>
+</div>
+
+<!-- SEARCH -->
+<div class="search-bar">
+  <input class="search-input" id="searchInput" type="text"
+    placeholder="Savol raqami yoki matn..." oninput="filterQuestions()">
+  <button class="add-btn" onclick="addQuestion()">
+    ➕ Qo'shish
+  </button>
+</div>
+
+<!-- SAVOLLAR RO'YXATI -->
+<div class="questions-list" id="questionsList">
+  <div class="loading" id="loadingEl">
+    <div class="spinner"></div>
+    <span>Testlar yuklanmoqda...</span>
+  </div>
+</div>
+
+<!-- BOTTOM BAR -->
+<div class="bottom-bar">
+  <button class="btn btn-outline" onclick="openSplitModal()">✂️ Bo'lish</button>
+  <button class="btn btn-primary" onclick="openSaveModal()">💾 Saqlash</button>
+</div>
+
+<!-- ══ MODALLAR ════════════════════════════════════════════ -->
+
+<!-- BO'LISH MODAL -->
+<div class="modal-overlay" id="splitModal">
+  <div class="modal">
+    <div class="modal-title">✂️ Testni Bo'lish</div>
+
+    <div class="seg-control">
+      <button class="seg-btn active" id="seg-count" onclick="setSplitMode('count')">Qismlar soni</button>
+      <button class="seg-btn" id="seg-size" onclick="setSplitMode('size')">Savollar soni</button>
+      <button class="seg-btn" id="seg-manual" onclick="setSplitMode('manual')">Qo'lda</button>
+    </div>
+
+    <!-- Qismlar soni -->
+    <div id="splitModeCount">
+      <label class="form-label">Nechta qismga bo'linsin?</label>
+      <input class="form-input" type="number" id="splitCount" value="2" min="2" max="50"
+        oninput="updateSplitPreview()">
+    </div>
+
+    <!-- Savollar soni -->
+    <div id="splitModeSize" style="display:none">
+      <label class="form-label">Har bir qismda nechta savol?</label>
+      <input class="form-input" type="number" id="splitSize" value="10" min="1" max="500"
+        oninput="updateSplitPreview()">
+    </div>
+
+    <!-- Qo'lda -->
+    <div id="splitModeManual" style="display:none">
+      <label class="form-label">Qism chegaralarini kiriting (masalan: 1-50, 51-100)</label>
+      <input class="form-input" type="text" id="splitManual"
+        placeholder="1-50, 51-100, 101-150" oninput="updateSplitPreview()">
+    </div>
+
+    <div class="split-preview" id="splitPreview"></div>
+
+    <div class="modal-row">
+      <button class="btn btn-outline" onclick="closeModal('splitModal')">Bekor qilish</button>
+      <button class="btn btn-primary" onclick="executeSplit()">Bo'lishni tasdiqlash</button>
+    </div>
+  </div>
+</div>
+
+<!-- SAQLASH MODAL -->
+<div class="modal-overlay" id="saveModal">
+  <div class="modal">
+    <div class="modal-title">💾 Testni Saqlash</div>
+    <label class="form-label">Test nomi</label>
+    <input class="form-input" id="saveTitle" style="margin-bottom:12px">
+    <label class="form-label">Fan / Kategoriya</label>
+    <input class="form-input" id="saveCategory" placeholder="Masalan: Biologiya">
+    <div class="modal-row" style="margin-top:16px">
+      <button class="btn btn-outline" onclick="closeModal('saveModal')">Bekor</button>
+      <button class="btn btn-primary" onclick="saveTest()">💾 Saqlash</button>
+    </div>
+  </div>
+</div>
+
+<!-- WORD EXPORT MODAL -->
+<div class="modal-overlay" id="exportModal">
+  <div class="modal">
+    <div class="modal-title">📥 Word Formatda Yuklab Olish</div>
+
+    <label class="form-label">Format tanlang:</label>
+    <div class="export-opts">
+      <div class="export-opt selected" id="expFmt-numbered" onclick="selectExportFmt('numbered')">
+        <span class="icon">📋</span>
+        Raqamlangan
+      </div>
+      <div class="export-opt" id="expFmt-clean" onclick="selectExportFmt('clean')">
+        <span class="icon">✨</span>
+        Tozalangan
+      </div>
+      <div class="export-opt" id="expFmt-answer" onclick="selectExportFmt('answer')">
+        <span class="icon">✅</span>
+        Javoblar bilan
+      </div>
+      <div class="export-opt" id="expFmt-teacher" onclick="selectExportFmt('teacher')">
+        <span class="icon">🎓</span>
+        O'qituvchi uchun
+      </div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <input type="checkbox" id="expIncludeImages" style="width:18px;height:18px;cursor:pointer">
+      <label for="expIncludeImages" style="font-size:0.9rem;cursor:pointer">
+        Rasmlarni ham qo'shish
+      </label>
+    </div>
+
+    <div class="modal-row">
+      <button class="btn btn-outline" onclick="closeModal('exportModal')">Bekor</button>
+      <button class="btn btn-primary" onclick="doExport()">📥 Yuklab olish</button>
+    </div>
+  </div>
+</div>
+
+<!-- RASM MODAL (preview) -->
+<div class="modal-overlay" id="imgModal">
+  <div class="modal">
+    <div class="modal-title">🖼 Rasm qo'shish</div>
+    <p style="font-size:0.85rem;color:var(--muted);margin-bottom:14px">
+      Savol uchun rasm yuklang. JPG, PNG, WebP (max 5MB)
+    </p>
+    <input type="file" id="imgFileInput" accept="image/*" onchange="handleImgUpload(event)"
+      style="width:100%;padding:10px;background:var(--surface2);border:1px solid var(--border);
+             border-radius:10px;color:var(--text);cursor:pointer">
+    <div id="imgPreviewWrap" style="margin-top:12px;display:none">
+      <img id="imgPreviewEl" style="width:100%;border-radius:10px;max-height:200px;object-fit:cover">
+    </div>
+    <div class="modal-row">
+      <button class="btn btn-outline" onclick="closeModal('imgModal')">Bekor</button>
+      <button class="btn btn-primary" onclick="applyImage()">✅ Qo'llash</button>
+    </div>
+  </div>
+</div>
+
+<!-- O'CHIRISH TASDIQLASH -->
+<div class="modal-overlay" id="deleteModal">
+  <div class="modal">
+    <div class="modal-title">🗑 O'chirishni tasdiqlash</div>
+    <p style="font-size:0.9rem;color:var(--muted);margin-bottom:16px" id="deleteModalMsg"></p>
+    <div class="modal-row">
+      <button class="btn btn-outline" onclick="closeModal('deleteModal')">Bekor</button>
+      <button class="btn btn-danger" onclick="execDelete()">O'chirish</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<!-- ══ JAVASCRIPT ══════════════════════════════════════════ -->
+<script>
+// ─── STATE ────────────────────────────────────────────────
+let TEST_DATA   = null;   // {test_id, title, category, questions:[...]}
+let questions   = [];     // working copy
+let filteredIdx = null;   // null = show all
+let splitMode   = 'count';
+let exportFmt   = 'numbered';
+let imgTargetQi = null;   // qaysi savol uchun rasm yuklanmoqda
+let imgBase64   = null;
+let deleteTarget= null;   // {type:'q'|'selected', qi}
+
+// ─── URL PARAMS ────────────────────────────────────────────
+const params   = new URLSearchParams(location.search);
+const TEST_ID  = params.get('id') || params.get('test_id') || '';
+const API_BASE = params.get('api') || '';   // Streamlit URL
+
+// ─── INIT ──────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  loadTest();
+});
+
+async function loadTest() {
+  if (!TEST_ID) {
+    // Demo ma'lumotlar
+    loadDemoData();
+    return;
+  }
+  try {
+    let url = API_BASE
+      ? `${API_BASE}/?api=test&id=${encodeURIComponent(TEST_ID)}`
+      : `/?api=test&id=${encodeURIComponent(TEST_ID)}`;
+    const res  = await fetch(url);
+    const text = await res.text();
+    const data = parseJSON(text);
+    if (data && data.test && data.test.questions) {
+      initWithData(data.test);
+    } else {
+      loadDemoData();
+    }
+  } catch (e) {
+    loadDemoData();
+  }
+}
+
+function loadDemoData() {
+  const demo = {
+    test_id:   'DEMO',
+    title:     'Demo Test',
+    category:  'Biologiya',
+    questions: Array.from({length: 5}, (_, i) => ({
+      q:       `Savol ${i+1}: Bu namuna savol?`,
+      options: ['A variant', 'B variant', 'C variant', 'D variant'],
+      correct: 0,
+      image:   null,
+      explanation: ''
+    }))
+  };
+  initWithData(demo);
+  showToast('⚠️ Demo rejim — haqiqiy test yuklanmadi', 'error');
+}
+
+function initWithData(data) {
+  TEST_DATA = data;
+  questions = (data.questions || []).map((q, i) => ({
+    qi:          i,
+    q:           q.q || q.question || q.text || '',
+    options:     [...(q.options || [])],
+    correct:     typeof q.correct === 'number' ? q.correct :
+                 (typeof q.correct_index === 'number' ? q.correct_index : 0),
+    image:       q.image || null,
+    explanation: q.explanation || '',
+    _dirty:      false,
+  }));
+  document.getElementById('headerTitle').textContent = data.title || 'Tahrirlash';
+  document.getElementById('saveTitle').value    = data.title || '';
+  document.getElementById('saveCategory').value = data.category || '';
+  updateCounter();
+  renderAll();
+  document.getElementById('loadingEl').style.display = 'none';
+}
+
+// ─── RENDER ────────────────────────────────────────────────
+function renderAll() {
+  const list   = document.getElementById('questionsList');
+  const show   = filteredIdx !== null ? filteredIdx : questions.map((_,i) => i);
+  list.innerHTML = '';
+  if (!show.length) {
+    list.innerHTML = '<div class="loading"><span>Hech narsa topilmadi 🔍</span></div>';
+    return;
+  }
+  show.forEach(i => list.appendChild(buildCard(questions[i], i)));
+}
+
+function buildCard(q, i) {
+  const LABELS = ['A','B','C','D','E','F','G','H'];
+  const div = document.createElement('div');
+  div.className  = 'question-card';
+  div.id         = `q-card-${i}`;
+  div.dataset.qi = i;
+
+  // Image base64 or url
+  const imgHtml = q.image
+    ? `<div class="img-zone has-img" onclick="openImgModal(${i})">
+         <img src="${q.image}" alt="rasm">
+         <button class="img-remove" onclick="event.stopPropagation();removeImage(${i})">✕</button>
+       </div>`
+    : `<div class="img-zone" onclick="openImgModal(${i})">
+         ➕ Rasm qo'shish
+       </div>`;
+
+  const optionsHtml = q.options.map((opt, oi) => `
+    <div class="option-row ${oi === q.correct ? 'correct' : ''}" id="opt-row-${i}-${oi}">
+      <div class="opt-label ${oi === q.correct ? 'correct' : ''}"
+           id="opt-lbl-${i}-${oi}"
+           onclick="setCorrect(${i},${oi})"
+           title="To'g'ri javob qilish">
+        ${LABELS[oi] || oi}
+      </div>
+      <input class="opt-input"
+             id="opt-${i}-${oi}"
+             value="${escHtml(opt)}"
+             placeholder="Variant ${LABELS[oi] || oi}"
+             oninput="updateOption(${i},${oi},this.value)"
+             onkeydown="optKeyNav(event,${i},${oi})">
+    </div>
+  `).join('');
+
+  div.innerHTML = `
+    <div class="q-header">
+      <span class="q-num">SAVOL #${i+1}</span>
+      <div class="q-actions">
+        <button class="q-act-btn" onclick="moveQ(${i},-1)" title="Yuqoriga">↑</button>
+        <button class="q-act-btn" onclick="moveQ(${i},1)" title="Pastga">↓</button>
+        <button class="q-act-btn del" onclick="confirmDeleteQ(${i})" title="O'chirish">🗑</button>
+      </div>
+    </div>
+    <div class="q-body">
+      ${imgHtml}
+      <textarea class="q-text-input"
+                id="q-text-${i}"
+                placeholder="Savol matni..."
+                oninput="updateQText(${i},this.value)">${escHtml(q.q)}</textarea>
+      <div class="options-list">${optionsHtml}</div>
+    </div>
+  `;
+  return div;
+}
+
+// ─── UPDATE FUNCTIONS ──────────────────────────────────────
+function updateQText(i, val) {
+  questions[i].q = val;
+  questions[i]._dirty = true;
+  setProgress();
+}
+
+function updateOption(i, oi, val) {
+  questions[i].options[oi] = val;
+  questions[i]._dirty = true;
+}
+
+function setCorrect(i, oi) {
+  const prev = questions[i].correct;
+  questions[i].correct = oi;
+  questions[i]._dirty  = true;
+
+  // Visual update without full re-render
+  const LABELS = ['A','B','C','D','E','F','G','H'];
+  [prev, oi].forEach(idx => {
+    const row = document.getElementById(`opt-row-${i}-${idx}`);
+    const lbl = document.getElementById(`opt-lbl-${i}-${idx}`);
+    if (!row || !lbl) return;
+    const isCorr = idx === oi;
+    row.className = 'option-row' + (isCorr ? ' correct' : '');
+    lbl.className = 'opt-label'  + (isCorr ? ' correct' : '');
+    lbl.textContent = LABELS[idx] || idx;
+  });
+  showToast(`✅ ${LABELS[oi]} — to'g'ri javob`, 'success');
+}
+
+function updateCounter() {
+  document.getElementById('headerCounter').textContent =
+    `${questions.length}/1000`;
+  setProgress();
+}
+
+function setProgress() {
+  const pct = Math.min(questions.length / 10, 100);
+  document.getElementById('progressFill').style.width = pct + '%';
+}
+
+// ─── SEARCH ────────────────────────────────────────────────
+function filterQuestions() {
+  const q = document.getElementById('searchInput').value.trim().toLowerCase();
+  if (!q) {
+    filteredIdx = null;
+    renderAll();
+    return;
+  }
+  const num = parseInt(q);
+  if (!isNaN(num) && num >= 1 && num <= questions.length) {
+    filteredIdx = [num - 1];
+  } else {
+    filteredIdx = questions
+      .map((qo, i) => qo.q.toLowerCase().includes(q) ? i : -1)
+      .filter(i => i >= 0);
+  }
+  renderAll();
+}
+
+// ─── ADD / DELETE / MOVE ───────────────────────────────────
+function addQuestion() {
+  const newQ = {
+    qi:    questions.length,
+    q:     '',
+    options: ['', '', '', ''],
+    correct: 0,
+    image:  null,
+    explanation: '',
+    _dirty: true,
+  };
+  questions.push(newQ);
+  updateCounter();
+  renderAll();
+  // Scroll to new
+  setTimeout(() => {
+    const el = document.getElementById(`q-card-${questions.length - 1}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth' });
+  }, 100);
+}
+
+function confirmDeleteQ(i) {
+  deleteTarget = { type: 'q', qi: i };
+  document.getElementById('deleteModalMsg').textContent =
+    `${i+1}-savol o'chiriladi. Bu amalni qaytarib bo'lmaydi!`;
+  openModal('deleteModal');
+}
+
+function confirmDeleteSelected() {
+  deleteTarget = { type: 'selected' };
+  document.getElementById('deleteModalMsg').textContent =
+    `Tanlangan barcha savollar o'chiriladi. Davom etilsinmi?`;
+  openModal('deleteModal');
+}
+
+function execDelete() {
+  closeModal('deleteModal');
+  if (!deleteTarget) return;
+  if (deleteTarget.type === 'q') {
+    questions.splice(deleteTarget.qi, 1);
+    questions.forEach((q, i) => q.qi = i);
+    showToast('🗑 Savol o\'chirildi', 'success');
+  }
+  updateCounter();
+  renderAll();
+}
+
+function moveQ(i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= questions.length) return;
+  [questions[i], questions[j]] = [questions[j], questions[i]];
+  questions.forEach((q, idx) => q.qi = idx);
+  renderAll();
+  // Keep scroll position
+  setTimeout(() => {
+    document.getElementById(`q-card-${j}`)?.scrollIntoView({ block: 'nearest' });
+  }, 50);
+}
+
+// ─── IMAGE ─────────────────────────────────────────────────
+function openImgModal(i) {
+  imgTargetQi = i;
+  imgBase64   = questions[i].image || null;
+  const prev  = document.getElementById('imgPreviewWrap');
+  const img   = document.getElementById('imgPreviewEl');
+  if (imgBase64) {
+    img.src = imgBase64;
+    prev.style.display = 'block';
+  } else {
+    prev.style.display = 'none';
+  }
+  openModal('imgModal');
+}
+
+function handleImgUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) {
+    showToast('❌ Rasm hajmi 5MB dan oshmasin', 'error');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    imgBase64 = e.target.result;
+    const prev = document.getElementById('imgPreviewWrap');
+    const img  = document.getElementById('imgPreviewEl');
+    img.src = imgBase64;
+    prev.style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+}
+
+function applyImage() {
+  if (imgTargetQi === null) return;
+  questions[imgTargetQi].image = imgBase64;
+  questions[imgTargetQi]._dirty = true;
+  closeModal('imgModal');
+  renderAll();
+  showToast('🖼 Rasm qo\'shildi', 'success');
+}
+
+function removeImage(i) {
+  questions[i].image = null;
+  questions[i]._dirty = true;
+  renderAll();
+  showToast('🗑 Rasm o\'chirildi');
+}
+
+// ─── SPLIT ─────────────────────────────────────────────────
+function setSplitMode(mode) {
+  splitMode = mode;
+  ['count','size','manual'].forEach(m => {
+    document.getElementById(`splitMode${m.charAt(0).toUpperCase()+m.slice(1)}`).style.display =
+      m === mode ? 'block' : 'none';
+    document.getElementById(`seg-${m}`).className =
+      'seg-btn' + (m === mode ? ' active' : '');
+  });
+  updateSplitPreview();
+}
+
+function openSplitModal() {
+  updateSplitPreview();
+  openModal('splitModal');
+}
+
+function updateSplitPreview() {
+  const n = questions.length;
+  let parts = [];
+
+  if (splitMode === 'count') {
+    const cnt = parseInt(document.getElementById('splitCount')?.value) || 2;
+    const sz  = Math.ceil(n / cnt);
+    for (let i = 0; i < cnt; i++) {
+      const from = i * sz;
+      const to   = Math.min(from + sz, n);
+      if (from >= n) break;
+      parts.push({ label: `Qism ${i+1}`, from, to, count: to - from });
+    }
+  } else if (splitMode === 'size') {
+    const sz = parseInt(document.getElementById('splitSize')?.value) || 10;
+    for (let i = 0; i * sz < n; i++) {
+      const from = i * sz;
+      const to   = Math.min(from + sz, n);
+      parts.push({ label: `Qism ${i+1}`, from, to, count: to - from });
+    }
+  } else {
+    const raw = document.getElementById('splitManual')?.value || '';
+    parts = raw.split(',').map((seg, i) => {
+      const m = seg.trim().match(/^(\d+)-(\d+)$/);
+      if (!m) return null;
+      const from = parseInt(m[1]) - 1;
+      const to   = parseInt(m[2]);
+      return { label: `Qism ${i+1}`, from, to, count: to - from };
+    }).filter(Boolean);
+  }
+
+  const prev = document.getElementById('splitPreview');
+  if (!parts.length) { prev.innerHTML = ''; return; }
+
+  prev.innerHTML = '<div style="font-size:0.82rem;color:var(--muted);margin-bottom:8px">' +
+    `Jami: ${n} ta savol → ${parts.length} ta qism` +
+  '</div>' +
+  parts.map(p =>
+    `<div class="split-row">
+      <span>${p.label} (${p.from+1}–${p.to})</span>
+      <span>${p.count} ta savol</span>
+    </div>`
+  ).join('');
+}
+
+function executeSplit() {
+  const n = questions.length;
+  let parts = [];
+
+  if (splitMode === 'count') {
+    const cnt = parseInt(document.getElementById('splitCount').value) || 2;
+    const sz  = Math.ceil(n / cnt);
+    for (let i = 0; i < cnt; i++) {
+      const from = i * sz, to = Math.min(from + sz, n);
+      if (from >= n) break;
+      parts.push(questions.slice(from, to));
+    }
+  } else if (splitMode === 'size') {
+    const sz = parseInt(document.getElementById('splitSize').value) || 10;
+    for (let i = 0; i * sz < n; i++) {
+      parts.push(questions.slice(i * sz, Math.min((i+1)*sz, n)));
+    }
+  } else {
+    const raw = document.getElementById('splitManual').value || '';
+    parts = raw.split(',').map(seg => {
+      const m = seg.trim().match(/^(\d+)-(\d+)$/);
+      if (!m) return null;
+      return questions.slice(parseInt(m[1])-1, parseInt(m[2]));
+    }).filter(Boolean);
+  }
+
+  if (!parts.length) { showToast('❌ Qism topilmadi', 'error'); return; }
+
+  closeModal('splitModal');
+
+  parts.forEach((part, i) => {
+    const title = (TEST_DATA?.title || 'Test') + ` — Qism ${i+1}`;
+    downloadTxtFile(part, title);
+  });
+
+  showToast(`✂️ ${parts.length} ta qism yuklandi!`, 'success');
+}
+
+function downloadTxtFile(qs, title) {
+  const LABELS = ['A','B','C','D','E','F','G','H'];
+  const lines  = [`Test: ${title}`, '='.repeat(50), ''];
+  qs.forEach((q, i) => {
+    lines.push(`${i+1}. ${q.q}`);
+    q.options.forEach((opt, oi) => {
+      const mark = oi === q.correct ? '*' : ' ';
+      lines.push(`${mark}${LABELS[oi]}) ${opt}`);
+    });
+    if (q.explanation) lines.push(`   Izoh: ${q.explanation}`);
+    lines.push('');
+  });
+  downloadText(lines.join('\n'), `${title}.txt`);
+}
+
+// ─── EXPORT (WORD via HTML→Blob) ──────────────────────────
+function selectExportFmt(fmt) {
+  exportFmt = fmt;
+  document.querySelectorAll('.export-opt').forEach(el => el.classList.remove('selected'));
+  document.getElementById(`expFmt-${fmt}`)?.classList.add('selected');
+}
+
+function openExportModal() { openModal('exportModal'); }
+
+function doExport() {
+  closeModal('exportModal');
+  const title    = TEST_DATA?.title || 'Test';
+  const inclImgs = document.getElementById('expIncludeImages').checked;
+  const LABELS   = ['A','B','C','D','E','F','G','H'];
+
+  let html = `
+    <html><head><meta charset="UTF-8">
+    <style>
+      body { font-family: Arial, sans-serif; font-size: 12pt; line-height: 1.6; }
+      h1   { font-size: 16pt; text-align: center; margin-bottom: 20px; }
+      .q   { margin-bottom: 18px; page-break-inside: avoid; }
+      .q-num { font-weight: bold; }
+      .opt   { margin-left: 20px; }
+      .opt.correct { font-weight: bold; }
+      .ans-key { border-top: 2px solid #000; margin-top: 30px; padding-top: 15px; }
+      img  { max-width: 200px; max-height: 150px; }
+    </style>
+    </head><body>
+    <h1>${escHtml(title)}</h1>
+  `;
+
+  questions.forEach((q, i) => {
+    html += `<div class="q">`;
+    html += `<p class="q-num">${i+1}. ${escHtml(q.q)}</p>`;
+    if (inclImgs && q.image) {
+      html += `<p><img src="${q.image}"></p>`;
+    }
+    q.options.forEach((opt, oi) => {
+      const isCorr = oi === q.correct;
+      const showCorr = exportFmt === 'answer' || exportFmt === 'teacher';
+      html += `<p class="opt ${showCorr && isCorr ? 'correct' : ''}">`;
+      if (showCorr && isCorr) html += '✓ ';
+      html += `${LABELS[oi]}) ${escHtml(opt)}</p>`;
+    });
+    if (exportFmt === 'teacher' && q.explanation) {
+      html += `<p style="color:#555;font-style:italic;margin-left:20px">Izoh: ${escHtml(q.explanation)}</p>`;
+    }
+    html += `</div>`;
+  });
+
+  // Answer key
+  if (exportFmt === 'teacher' || exportFmt === 'answer') {
+    html += `<div class="ans-key"><h2>Javoblar kaliti</h2><p>`;
+    html += questions.map((q, i) =>
+      `${i+1}-${LABELS[q.correct]}`
+    ).join('  |  ');
+    html += `</p></div>`;
+  }
+
+  html += `</body></html>`;
+
+  const blob = new Blob([html], { type: 'application/msword' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `${title}.doc`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('📥 Word fayl yuklandi!', 'success');
+}
+
+// ─── SAVE ──────────────────────────────────────────────────
+function openSaveModal() { openModal('saveModal'); }
+
+async function saveTest() {
+  const title    = document.getElementById('saveTitle').value.trim();
+  const category = document.getElementById('saveCategory').value.trim();
+
+  if (!title) { showToast('❌ Test nomini kiriting', 'error'); return; }
+
+  closeModal('saveModal');
+
+  const payload = {
+    ...(TEST_DATA || {}),
+    title,
+    category,
+    questions: questions.map(q => ({
+      q:           q.q,
+      question:    q.q,
+      options:     q.options,
+      correct:     q.correct,
+      correct_index: q.correct,
+      image:       q.image || null,
+      explanation: q.explanation || '',
+    }))
+  };
+
+  // TXT sifatida yuklab olish
+  downloadTxtFile(questions, title);
+
+  // Agar bot API mavjud bo'lsa — saqlaymiz
+  if (API_BASE) {
+    try {
+      await fetch(`${API_BASE}/?api=save_test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      showToast('✅ Saqlandi!', 'success');
+    } catch {
+      showToast('✅ TXT yuklab olindi (offline rejim)', 'success');
+    }
+  } else {
+    showToast('✅ TXT yuklab olindi!', 'success');
+  }
+}
+
+// ─── KEYBOARD NAV ──────────────────────────────────────────
+function optKeyNav(event, i, oi) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    const next = document.getElementById(`opt-${i}-${oi+1}`) ||
+                 document.getElementById(`q-text-${i+1}`);
+    next?.focus();
+  }
+}
+
+// ─── UTILS ─────────────────────────────────────────────────
+function goBack() {
+  if (window.history.length > 1) history.back();
+  else window.close();
+}
+
+function openModal(id) {
+  document.getElementById(id).classList.add('open');
+}
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+}
+
+function showToast(msg, type = '') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className   = `toast ${type}`;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2800);
+}
+
+function escHtml(str) {
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function downloadText(content, filename) {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function parseJSON(html) {
+  try { return JSON.parse(html.trim()); } catch {}
+  const m = html.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (m) { try { return JSON.parse(m[1].trim()); } catch {} }
+  const m2 = html.match(/(\{"ok"[\s\S]*?\})\s*(?:<|\n|$)/);
+  if (m2) { try { return JSON.parse(m2[1]); } catch {} }
+  return null;
+}
+
+// Close modal on overlay click
+document.querySelectorAll('.modal-overlay').forEach(el => {
+  el.addEventListener('click', e => {
+    if (e.target === el) el.classList.remove('open');
+  });
+});
+</script>
+</body>
+</html>
