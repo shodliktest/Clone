@@ -234,6 +234,39 @@ def get_users():         return _get("users_cache", {})
 def set_users(u):        _set("users_cache", u)
 def get_user(tg_id):     return get_users().get(str(tg_id))
 
+# ══ BLOCKED USERS — tez tekshiruv ══════════════════════════════
+_blocked_set: set = set()   # O(1) tez tekshiruv uchun
+
+def is_user_blocked(tg_id) -> bool:
+    """Foydalanuvchi bloklangan yoki yo'qligini tez tekshirish."""
+    uid = str(tg_id)
+    if uid in _blocked_set:
+        return True
+    u = get_users().get(uid)
+    if u and u.get("is_blocked"):
+        _blocked_set.add(uid)
+        return True
+    return False
+
+def set_blocked(tg_id, blocked: bool):
+    """Bloklash holatini yangilash — RAM set + cache."""
+    uid = str(tg_id)
+    if blocked:
+        _blocked_set.add(uid)
+    else:
+        _blocked_set.discard(uid)
+    users = get_users()
+    if uid in users:
+        users[uid]["is_blocked"] = blocked
+        _set("users_cache", users)
+
+def load_blocked_from_cache():
+    """Bot yoqilganda blocked_users ni cache dan yuklash."""
+    for uid, u in get_users().items():
+        if u.get("is_blocked"):
+            _blocked_set.add(uid)
+
+
 def upsert_user(tg_id, data):
     u = get_users()
     u[str(tg_id)] = data
