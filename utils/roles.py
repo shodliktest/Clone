@@ -77,22 +77,60 @@ def can_create_any_test(uid: int, admin_ids: list) -> bool:
     """Umuman test yarata oladimi? (shaxsiy/link)"""
     if uid in admin_ids:
         return True
+
+    cfg = get_global_config()
+
+    # Global sozlama: test yaratish BUTUNLAY berkitilganmi?
+    if cfg.get("test_creation_disabled", False):
+        return False
+
+    # Global sozlama: hammaga ruxsat berilganmi?
+    if cfg.get("open_test_creation", False):
+        return True
+
     user = ram.get_user(uid)
     if not user:
         return False
-
-    # Global sozlama: admin "hammaga ruxsat" qilganmi?
-    cfg = get_global_config()
-    if cfg.get("open_test_creation", False):
-        return True
 
     # Vaqtinchalik student huquqini tekshirish
     _check_expire_role(uid, user)
     role = user.get("role", "user")
     if ROLE_LEVELS.get(role, 0) >= ROLE_LEVELS["student"]:
         return True
-    # Bugungi referal berganmi
-    return bool(get_today_referral_bonus(uid))
+
+    # Referal orqali yaratish berkitilganmi?
+    if cfg.get("referral_creation_disabled", False):
+        return False
+
+    # Nechta referal kerak? (default: 1)
+    needed = cfg.get("refs_needed_for_create", 1)
+    today_refs = _get_today_refs(uid)
+    return today_refs >= needed
+
+
+def _get_today_refs(uid: int) -> int:
+    """Bugun nechta referal yuborgan."""
+    user = ram.get_user(uid) or {}
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    if user.get("referral_today_date", "") == today:
+        return user.get("referral_today", 0)
+    return 0
+
+
+def get_creation_settings() -> dict:
+    """Test yaratish sozlamalari."""
+    cfg = get_global_config()
+    return {
+        "test_creation_disabled":    cfg.get("test_creation_disabled", False),
+        "open_test_creation":        cfg.get("open_test_creation", False),
+        "referral_creation_disabled":cfg.get("referral_creation_disabled", False),
+        "refs_needed_for_create":    cfg.get("refs_needed_for_create", 1),
+    }
+
+
+def set_creation_settings(updates: dict):
+    """Test yaratish sozlamalarini yangilash."""
+    set_global_config(updates)
 
 def get_role(uid: int) -> str:
     user = ram.get_user(uid)
