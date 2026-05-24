@@ -20,6 +20,12 @@ ADMIN_USERNAME:      str  = _s("ADMIN_USERNAME", "Shodlikai")
 # Yopiq Telegram kanal — bot shu kanalga admin (post + pin huquqi)
 STORAGE_CHANNEL_ID:  int  = int(_s("STORAGE_CHANNEL_ID", "0"))
 
+# Streamlit app URL — sayt bilan integratsiya uchun
+STREAMLIT_URL: str = _s("STREAMLIT_URL", "https://quizmakerbot-hwttylmp5igdczywefchjt.streamlit.app")
+
+# GitHub Pages URL — edit.html sahifasi uchun
+GITHUB_PAGES_URL: str = _s("GITHUB_PAGES_URL", "https://shodliktest.github.io/TestPro")
+
 PASSING_SCORE = 60
 MAX_FILE_MB   = 20
 
