@@ -183,8 +183,13 @@ async def adm_block_user(callback: CallbackQuery):
     users   = ram.get_users()
     u       = users.get(str(uid_str), {})
     new_blk = not u.get("is_blocked", False)
-    block_user(int(uid_str), new_blk)
-    await callback.answer("🚫 Bloklandi" if new_blk else "✅ Blok ochildi", show_alert=True)
+    import blocked as _bl
+    if new_blk:
+        _bl.block(int(uid_str))
+        await callback.answer("🚫 Bloklandi!", show_alert=True)
+    else:
+        _bl.unblock(int(uid_str))
+        await callback.answer("✅ Blok ochildi!", show_alert=True)
     await adm_user_detail(callback)
 
 
