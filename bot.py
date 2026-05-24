@@ -6,6 +6,37 @@ from utils import ram_cache as ram
 from handlers import webauth
 
 
+class BlockedUserMiddleware(BaseMiddleware):
+    """
+    Bloklangan foydalanuvchilar botdan umuman foydalana olmasin.
+    is_user_blocked() — O(1) tez tekshiruv (set orqali).
+    """
+    async def __call__(self, handler, event, data):
+        uid = None
+        if isinstance(event, Message):
+            uid = event.from_user.id if event.from_user else None
+        elif isinstance(event, CallbackQuery):
+            uid = event.from_user.id if event.from_user else None
+
+        if uid and ram.is_user_blocked(uid):
+            if isinstance(event, Message):
+                try:
+                    await event.answer(
+                        "🚫 Siz botdan bloklangansiz.\n"
+                        "Muammo bo'lsa admin bilan bog'laning."
+                    )
+                except Exception:
+                    pass
+            elif isinstance(event, CallbackQuery):
+                try:
+                    await event.answer("🚫 Siz bloklangansiz.", show_alert=True)
+                except Exception:
+                    pass
+            return   # Handler ga o'tkazmaymiz
+
+        return await handler(event, data)
+
+
 class ClearMenuMiddleware(BaseMiddleware):
     """
     Xabarni O'CHIRMAYDI — chunki o'chirilsa pastdagi ReplyKeyboard yo'qoladi.
@@ -118,6 +149,8 @@ async def main():
     bot = Bot(token=BOT_TOKEN,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=True))
     dp  = Dispatcher(storage=MemoryStorage())
+    dp.message.middleware(BlockedUserMiddleware())
+    dp.callback_query.middleware(BlockedUserMiddleware())
     dp.message.middleware(ClearMenuMiddleware())
     dp.callback_query.middleware(ClearMenuMiddleware())
     dp.message.middleware(GroupTrackerMiddleware())
@@ -152,6 +185,7 @@ async def main():
         settings = await tg_db.get_settings_tg()
         if settings: ram.set_all_settings(settings)
         log.info(f"✅ Yuklandi: {ram.stats()['tests']} test meta, {ram.stats()['users']} user (savollar lazy)")
+        ram.load_blocked_from_cache()
 
     # Background tasklar
     asyncio.create_task(_midnight_flush_loop(bot))
@@ -404,6 +438,7 @@ async def _main_no_signals():
         settings = await tg_db.get_settings_tg()
         if settings: ram.set_all_settings(settings)
         log.info(f"✅ Yuklandi: {ram.stats()['tests']} test meta, {ram.stats()['users']} user")
+        ram.load_blocked_from_cache()
 
     # Startup da bot admin bo'lgan guruhlarni aniqlash
     asyncio.create_task(_scan_groups_on_startup(bot))
