@@ -64,7 +64,17 @@ def _ref_text(uid: int, bot_username: str) -> str:
     if today_bonus:
         lines.append("✅ <b>Bugun test yaratish imkoningiz bor!</b>")
     else:
-        lines.append("💡 Bugun test yaratish uchun kamida 1 kishi taklif qiling")
+        from utils.roles import get_creation_settings
+    cs = get_creation_settings()
+    if cs["test_creation_disabled"]:
+        lines.append("🔒 Test yaratish hozircha <b>berkitilgan</b>.")
+    elif cs["open_test_creation"]:
+        lines.append("✅ <b>Test yaratish hammaga ochiq!</b>")
+    elif cs["referral_creation_disabled"]:
+        lines.append("🔒 Referal orqali test yaratish <b>berkitilgan</b>.")
+    else:
+        need = cs["refs_needed_for_create"]
+        lines.append(f"💡 Bugun test yaratish uchun <b>{need} ta</b> referal yuboring")
 
     return "\n".join(lines)
 

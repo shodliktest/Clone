@@ -1122,3 +1122,142 @@ async def forward_mode_handler(message: Message):
     except Exception as e:
         await message.answer(f"❌ Xato: {e}")
 
+
+
+# ══ TEST YARATISH SOZLAMALARI ═══════════════════════════════════
+
+@router.callback_query(F.data == "admin_creation_settings")
+async def admin_creation_settings(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    await callback.answer()
+    from utils.roles import get_creation_settings
+    s = get_creation_settings()
+
+    disabled   = s["test_creation_disabled"]
+    open_all   = s["open_test_creation"]
+    ref_off    = s["referral_creation_disabled"]
+    refs_need  = s["refs_needed_for_create"]
+
+    b = InlineKeyboardBuilder()
+
+    # 1. Butunlay berkitish
+    if disabled:
+        b.row(InlineKeyboardButton(
+            text="✅ Test yaratish YOPIQ — ochish",
+            callback_data="creation_toggle_disabled"
+        ))
+    else:
+        b.row(InlineKeyboardButton(
+            text="🔒 Test yaratishni BERKITISH",
+            callback_data="creation_toggle_disabled"
+        ))
+
+    # 2. Hammaga ochish
+    if not disabled:
+        if open_all:
+            b.row(InlineKeyboardButton(
+                text="✅ Hammaga OCHIQ — yopish",
+                callback_data="creation_toggle_open"
+            ))
+        else:
+            b.row(InlineKeyboardButton(
+                text="🌐 Hammaga ochish",
+                callback_data="creation_toggle_open"
+            ))
+
+    # 3. Referal orqali yaratish
+    if not disabled and not open_all:
+        if ref_off:
+            b.row(InlineKeyboardButton(
+                text="✅ Referal yaratish YOPIQ — ochish",
+                callback_data="creation_toggle_referal"
+            ))
+        else:
+            b.row(InlineKeyboardButton(
+                text="🔗 Referal yaratishni berkitish",
+                callback_data="creation_toggle_referal"
+            ))
+
+        # 4. Referal soni
+        b.row(
+            InlineKeyboardButton(text="➖", callback_data="creation_refs_minus"),
+            InlineKeyboardButton(text=f"🔗 {refs_need} ta referal kerak",
+                                 callback_data="noop"),
+            InlineKeyboardButton(text="➕", callback_data="creation_refs_plus"),
+        )
+
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+
+    status_lines = [
+        "⚙️ <b>Test yaratish sozlamalari</b>\n",
+        f"🔒 Butunlay berkitilgan: {'✅ HA' if disabled else '❌ YOQ'}",
+        f"🌐 Hammaga ochiq: {'✅ HA' if open_all else '❌ YOQ'}",
+        f"🔗 Referal orqali: {'❌ YOPIQ' if ref_off else '✅ OCHIQ'}",
+        f"🔢 Kerakli referal soni: <b>{refs_need} ta</b>",
+    ]
+    if not disabled and not open_all and not ref_off:
+        status_lines.append(
+            f"\n💡 Foydalanuvchi bugun <b>{refs_need} ta</b> referal "
+            f"yuborsa test yaratishi mumkin."
+        )
+    if disabled:
+        status_lines.append("\n⚠️ Hozir hech kim (admindan tashqari) test yarata olmaydi!")
+
+    try:
+        await callback.message.edit_text(
+            "\n".join(status_lines),
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+
+
+@router.callback_query(F.data == "creation_toggle_disabled")
+async def creation_toggle_disabled(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    from utils.roles import get_creation_settings, set_creation_settings
+    s = get_creation_settings()
+    new_val = not s["test_creation_disabled"]
+    set_creation_settings({"test_creation_disabled": new_val})
+    status = "🔒 BERKITILDI" if new_val else "🔓 OCHILDI"
+    await callback.answer(f"Test yaratish {status}!", show_alert=True)
+    await admin_creation_settings(callback)
+
+
+@router.callback_query(F.data == "creation_toggle_open")
+async def creation_toggle_open(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    from utils.roles import get_creation_settings, set_creation_settings
+    s = get_creation_settings()
+    new_val = not s["open_test_creation"]
+    set_creation_settings({"open_test_creation": new_val})
+    status = "✅ Hammaga OCHILDI" if new_val else "❌ Yopildi"
+    await callback.answer(status, show_alert=True)
+    await admin_creation_settings(callback)
+
+
+@router.callback_query(F.data == "creation_toggle_referal")
+async def creation_toggle_referal(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    from utils.roles import get_creation_settings, set_creation_settings
+    s = get_creation_settings()
+    new_val = not s["referral_creation_disabled"]
+    set_creation_settings({"referral_creation_disabled": new_val})
+    status = "🔒 Referal yaratish BERKITILDI" if new_val else "✅ Referal yaratish OCHILDI"
+    await callback.answer(status, show_alert=True)
+    await admin_creation_settings(callback)
+
+
+@router.callback_query(F.data.in_({"creation_refs_plus", "creation_refs_minus"}))
+async def creation_refs_count(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    from utils.roles import get_creation_settings, set_creation_settings
+    s    = get_creation_settings()
+    cur  = s["refs_needed_for_create"]
+    if callback.data == "creation_refs_plus":
+        new = min(cur + 1, 20)
+    else:
+        new = max(cur - 1, 1)
+    set_creation_settings({"refs_needed_for_create": new})
+    await callback.answer(f"✅ {new} ta referal kerak")
+    await admin_creation_settings(callback)
+
