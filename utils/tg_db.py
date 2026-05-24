@@ -104,6 +104,7 @@ async def init(bot, channel_id):
     asyncio.create_task(_load_users_list())
     asyncio.create_task(load_known_groups())
     asyncio.create_task(_load_leaderboard())
+    asyncio.create_task(_load_blocked_to_ram())
 
     log.info(f"Tayyor (tez): {len(_index.get('tests_meta',[]))} test meta yuklandi")
     log.info("Users, guruhlar va leaderboard background da yuklanmoqda...")
@@ -1271,6 +1272,19 @@ async def load_group_leaderboard():
 # AUTO FLUSH LOOP — MINIMAL YOZUV
 # ══════════════════════════════════════════════════════════════
 
+
+async def _load_blocked_to_ram():
+    """Background da bloklangan IDlarni TG dan yuklab RAMga qo'yadi."""
+    try:
+        ids = await load_blocked_users()
+        if ids:
+            import blocked as _bl
+            for bid in ids:
+                _bl._blocked.add(bid)
+            log.info(f"Bloklangan IDlar yuklandi: {len(ids)} ta")
+    except Exception as e:
+        log.error(f"_load_blocked_to_ram: {e}")
+
 async def auto_flush_loop():
     """
     QOIDA: auto_flush faqat stats va users ni saqlaydi.
@@ -1624,6 +1638,58 @@ async def get_settings_tg():
 # ══════════════════════════════════════════════════════════════
 # GURUHLAR
 # ══════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════
+# BLOKLANGAN FOYDALANUVCHILAR — TG da saqlash
+# ══════════════════════════════════════════════════════════════
+
+async def save_blocked_users(blocked_ids: set):
+    """Bloklangan IDlar ro'yxatini TG kanalga saqlaydi."""
+    if not ready(): return False
+    ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
+    old_mid = _meta.get("blocked_msg_id")
+    try:
+        msg = await _bot.send_document(
+            _cid,
+            document=_buf(
+                {"blocked_ids": list(blocked_ids), "count": len(blocked_ids), "saved_at": ts},
+                "blocked_ids.json"
+            ),
+            caption=f"BLOCKED_IDS | {len(blocked_ids)} ta | {ts}",
+            protect_content=False
+        )
+        _meta["blocked_msg_id"] = msg.message_id
+        _meta["blocked_fid"]    = msg.document.file_id
+        await _save_meta()
+        if old_mid and old_mid != msg.message_id:
+            try: await _bot.delete_message(_cid, old_mid)
+            except: pass
+        log.info(f"Bloklangan IDlar saqlandi: {len(blocked_ids)} ta")
+        return True
+    except Exception as e:
+        log.error(f"save_blocked_users: {e}")
+        return False
+
+
+async def load_blocked_users() -> set:
+    """TG kanaldan bloklangan IDlarni yuklaydi."""
+    fid = _meta.get("blocked_fid")
+    mid = _meta.get("blocked_msg_id")
+    if not mid and not fid:
+        return set()
+    data = {}
+    if fid:
+        data = await _read_file(fid)
+    if not data and mid:
+        data = await _download_doc(mid)
+    if not data:
+        return set()
+    ids = data.get("blocked_ids", [])
+    result = set(int(i) for i in ids if str(i).isdigit())
+    log.info(f"Bloklangan IDlar yuklandi: {len(result)} ta")
+    return result
+
 
 async def save_known_groups():
     """Bot admin bo'lgan guruhlarni TG ga JSON sifatida saqlaydi."""
