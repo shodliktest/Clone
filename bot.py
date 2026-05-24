@@ -6,24 +6,22 @@ from utils import ram_cache as ram
 from handlers import webauth
 
 
+import blocked as _blocked_mod
+
 async def _send_blocked_msg(bot, uid: int):
-    """Bloklangan userga xabar + tugmalar yuborish."""
+    """Bloklangan userga xabar + tugmalar."""
     from config import ADMIN_USERNAME
-    b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(
-        text="📩 Adminga murojat",
-        url=f"https://t.me/{ADMIN_USERNAME}"
-    ))
-    b.row(InlineKeyboardButton(
-        text="🤖 Bot orqali yozish",
-        callback_data="contact_admin"
-    ))
+    from aiogram.utils.keyboard import InlineKeyboardBuilder as _IKB
+    from aiogram.types import InlineKeyboardButton as _IKBtn
+    b = _IKB()
+    b.row(_IKBtn(text="📩 Adminga murojat", url=f"https://t.me/{ADMIN_USERNAME}"))
+    b.row(_IKBtn(text="🤖 Bot orqali yozish", callback_data="contact_admin"))
     try:
         await bot.send_message(
             uid,
             "🚫 <b>Hisobingiz bloklangan</b>\n\n"
-            "Botdan foydalanish imkoni to\'xtatilgan.\n\n"
-            "Muammo bo\'lsa yoki to\'lov qilgan bo\'lsangiz\n"
+            "Botdan foydalanish to\'xtatilgan.\n\n"
+            "To\'lov qilgan bo\'lsangiz yoki xato bo\'lsa\n"
             "admin bilan bog\'laning 👇",
             reply_markup=b.as_markup()
         )
@@ -33,33 +31,40 @@ async def _send_blocked_msg(bot, uid: int):
 
 class BlockedUserMiddleware(BaseMiddleware):
     """
-    Bloklangan foydalanuvchilar botdan umuman foydalana olmasin.
-    Message, CallbackQuery, PollAnswer — barcha eventlar tekshiriladi.
+    Barcha event turlarida bloklangan userlarni to'xtatadi.
+    blocked.py dan tez O(1) tekshiruv.
     """
+    # contact_admin — bloklangan user ham murojat qila olsin
+    ALLOWED_CALLBACKS = {"contact_admin"}
+
     async def __call__(self, handler, event, data):
-        from aiogram.types import PollAnswer as _PA
+        from aiogram.types import PollAnswer as _PA, InlineQuery as _IQ
+
         uid = None
         if isinstance(event, Message):
             uid = event.from_user.id if event.from_user else None
         elif isinstance(event, CallbackQuery):
             uid = event.from_user.id if event.from_user else None
+            # Murojat tugmasi — o'tkazib yuborish
+            if uid and event.data in self.ALLOWED_CALLBACKS:
+                return await handler(event, data)
         elif isinstance(event, _PA):
             uid = event.user.id if event.user else None
+        elif isinstance(event, _IQ):
+            uid = event.from_user.id if event.from_user else None
 
-        if uid and ram.is_user_blocked(uid):
-            # contact_admin callback — bloklangan user ham murojat qilsin
-            if isinstance(event, CallbackQuery) and event.data == "contact_admin":
-                return await handler(event, data)
-
+        if uid and _blocked_mod.is_blocked(uid):
             bot = data.get("bot")
             if bot:
                 await _send_blocked_msg(bot, uid)
             if isinstance(event, CallbackQuery):
                 try:
-                    await event.answer("🚫 Hisobingiz bloklangan!", show_alert=True)
+                    await event.answer(
+                        "🚫 Hisobingiz bloklangan!", show_alert=True
+                    )
                 except Exception:
                     pass
-            return   # Handler ga o'tkazmaymiz
+            return  # Handler ga O'TKAZMAYMIZ
 
         return await handler(event, data)
 
@@ -179,6 +184,7 @@ async def main():
     dp.message.middleware(BlockedUserMiddleware())
     dp.callback_query.middleware(BlockedUserMiddleware())
     dp.poll_answer.middleware(BlockedUserMiddleware())
+    dp.inline_query.middleware(BlockedUserMiddleware())
     dp.message.middleware(ClearMenuMiddleware())
     dp.callback_query.middleware(ClearMenuMiddleware())
     dp.message.middleware(GroupTrackerMiddleware())
@@ -213,7 +219,7 @@ async def main():
         settings = await tg_db.get_settings_tg()
         if settings: ram.set_all_settings(settings)
         log.info(f"✅ Yuklandi: {ram.stats()['tests']} test meta, {ram.stats()['users']} user (savollar lazy)")
-        ram.load_blocked_from_cache()
+        _blocked_mod.load()
 
     # Background tasklar
     asyncio.create_task(_midnight_flush_loop(bot))
@@ -466,7 +472,7 @@ async def _main_no_signals():
         settings = await tg_db.get_settings_tg()
         if settings: ram.set_all_settings(settings)
         log.info(f"✅ Yuklandi: {ram.stats()['tests']} test meta, {ram.stats()['users']} user")
-        ram.load_blocked_from_cache()
+        _blocked_mod.load()
 
     # Startup da bot admin bo'lgan guruhlarni aniqlash
     asyncio.create_task(_scan_groups_on_startup(bot))
