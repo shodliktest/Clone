@@ -221,7 +221,8 @@ def admin_kb():
         InlineKeyboardButton(text="🗂 Backuplar",   callback_data="adm_backups"),
     )
     b.row(
-        InlineKeyboardButton(text="📨 Forward rejimi", callback_data="admin_forward_mode"),
+        InlineKeyboardButton(text="📨 Forward rejimi",    callback_data="admin_forward_mode"),
+        InlineKeyboardButton(text="⚙️ Test yaratish",     callback_data="admin_creation_settings"),
     )
     b.row(InlineKeyboardButton(text="🏠 Menyu", callback_data="main_menu"))
     return b.as_markup()
