@@ -414,6 +414,12 @@ async def adm_test_detail(callback: CallbackQuery):
             InlineKeyboardButton(text="👥 Kim yechgan",    callback_data=f"test_solvers_{tid}_0"),
             InlineKeyboardButton(text="⏱ Poll vaqti",      callback_data=f"edit_poll_time_{tid}"),
         )
+        # Web tahrirlash tugmasi
+        from handlers.webauth import WEBAPP_URL
+        b.row(InlineKeyboardButton(
+            text="🌐 Tahrirlash (web)",
+            url=f"{WEBAPP_URL}/edit.html?id={tid}"
+        ))
         b.row(InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"del_test_{tid}"))
     cat = meta.get("category","")[:30]
     b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"adm_cat_{cat}_0"))
