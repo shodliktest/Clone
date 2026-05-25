@@ -37,3 +37,6 @@ class AllowedUsersState(StatesGroup):
 
 class EditTestTitle(StatesGroup):
     waiting_title = State()
+
+class SplitTestSt(StatesGroup):
+    waiting_count = State()
