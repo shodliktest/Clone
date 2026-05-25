@@ -265,13 +265,13 @@ def visibility_kb():
 
 def mytest_settings_kb(tid, is_paused=False, is_admin=False):
     """Mening testlarim — test sozlamalari"""
-    from config import STREAMLIT_URL, GITHUB_PAGES_URL
-    edit_url = f"{GITHUB_PAGES_URL}/edit.html?id={tid}&api={STREAMLIT_URL}"
+    from handlers.webauth import WEBAPP_URL
+    edit_url = f"{WEBAPP_URL}/edit.html?id={tid}"
 
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="👁 Ko'rish",          callback_data=f"mytest_view_{tid}"))
     b.row(InlineKeyboardButton(
-        text="✏️ Tahrirlash (Web)",
+        text="🌐 Tahrirlash (web)",
         url=edit_url
     ))
     b.row(
