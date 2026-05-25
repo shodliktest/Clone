@@ -1,8 +1,135 @@
-"""🌐 QUIZ BOT — Admin Panel"""
+"""🌐 QUIZ BOT — Admin Panel + Web API"""
 import streamlit as st
 import pandas as pd
+import json
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
+
+# ══ WEB API — Sayt (Vercel) dan kelgan so'rovlar ══════════════
+# edit.html va catalog.html quyidagi endpointlarni ishlatadi:
+#   ?api=public_tests          → public testlar ro'yxati (JSON)
+#   ?api=test&id=TID           → bitta test to'liq (JSON)
+#   ?api=save_test  (POST)     → yangi test saqlash (JSON)
+#   ?api=otp&code=CODE         → OTP tekshirish va test olish
+# Streamlit query_params orqali aniqlanadi, JSON text qaytariladi.
+
+def _json_response(data: dict):
+    """Streamlit orqali JSON qaytarish — st.write() bilan."""
+    st.write(json.dumps(data, ensure_ascii=False, default=str))
+    st.stop()
+
+_qp = st.query_params
+_api_action = _qp.get("api", "")
+
+if _api_action == "public_tests":
+    # Barcha public testlar ro'yxati (savollar BEZ — faqat meta)
+    try:
+        from utils import ram_cache as ram
+        tests = ram.get_tests_meta()
+        public = [
+            {k: v for k, v in t.items() if k != "questions"}
+            for t in tests
+            if t.get("visibility") == "public" and t.get("is_active", True)
+        ]
+        _json_response({"ok": True, "tests": public, "count": len(public)})
+    except Exception as e:
+        _json_response({"ok": False, "error": str(e)})
+
+elif _api_action == "test":
+    # Bitta test to'liq (savollar bilan)
+    tid = _qp.get("id", "").strip().upper()
+    if not tid:
+        _json_response({"ok": False, "error": "id parametri kerak"})
+    try:
+        import asyncio
+        from utils import tg_db, ram_cache as ram
+
+        # Avval RAM cache dan tekshir
+        cached = ram.get_cached_questions(tid)
+        if cached:
+            _json_response({"ok": True, "test": cached})
+
+        # Yo'q bo'lsa TG dan yuklash
+        async def _load():
+            return await tg_db.get_test_full(tid)
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(asyncio.run, _load())
+                    test = future.result(timeout=15)
+            else:
+                test = loop.run_until_complete(_load())
+        except Exception:
+            test = asyncio.run(_load())
+
+        if test and test.get("questions"):
+            _json_response({"ok": True, "test": test})
+        else:
+            # Faqat meta qaytaramiz
+            meta = ram.get_test_meta(tid)
+            if meta:
+                _json_response({"ok": True, "test": meta, "meta_only": True})
+            else:
+                _json_response({"ok": False, "error": "Test topilmadi"})
+    except Exception as e:
+        _json_response({"ok": False, "error": str(e)})
+
+elif _api_action == "otp":
+    # OTP kod bilan testni olish
+    code = _qp.get("code", "").strip()
+    if not code:
+        _json_response({"ok": False, "error": "code parametri kerak"})
+    try:
+        from utils import tg_db, ram_cache as ram
+        result = tg_db.verify_otp(code)
+        if not result.get("ok"):
+            _json_response(result)
+        tid = result.get("test_id", "")
+        cached = ram.get_cached_questions(tid)
+        if cached:
+            _json_response({"ok": True, "test": cached, "uid": result.get("uid", 0)})
+        else:
+            _json_response({"ok": True, "test_id": tid, "uid": result.get("uid", 0),
+                            "meta_only": True})
+    except Exception as e:
+        _json_response({"ok": False, "error": str(e)})
+
+elif _api_action == "save_test":
+    # edit.html dan POST so'rovi — yangi test saqlash
+    # Streamlit POST body ni to'g'ridan o'qiy olmaydi,
+    # shu sababli GET parametr sifatida JSON yuborilgan bo'lsa ham qabul qilamiz
+    try:
+        payload_str = _qp.get("payload", "")
+        if payload_str:
+            payload = json.loads(payload_str)
+        else:
+            _json_response({"ok": False, "error": "payload parametri kerak (GET orqali)"})
+
+        import asyncio
+        from utils import tg_db, ram_cache as ram
+
+        async def _save(test_data):
+            return await tg_db.save_test_full(test_data)
+
+        try:
+            ok = asyncio.run(_save(payload))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            ok = loop.run_until_complete(_save(payload))
+            loop.close()
+
+        if ok:
+            ram.add_test_meta(payload)
+            _json_response({"ok": True, "test_id": payload.get("test_id", "")})
+        else:
+            _json_response({"ok": False, "error": "TG ga saqlanmadi"})
+    except Exception as e:
+        _json_response({"ok": False, "error": str(e)})
+
+# ══ Normal UI (API so'rovi bo'lmasa) ══════════════════════════
 
 st.set_page_config(
     page_title="Quiz Bot Admin",
