@@ -228,23 +228,26 @@ async def _sync_from_tg():
     """
     Web orqali qo'shilgan testlarni TG kanaldan RAMga yuklash.
     tg_db.web_sync_loop() tomonidan chaqiriladi.
-    To'g'ridan tg_db funksiyalaridan foydalanadi.
+    Yangi chunked arxitektura bilan ishlaydi.
     """
     from utils import tg_db
     if not tg_db.ready():
         return 0
 
     try:
-        new_index = await tg_db._load_index()
-        if not new_index or "tests_meta" not in new_index:
+        # Yangi tg_db da _load_index yo'q — get_tests_meta() ishlatamiz
+        # (u _index["tests_meta"] ni qaytaradi, init da chunklar yuklanadi)
+        fresh_metas = tg_db.get_tests_meta()
+        if not fresh_metas:
             return 0
 
         ram_ids = {t.get("test_id") for t in ram.get_all_tests_meta()}
         added = 0
-        for meta in new_index.get("tests_meta", []):
+        for meta in fresh_metas:
             tid = meta.get("test_id")
             if tid and tid not in ram_ids:
-                ram.add_test_meta(meta)
+                clean = {k: v for k, v in meta.items() if k != "questions"}
+                ram.add_test_meta(clean)
                 added += 1
                 log.info(f"_sync_from_tg: {tid} qo'shildi")
         return added
