@@ -280,7 +280,7 @@ def mytest_settings_kb(tid, is_paused=False, is_admin=False):
     )
     b.row(
         InlineKeyboardButton(text="📊 Kim yechgan",        callback_data=f"test_solvers_{tid}_0"),
-        InlineKeyboardButton(text="📄 TXT yuklab olish",   callback_data=f"mytest_txt_{tid}"),
+        InlineKeyboardButton(text="✂️ Bo'lish",           callback_data=f"mytest_txt_{tid}"),
     )
     if is_admin:
         b.row(
