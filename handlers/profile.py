@@ -11,7 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from utils.db import (get_user, get_my_tests, get_user_results,
                       get_analysis, get_test_full, get_test_stats_for_user,
                       pause_test, get_test_solvers)
-from utils.states import AllowedUsersState, EditTestTitle
+from utils.states import AllowedUsersState, EditTestTitle, SplitTestSt
 from utils.ram_cache import get_test_by_id, get_test_meta, get_test_meta_any
 from keyboards.keyboards import main_kb, analysis_kb, mytest_settings_kb, CAT_ICONS, get_cat_icon
 
@@ -852,19 +852,167 @@ async def my_test_view(callback: CallbackQuery):
     await _send_test_card(callback, test, tid, viewer_uid=uid, edit=True)
 
 
+# ── Raqamli emoji yordamchisi ─────────────────────────────────
+def _num_to_emoji(n: int) -> str:
+    """1 → 1️⃣  10 → 🔟  11 → 1️⃣1️⃣"""
+    _D = {"0":"0️⃣","1":"1️⃣","2":"2️⃣","3":"3️⃣","4":"4️⃣",
+          "5":"5️⃣","6":"6️⃣","7":"7️⃣","8":"8️⃣","9":"9️⃣"}
+    if n == 10: return "🔟"
+    if n == 100: return "💯"
+    return "".join(_D.get(c, c) for c in str(n))
+
+
+# ── FSM: testni bo'lish ────────────────────────────────────────
+
+
 @router.callback_query(F.data.startswith("mytest_txt_"))
-async def my_test_to_txt(callback: CallbackQuery):
-    await callback.answer("⏳ TXT tayyorlanmoqda...")
+async def mytest_split_ask(callback: CallbackQuery, state: FSMContext):
+    """Bo'lish tugmasi bosildi — nechtaga bo'lishni so'raymiz."""
+    await callback.answer()
     tid  = callback.data[11:]
-    test = await get_test_full(tid) or get_test_by_id(tid)
-    if not test:
-        return await callback.message.answer("❌ Test topilmadi.")
-    txt = _test_to_txt(test)
-    doc = BufferedInputFile(txt.encode("utf-8"), filename=f"{test.get('title',tid)}.txt")
-    await callback.message.answer_document(
-        doc,
-        caption=f"📄 <b>{test.get('title')}</b>\n📋 {len(test.get('questions',[]))} savol | <code>{tid}</code>"
+    meta = get_test_meta_any(tid)
+    if not meta:
+        return await callback.answer("❌ Test topilmadi.", show_alert=True)
+    uid  = callback.from_user.id
+    from config import ADMIN_IDS
+    if uid != meta.get("creator_id") and uid not in ADMIN_IDS:
+        return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
+
+    qc = meta.get("question_count", 0) or 0
+    await state.set_state(SplitTestSt.waiting_count)
+    await state.update_data(split_tid=tid)
+
+    b = InlineKeyboardBuilder()
+    # Qulay tezkor tugmalar
+    for n in [2, 3, 4, 5, 10]:
+        if qc >= n * 2:
+            b.button(text=f"{n} qismga", callback_data=f"split_do_{tid}_{n}")
+    b.adjust(3)
+    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data=f"mytest_settings_{tid}"))
+
+    await callback.message.answer(
+        f"✂️ <b>Testni bo'lish</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 <b>{meta.get('title')}</b>\n"
+        f"📋 Jami: <b>{qc} ta savol</b>\n\n"
+        f"Nechta qismga bo'lishni tanlang yoki raqam yozing\n"
+        f"<i>(masalan: 3 — har qismda ~{qc//3 if qc else '?'} ta savol)</i>",
+        reply_markup=b.as_markup()
     )
+
+
+@router.callback_query(F.data.startswith("split_do_"))
+async def split_do_cb(callback: CallbackQuery, state: FSMContext):
+    """Tezkor tugma orqali bo'lish."""
+    await callback.answer("⏳ Bo'linmoqda...")
+    await state.clear()
+    parts = callback.data.split("_")   # split_do_TID_N
+    tid   = parts[2]
+    n     = int(parts[3])
+    await _do_split(callback.message, callback.from_user, tid, n)
+
+
+@router.message(SplitTestSt.waiting_count)
+async def split_count_input(message: Message, state: FSMContext):
+    """Raqam kiritildi."""
+    data = await state.get_data()
+    tid  = data.get("split_tid", "")
+    text = message.text.strip() if message.text else ""
+    if not text.isdigit() or int(text) < 2:
+        return await message.answer("❌ Kamida 2 kiriting yoki /bekor")
+    n = int(text)
+    meta = get_test_meta_any(tid)
+    qc   = meta.get("question_count", 0) if meta else 0
+    if n > qc // 2:
+        return await message.answer(f"❌ Maksimal {qc // 2} qismga bo'lish mumkin ({qc} savol bor)")
+    await state.clear()
+    await _do_split(message, message.from_user, tid, n)
+
+
+async def _do_split(msg, user, tid: str, n: int):
+    """Asosiy split logikasi — n ta yangi test yaratadi."""
+    from utils.db import create_test
+    from keyboards.keyboards import test_created_kb
+
+    # To'liq testni yuklash
+    test = await get_test_full(tid) or get_test_by_id(tid)
+    if not test or not test.get("questions"):
+        return await msg.answer("❌ Test topilmadi yoki savollar yo'q.")
+
+    qs      = test["questions"]
+    total   = len(qs)
+    title   = test.get("title", "Test")
+    cat     = test.get("category", "Boshqa")
+
+    # Asl test sozlamalari — barchasi meros
+    base = {
+        "category":      cat,
+        "difficulty":    test.get("difficulty", "medium"),
+        "visibility":    test.get("visibility", "public"),
+        "time_limit":    test.get("time_limit", 0),
+        "poll_time":     test.get("poll_time", 30),
+        "passing_score": test.get("passing_score", 60),
+        "max_attempts":  test.get("max_attempts", 0),
+    }
+
+    # Savollarni n ta teng qismga bo'lish
+    size   = (total + n - 1) // n   # ceiling division
+    chunks = [qs[i*size:(i+1)*size] for i in range(n)]
+    chunks = [c for c in chunks if c]  # bo'sh qismlarni olib tashlash
+    real_n = len(chunks)
+
+    info = await msg.answer(
+        f"⏳ <b>{real_n} ta yangi test yaratilmoqda...</b>\n"
+        f"📝 <i>{title}</i> — {total} savol → {real_n} qism"
+    )
+
+    created_tids = []
+    for i, chunk in enumerate(chunks):
+        from_q = i * size + 1
+        to_q   = min((i + 1) * size, total)
+
+        # Nom: "Test nomi 1️⃣➖🔟" kabi
+        from_e = _num_to_emoji(from_q)
+        to_e   = _num_to_emoji(to_q)
+        part_title = f"{title} {from_e}➖{to_e}"
+
+        td = {**base, "title": part_title, "questions": chunk}
+        new_tid = await create_test(
+            user.id, td,
+            creator_name=user.full_name or "",
+            creator_username=user.username or "",
+        )
+        created_tids.append((new_tid, part_title, len(chunk)))
+
+    # Natija xabari
+    bu   = (await msg.bot.get_me()).username
+    text = (
+        f"✅ <b>Test muvaffaqiyatli bo'lindi!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 Asl test: <b>{title}</b> ({total} savol)\n"
+        f"✂️ Bo'laklari: <b>{real_n} ta</b>\n"
+        f"📁 Fan: {cat}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    for new_tid, part_title, qcount in created_tids:
+        link = f"https://t.me/{bu}?start={new_tid}"
+        text += f"\n📌 <b>{part_title}</b>\n"
+        text += f"   🆔 <code>{new_tid}</code> | 📋 {qcount} savol\n"
+        text += f"   🔗 <code>{link}</code>\n"
+
+    # Har bir yangi test uchun alohida xabar (test_created_kb bilan)
+    try:
+        await info.delete()
+    except Exception:
+        pass
+
+    await msg.answer(text)
+
+    for new_tid, part_title, _ in created_tids:
+        await msg.answer(
+            f"🎉 <b>{part_title}</b>\n🆔 <code>{new_tid}</code>\n\n👇 Boshlash usulini tanlang:",
+            reply_markup=test_created_kb(new_tid, bu)
+        )
 
 
 
