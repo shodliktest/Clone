@@ -57,11 +57,12 @@ async def open_webapp(message: Message):
     url = _login_url(message.from_user)
     b = InlineKeyboardBuilder()
     # 1. WebApp tugmasi — Telegram ichida to'g'ri ochiladi (eng qulay)
+    # WebApp ichida ham uid+name parametrlarini beramiz — login.html avtomatik kiradi
     b.row(InlineKeyboardButton(
         text="🌐 Saytni ochish (Telegram ichida)",
-        web_app=WebAppInfo(url=f"{WEBAPP_URL}/login.html")
+        web_app=WebAppInfo(url=url)
     ))
-    # 2. Oddiy URL — brauzerda ochiladi, uid parametr bilan avtomatik kiradi
+    # Oddiy URL — brauzerda ochiladi, uid parametr bilan avtomatik kiradi
     b.row(InlineKeyboardButton(
         text="🔗 Brauzerda ochish",
         url=url
