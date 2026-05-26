@@ -23,54 +23,38 @@ def _login_url(user) -> str:
     return f"{WEBAPP_URL}/login.html?{params}"
 
 
-async def _send_id(message: Message):
-    uid   = message.from_user.id
-    name  = message.from_user.full_name or "Foydalanuvchi"
-    uname = f"@{message.from_user.username}" if message.from_user.username else "Mavjud emas"
-
-    await message.answer(
-        f"🌐 <b>SAYTGA KIRISH</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Quyidagi ID ni saytga kiriting:\n\n"
-        f"<code>{uid}</code>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 Ism: {name}\n"
-        f"🔗 Username: {uname}\n\n"
-        f"<i>💡 ID ni bosib nusxa oling, keyin saytga kiriting</i>"
-    )
-
-
-@router.message(Command("id"))
-@router.message(F.text == "🌐 Sayt ID")
-async def send_web_id(message: Message):
-    await _send_id(message)
-
-
-@router.message(CommandStart(deep_link=True, magic=F.args == "getid"))
-async def start_getid(message: Message):
-    await _send_id(message)
-
-
-@router.message(Command("webapp"))
-@router.message(F.text == "🌐 Saytga kirish")
-async def open_webapp(message: Message):
+async def _open_webapp(message: Message):
+    """Saytga kirish havolasini yuborish — ID so'ramasdan, avtomatik."""
     url = _login_url(message.from_user)
-    b = InlineKeyboardBuilder()
-    # 1. WebApp tugmasi — Telegram ichida to'g'ri ochiladi (eng qulay)
-    # WebApp ichida ham uid+name parametrlarini beramiz — login.html avtomatik kiradi
+    b   = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(
         text="🌐 Saytni ochish (Telegram ichida)",
         web_app=WebAppInfo(url=url)
     ))
-    # Oddiy URL — brauzerda ochiladi, uid parametr bilan avtomatik kiradi
     b.row(InlineKeyboardButton(
         text="🔗 Brauzerda ochish",
         url=url
     ))
     await message.answer(
         "🌐 <b>TestPro saytiga kirish</b>\n\n"
-        "Birinchi tugma — Telegram ichida ochadi (tavsiya etiladi)\n"
-        "Ikkinchi tugma — brauzerda ochadi, avtomatik kirasiz:",
+        "Tugmani bosing — avtomatik kirasiz, ID yozish shart emas:",
         reply_markup=b.as_markup()
     )
 
+
+@router.message(Command("webapp"))
+@router.message(F.text == "🌐 Saytga kirish")
+@router.message(F.text == "🌐 Sayt ID")  # eski tugma ham ishlaydi
+async def open_webapp(message: Message):
+    await _open_webapp(message)
+
+
+@router.message(Command("id"))
+async def send_web_id(message: Message):
+    """Eski /id buyrug'i — endi ham havola beradi"""
+    await _open_webapp(message)
+
+
+@router.message(CommandStart(deep_link=True, magic=F.args == "getid"))
+async def start_getid(message: Message):
+    await _open_webapp(message)
