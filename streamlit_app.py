@@ -14,8 +14,14 @@ from zoneinfo import ZoneInfo
 # Streamlit query_params orqali aniqlanadi, JSON text qaytariladi.
 
 def _json_response(data: dict):
-    """Streamlit orqali JSON qaytarish — st.write() bilan."""
-    st.write(json.dumps(data, ensure_ascii=False, default=str))
+    """Streamlit orqali JSON qaytarish."""
+    payload = json.dumps(data, ensure_ascii=False, default=str)
+    # HTML meta redirect o'rniga to'g'ridan JSON ko'rsatish
+    st.markdown(
+        f"<script>window.parent.postMessage({payload},'*')</script>"
+        f"<pre style='font-family:monospace;font-size:12px;white-space:pre-wrap'>{payload}</pre>",
+        unsafe_allow_html=True
+    )
     st.stop()
 
 _qp = st.query_params
@@ -128,6 +134,193 @@ elif _api_action == "save_test":
             _json_response({"ok": False, "error": "TG ga saqlanmadi"})
     except Exception as e:
         _json_response({"ok": False, "error": str(e)})
+
+# ══ RAM UPDATE — Sayt savollarni to'g'ridan bot RAMga yozadi ══
+elif _api_action == "ram_update":
+    """
+    Sayt (edit.html) savollarni o'zgartirdi:
+    1. Bot RAMdagi eski savollarni tozalaydi
+    2. Yangi savollarni TG kanalga saqlaydi
+    3. RAM meta yangilanadi
+    4. Creator ga hisobot xabar yuboriladi
+    """
+    try:
+        import asyncio
+        from utils import tg_db, ram_cache as ram
+
+        tid       = _qp.get("tid", "").strip().upper()
+        qs_json   = _qp.get("questions", "")
+        old_qc    = int(_qp.get("old_qc", "0") or "0")
+
+        if not tid:
+            _json_response({"ok": False, "error": "tid kerak"})
+
+        questions = json.loads(qs_json) if qs_json else []
+
+        # Mavjud test meta
+        meta = ram.get_test_meta_any(tid) if hasattr(ram, "get_test_meta_any") else (
+            ram.get_test_meta(tid) or {}
+        )
+        if not meta:
+            _json_response({"ok": False, "error": "Test topilmadi"})
+
+        # To'liq test obyekti
+        async def _do_update():
+            full = await tg_db.get_test_full(tid)
+            if not full:
+                full = dict(meta)
+            full["questions"]      = questions
+            full["question_count"] = len(questions)
+            full["updated_at"]     = str(__import__("datetime").datetime.utcnow().isoformat())
+            full["source"]         = full.get("source", "web")
+
+            # 1. TG kanalga saqlash
+            ok = await tg_db.save_test_full(full)
+            if not ok:
+                return False, full
+
+            # 2. RAM yangilash
+            ram.invalidate_cached_questions(tid)
+            ram.update_test_meta(tid, {
+                "question_count": len(questions),
+                "updated_at":     full["updated_at"],
+            })
+
+            # 3. Creator ga hisobot
+            creator_id = meta.get("creator_id")
+            if creator_id:
+                new_qc = len(questions)
+                diff   = new_qc - old_qc
+                if diff > 0:
+                    change = f"📈 +{diff} ta savol qo'shildi"
+                elif diff < 0:
+                    change = f"📉 {abs(diff)} ta savol o'chirildi"
+                else:
+                    change = "✏️ Savol matnlari / javoblari yangilandi"
+
+                txt = (
+                    "✏️ <b>Test tahrirlandi!</b>
+"
+                    + "━" * 24 + "
+"
+                    + f"📝 <b>{meta.get('title', tid)}</b>
+"
+                    + f"🆔 <code>{tid}</code>
+
+"
+                    + change + "
+"
+                    + f"📋 Jami: {new_qc} ta savol
+
+"
+                    + "ℹ️ Yangilangan test keyingi yechishdan kuchga kiradi."
+                )
+                try:
+                    await tg_db._bot.send_message(creator_id, txt)
+                except Exception:
+                    pass
+
+            return True, full
+
+        try:
+            ok, full = asyncio.run(_do_update())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            ok, full = loop.run_until_complete(_do_update())
+            loop.close()
+
+        if ok:
+            _json_response({"ok": True, "count": len(questions), "tid": tid})
+        else:
+            _json_response({"ok": False, "error": "TG ga saqlanmadi"})
+
+    except Exception as e:
+        _json_response({"ok": False, "error": str(e)})
+
+
+# ══ RAM SPLIT — Bo'lingan testlarni bot RAMga yozadi ════════════
+elif _api_action == "ram_split":
+    """
+    edit.html testni bo'ldi:
+    Har bir bo'lak uchun:
+      1. TG kanalga saqlash
+      2. RAMga qo'shish
+      3. Creator ga test_created_kb bilan xabar
+    """
+    try:
+        import asyncio
+        from utils import tg_db, ram_cache as ram
+
+        parts_json  = _qp.get("parts", "")
+        creator_id  = int(_qp.get("creator_id", "0") or "0")
+
+        if not parts_json:
+            _json_response({"ok": False, "error": "parts kerak"})
+
+        parts = json.loads(parts_json)  # [{test_id, title, questions, ...}, ...]
+
+        async def _do_split():
+            from keyboards.keyboards import test_created_kb
+            bu = (await tg_db._bot.get_me()).username
+            created = []
+
+            for part in parts:
+                tid   = part.get("test_id", "")
+                if not tid:
+                    continue
+
+                # TG kanalga saqlash
+                ok = await tg_db.save_test_full(part)
+                if not ok:
+                    continue
+
+                # RAMga qo'shish
+                clean = {k: v for k, v in part.items() if k != "questions"}
+                ram.add_test_meta(clean)
+
+                # Creator ga xabar
+                if creator_id:
+                    title = part.get("title", tid)
+                    qc    = len(part.get("questions", []))
+                    txt   = (
+                        "✂️ <b>Test bo'linmasi saqlandi!</b>
+"
+                        + "━" * 24 + "
+"
+                        + f"📝 <b>{title}</b>
+"
+                        + f"📋 {qc} ta savol
+"
+                        + f"🆔 <code>{tid}</code>
+
+"
+                        + "👇 Boshlash usulini tanlang:"
+                    )
+                    try:
+                        await tg_db._bot.send_message(
+                            creator_id, txt,
+                            reply_markup=test_created_kb(tid, bu)
+                        )
+                    except Exception:
+                        pass
+
+                created.append({"tid": tid, "title": part.get("title", tid),
+                                 "count": len(part.get("questions", []))})
+
+            return created
+
+        try:
+            created = asyncio.run(_do_split())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            created = loop.run_until_complete(_do_split())
+            loop.close()
+
+        _json_response({"ok": True, "created": created})
+
+    except Exception as e:
+        _json_response({"ok": False, "error": str(e)})
+
 
 # ══ Normal UI (API so'rovi bo'lmasa) ══════════════════════════
 
