@@ -1398,20 +1398,63 @@ async def _notify_web_test(meta: dict, tid: str):
         log.warning("_notify_web_test %s: %s", tid, _e)
 
 
+async def _read_pinned_index() -> dict:
+    """
+    Pinned xabardagi faylni o'qiydi.
+    Fayl nomi muhim emas — index.json ham, index_meta.json ham ishlaydi.
+    """
+    if not ready():
+        return {}
+    try:
+        chat = await _bot.get_chat(_cid)
+        pin  = getattr(chat, "pinned_message", None)
+        if not pin:
+            return {}
+        doc = getattr(pin, "document", None)
+        if not doc:
+            return {}
+        data = await _read_file(doc.file_id)
+        if isinstance(data, dict):
+            return data
+    except Exception as e:
+        log.warning(f"_read_pinned_index: {e}")
+    return {}
+
+
 async def web_sync_loop():
     await asyncio.sleep(30)
-    consecutive_errors = 0
+    consecutive_errors  = 0
+    last_pin_msg_id     = None   # Oxirgi ko'rgan pinned msg_id
     while True:
         try:
-            await asyncio.sleep(300)   # 5 daqiqa
+            await asyncio.sleep(60)    # 1 daqiqa
             if not ready(): continue
             from utils import ram_cache as ram
+
+            # Pinned xabarni o'qish
             try:
-                new_meta = await asyncio.wait_for(_load_meta(), timeout=20)
+                chat = await asyncio.wait_for(_bot.get_chat(_cid), timeout=10)
+                pin  = getattr(chat, "pinned_message", None)
+                if not pin:
+                    continue
+                cur_pin_id = pin.message_id
+            except Exception:
+                consecutive_errors += 1
+                continue
+
+            # Pin o'zgarmagan bo'lsa — tekshirish shart emas
+            if cur_pin_id == last_pin_msg_id:
+                continue
+            last_pin_msg_id = cur_pin_id
+
+            # Pinned faylni o'qish
+            try:
+                new_meta = await asyncio.wait_for(_read_pinned_index(), timeout=20)
             except asyncio.TimeoutError:
                 consecutive_errors += 1
                 continue
-            if not new_meta: continue
+            if not new_meta:
+                continue
             consecutive_errors = 0
 
             new_metas    = []
@@ -1457,12 +1500,22 @@ async def web_sync_loop():
                     if meta.get("source", "") in ("web", "web_split"):
                         asyncio.create_task(_notify_web_test(meta, tid))
                 elif msg_changed:
+                    # Eski savol sonini saqlab qo'yamiz
+                    old_meta = next(
+                        (m for m in ram.get_all_tests_meta() if m.get("test_id") == tid),
+                        {}
+                    )
+                    old_qc = old_meta.get("question_count", 0)
+                    # RAMdan tozalash va yangilash
                     ram.invalidate_cached_questions(tid)
                     clean = {k: v for k, v in meta.items() if k != "questions"}
                     ram.update_test_meta(tid, clean)
                     _index[f"test_{tid}"] = new_msg_id
                     _index.pop(f"fid_{old_msg_id}", None)
                     updated += 1
+                    # Creator ga hisobot
+                    new_qc = meta.get("question_count", 0)
+                    asyncio.create_task(_notify_updated_test(meta, tid, old_qc, new_qc))
             if added:
                 log.info(f"Web sync: {added} yangi test")
                 mark_index_dirty()
