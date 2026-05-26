@@ -87,6 +87,7 @@ def main_kb(uid=None, chat_type="private"):
         [KeyboardButton(text="📊 Natijalarim"),       KeyboardButton(text="🏆 Reyting")],
         [KeyboardButton(text="🗂 Mening testlarim"),  KeyboardButton(text="👥 Referallarim")],
         [KeyboardButton(text="👤 Profil"),            KeyboardButton(text="ℹ️ Yordam")],
+        [KeyboardButton(text="🌐 Saytga kirish")],
     ]
     if uid:
         from config import ADMIN_IDS
@@ -161,7 +162,7 @@ def result_kb(tid, rid):
     return b.as_markup()
 
 
-def analysis_kb(rid, page, total):
+def analysis_kb(rid, page, total, tid="", is_creator=False):
     b   = InlineKeyboardBuilder()
     nav = []
     if page > 0:
@@ -170,10 +171,15 @@ def analysis_kb(rid, page, total):
     if page < total-1:
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"analysis_{rid}_{page+1}"))
     b.row(*nav)
+    if is_creator and tid:
+        from handlers.webauth import WEBAPP_URL
+        b.row(InlineKeyboardButton(
+            text="✏️ Savollarni tahrirlash (web)",
+            url=f"{WEBAPP_URL}/edit.html?id={tid}"
+        ))
     b.row(InlineKeyboardButton(text="⬅️ Natijaga", callback_data=f"res_back_{rid}"))
     b.row(InlineKeyboardButton(text="🏠 Bosh sahifa", callback_data="main_menu"))
     return b.as_markup()
-
 
 
 def answer_kb(letters):
