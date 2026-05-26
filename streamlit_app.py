@@ -197,23 +197,15 @@ elif _api_action == "ram_update":
                     change = f"📉 {abs(diff)} ta savol o'chirildi"
                 else:
                     change = "✏️ Savol matnlari / javoblari yangilandi"
-
+                NL  = "\n"
                 txt = (
-                    "✏️ <b>Test tahrirlandi!</b>
-"
-                    + "━" * 24 + "
-"
-                    + f"📝 <b>{meta.get('title', tid)}</b>
-"
-                    + f"🆔 <code>{tid}</code>
-
-"
-                    + change + "
-"
-                    + f"📋 Jami: {new_qc} ta savol
-
-"
-                    + "ℹ️ Yangilangan test keyingi yechishdan kuchga kiradi."
+                    "\u270f\ufe0f <b>Test tahrirlandi!</b>" + NL
+                    + "\u2501" * 24 + NL
+                    + "\U0001f4dd <b>" + meta.get("title", tid) + "</b>" + NL
+                    + "\U0001f194 <code>" + tid + "</code>" + NL + NL
+                    + change + NL
+                    + "\U0001f4cb Jami: " + str(new_qc) + " ta savol" + NL + NL
+                    + "\u2139\ufe0f Yangilangan test keyingi yechishdan kuchga kiradi."
                 )
                 try:
                     await tg_db._bot.send_message(creator_id, txt)
@@ -281,20 +273,14 @@ elif _api_action == "ram_split":
                 # Creator ga xabar
                 if creator_id:
                     title = part.get("title", tid)
-                    qc    = len(part.get("questions", []))
-                    txt   = (
-                        "✂️ <b>Test bo'linmasi saqlandi!</b>
-"
-                        + "━" * 24 + "
-"
-                        + f"📝 <b>{title}</b>
-"
-                        + f"📋 {qc} ta savol
-"
-                        + f"🆔 <code>{tid}</code>
-
-"
-                        + "👇 Boshlash usulini tanlang:"
+                    NL2 = "\n"
+                    txt = (
+                        "\u2702\ufe0f <b>Test bo'linmasi saqlandi!</b>" + NL2
+                        + "\u2501" * 24 + NL2
+                        + "\U0001f4dd <b>" + title + "</b>" + NL2
+                        + "\U0001f4cb " + str(qc) + " ta savol" + NL2
+                        + "\U0001f194 <code>" + tid + "</code>" + NL2 + NL2
+                        + "\U0001f447 Boshlash usulini tanlang:"
                     )
                     try:
                         await tg_db._bot.send_message(
