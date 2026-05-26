@@ -39,6 +39,9 @@ NOTIFS  = ["off", "on"]
 MAX_ANALYSIS_PER_USER = 30   # Max 30 test tahlil per user
 
 
+def _delete(k):
+    _store.pop(k, None)
+
 def _get(k, d=None):
     with _lck: return _RAM.get(k, d)
 
@@ -193,6 +196,10 @@ def get_cached_questions(tid):
     e["last_access"] = datetime.now(UTC)
     _set(f"qcache_{tid}", e)
     return e["test"]
+
+def invalidate_cached_questions(tid):
+    """Tahrirlangandan keyin RAM cache dan eski savollarni o'chirish."""
+    _delete(f"qcache_{tid}")
 
 def touch_test_access(tid):
     e = _get(f"qcache_{tid}")

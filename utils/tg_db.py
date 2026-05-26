@@ -1377,7 +1377,7 @@ async def web_sync_loop():
     consecutive_errors = 0
     while True:
         try:
-            await asyncio.sleep(43200)
+            await asyncio.sleep(300)   # 5 daqiqada bir tekshirish
             if not ready(): continue
             from utils import ram_cache as ram
             try:
@@ -1405,20 +1405,43 @@ async def web_sync_loop():
                     if k.startswith("test_"):
                         new_test_ids[k] = v
 
-            ram_ids = {t.get("test_id") for t in ram.get_all_tests_meta()}
-            added   = 0
+            ram_ids    = {t.get("test_id") for t in ram.get_all_tests_meta()}
+            added      = 0
+            updated    = 0
+
             for meta in new_metas:
                 tid = meta.get("test_id")
-                if not tid or tid in ram_ids: continue
-                clean = {k: v for k, v in meta.items() if k != "questions"}
-                ram.add_test_meta(clean)
-                if not any(m.get("test_id") == tid for m in _index.get("tests_meta", [])):
+                if not tid: continue
+
+                new_msg_id  = new_test_ids.get(f"test_{tid}")
+                old_msg_id  = _index.get(f"test_{tid}")
+                msg_changed = new_msg_id and str(new_msg_id) != str(old_msg_id or "")
+
+                if tid not in ram_ids:
+                    # Yangi test — qo'shish
+                    clean = {k: v for k, v in meta.items() if k != "questions"}
+                    ram.add_test_meta(clean)
                     _index.setdefault("tests_meta", []).insert(0, clean)
-                if new_test_ids.get(f"test_{tid}"):
-                    _index[f"test_{tid}"] = new_test_ids[f"test_{tid}"]
-                added += 1
-            if added:
-                log.info(f"Web sync: {added} yangi test")
+                    if new_msg_id:
+                        _index[f"test_{tid}"] = new_msg_id
+                    added += 1
+                elif msg_changed:
+                    # Mavjud test, lekin TG da yangi fayl bor (tahrirlangan)
+                    # RAM cache dan eski savollarni tozalash
+                    ram.invalidate_cached_questions(tid)
+                    # Meta ni yangilash (question_count, updated_at)
+                    clean = {k: v for k, v in meta.items() if k != "questions"}
+                    ram.update_test_meta(tid, clean)
+                    # Index msg_id ni yangilash
+                    _index[f"test_{tid}"] = new_msg_id
+                    # Eski fid cache ni tozalash
+                    if old_msg_id:
+                        _index.pop(f"fid_{old_msg_id}", None)
+                    updated += 1
+                    log.info(f"Web sync: {tid} yangilandi (msg {old_msg_id} → {new_msg_id})")
+
+            if added or updated:
+                log.info(f"Web sync: {added} yangi, {updated} yangilangan test")
                 mark_index_dirty()
 
         except asyncio.CancelledError:
