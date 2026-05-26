@@ -1372,12 +1372,38 @@ def get_otp_info(code: str) -> dict:
 # WEB SYNC
 # ══════════════════════════════════════════════════════════════
 
+
+async def _notify_web_test(meta: dict, tid: str):
+    if not meta.get("creator_id"):
+        return
+    try:
+        from keyboards.keyboards import test_created_kb
+        bu    = (await _bot.get_me()).username
+        title = meta.get("title", tid)
+        qc    = meta.get("question_count", 0)
+        lines = [
+            "\u2705 <b>Yangi test saqlandi!</b>",
+            "\u2501" * 24,
+            "\U0001f4dd <b>" + title + "</b>",
+            "\U0001f4cb " + str(qc) + " ta savol | \U0001f194 <code>" + tid + "</code>",
+            "",
+            "\U0001f447 Boshlash usulini tanlang:",
+        ]
+        await _bot.send_message(
+            meta["creator_id"],
+            "\n".join(lines),
+            reply_markup=test_created_kb(tid, bu)
+        )
+    except Exception as _e:
+        log.warning("_notify_web_test %s: %s", tid, _e)
+
+
 async def web_sync_loop():
     await asyncio.sleep(30)
     consecutive_errors = 0
     while True:
         try:
-            await asyncio.sleep(300)   # 5 daqiqada bir tekshirish
+            await asyncio.sleep(300)   # 5 daqiqa
             if not ready(): continue
             from utils import ram_cache as ram
             try:
@@ -1405,43 +1431,40 @@ async def web_sync_loop():
                     if k.startswith("test_"):
                         new_test_ids[k] = v
 
-            ram_ids    = {t.get("test_id") for t in ram.get_all_tests_meta()}
-            added      = 0
-            updated    = 0
+            # Ikkala format: bot (index_chunks) va proxy (tests_meta) ni qo'llab-quvvatlash
+            if "tests_meta" in new_meta and "index_chunks" not in new_meta:
+                # Proxy (web) format — tests_meta to'g'ridan
+                new_metas    = new_meta.get("tests_meta", [])
+                new_test_ids = {k: v for k, v in new_meta.items() if k.startswith("test_")}
 
+            ram_ids = {t.get("test_id") for t in ram.get_all_tests_meta()}
+            added   = 0
+            updated = 0
             for meta in new_metas:
                 tid = meta.get("test_id")
                 if not tid: continue
-
                 new_msg_id  = new_test_ids.get(f"test_{tid}")
                 old_msg_id  = _index.get(f"test_{tid}")
                 msg_changed = new_msg_id and str(new_msg_id) != str(old_msg_id or "")
-
                 if tid not in ram_ids:
-                    # Yangi test — qo'shish
                     clean = {k: v for k, v in meta.items() if k != "questions"}
                     ram.add_test_meta(clean)
-                    _index.setdefault("tests_meta", []).insert(0, clean)
+                    if not any(m.get("test_id") == tid for m in _index.get("tests_meta", [])):
+                        _index.setdefault("tests_meta", []).insert(0, clean)
                     if new_msg_id:
                         _index[f"test_{tid}"] = new_msg_id
                     added += 1
+                    if meta.get("source", "") in ("web", "web_split"):
+                        asyncio.create_task(_notify_web_test(meta, tid))
                 elif msg_changed:
-                    # Mavjud test, lekin TG da yangi fayl bor (tahrirlangan)
-                    # RAM cache dan eski savollarni tozalash
                     ram.invalidate_cached_questions(tid)
-                    # Meta ni yangilash (question_count, updated_at)
                     clean = {k: v for k, v in meta.items() if k != "questions"}
                     ram.update_test_meta(tid, clean)
-                    # Index msg_id ni yangilash
                     _index[f"test_{tid}"] = new_msg_id
-                    # Eski fid cache ni tozalash
-                    if old_msg_id:
-                        _index.pop(f"fid_{old_msg_id}", None)
+                    _index.pop(f"fid_{old_msg_id}", None)
                     updated += 1
-                    log.info(f"Web sync: {tid} yangilandi (msg {old_msg_id} → {new_msg_id})")
-
-            if added or updated:
-                log.info(f"Web sync: {added} yangi, {updated} yangilangan test")
+            if added:
+                log.info(f"Web sync: {added} yangi test")
                 mark_index_dirty()
 
         except asyncio.CancelledError:
