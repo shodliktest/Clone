@@ -226,6 +226,7 @@ async def main():
     asyncio.create_task(_users_auto_flush_loop(bot))
     asyncio.create_task(_cache_cleanup_loop())
     asyncio.create_task(_web_sync_watchdog())   # Watchdog bilan web sync
+    asyncio.create_task(_internal_api_server())  # Saytdan zahoti o'zgarish qabul qilish
     asyncio.create_task(tg_db.auto_flush_loop())
 
     # Admin ga xabar
@@ -308,6 +309,78 @@ async def _midnight_flush_loop(bot):
 async def _users_auto_flush_loop(bot):
     """Disabled — users faqat midnight da yuklanadi"""
     pass
+
+
+async def _internal_api_server():
+    """
+    Bot ichidagi HTTP server — sayt o'zgarishlarini ZAHOTI qabul qiladi.
+    Port: 8080 (Streamlit 8501 ishlatadi)
+
+    Endpoint: POST /internal?action=...
+      action=invalidate&tid=TID        → RAM cache tozalash
+      action=notify&tid=TID&...        → Creator ga xabar
+    """
+    from aiohttp import web as aio_web
+    from utils import tg_db, ram_cache as ram
+
+    async def handle(request):
+        action = request.rel_url.query.get("action", "")
+        tid    = request.rel_url.query.get("tid", "").strip().upper()
+
+        if not tid:
+            return aio_web.json_response({"ok": False, "error": "tid kerak"})
+
+        if action == "invalidate":
+            # 1. bot _tests_cache dan o'chirish
+            tg_db._tests_cache.pop(tid, None)
+            # 2. ram_cache dan o'chirish
+            ram.invalidate_cached_questions(tid)
+            log.info(f"internal_api: {tid} cache tozalandi")
+            return aio_web.json_response({"ok": True, "tid": tid})
+
+        if action == "notify_update":
+            try:
+                meta   = ram.get_test_meta_any(tid) or {}
+                old_qc = int(request.rel_url.query.get("old_qc", "0") or "0")
+                new_qc = int(request.rel_url.query.get("new_qc", "0") or "0")
+                # Cache tozalash ham
+                tg_db._tests_cache.pop(tid, None)
+                ram.invalidate_cached_questions(tid)
+                if meta.get("creator_id"):
+                    await tg_db._notify_updated_test(meta, tid, old_qc, new_qc)
+                log.info(f"internal_api: {tid} notify yuborildi")
+                return aio_web.json_response({"ok": True})
+            except Exception as e:
+                log.warning(f"internal_api notify: {e}")
+                return aio_web.json_response({"ok": False, "error": str(e)})
+
+        if action == "notify_split":
+            try:
+                import json as _json
+                parts = _json.loads(request.rel_url.query.get("parts", "[]"))
+                for part in parts:
+                    ptid = part.get("test_id", "")
+                    if ptid:
+                        await tg_db._notify_web_test(part, ptid)
+                return aio_web.json_response({"ok": True, "count": len(parts)})
+            except Exception as e:
+                return aio_web.json_response({"ok": False, "error": str(e)})
+
+        return aio_web.json_response({"ok": False, "error": "Noma'lum action"})
+
+    app    = aio_web.Application()
+    app.router.add_get("/internal", handle)
+    app.router.add_post("/internal", handle)
+
+    runner = aio_web.AppRunner(app)
+    await runner.setup()
+    site   = aio_web.TCPSite(runner, "0.0.0.0", 8080)
+    await site.start()
+    log.info("✅ Internal API server: http://0.0.0.0:8080/internal")
+
+    # Doimiy ishlaydi
+    while True:
+        await asyncio.sleep(3600)
 
 
 async def _web_sync_watchdog():
