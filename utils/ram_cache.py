@@ -40,7 +40,7 @@ MAX_ANALYSIS_PER_USER = 30   # Max 30 test tahlil per user
 
 
 def _delete(k):
-    _store.pop(k, None)
+    with _lck: _RAM.pop(k, None)
 
 def _get(k, d=None):
     with _lck: return _RAM.get(k, d)
