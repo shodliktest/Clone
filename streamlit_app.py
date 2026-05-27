@@ -135,68 +135,56 @@ elif _api_action == "save_test":
     except Exception as e:
         _json_response({"ok": False, "error": str(e)})
 
-# ══ RAM UPDATE — Sayt savollarni to'g'ridan bot RAMga yozadi ══
+# ══ RAM UPDATE — Proxy TG ga saqlagan, biz faqat RAM yangilaymiz ══
 elif _api_action == "ram_update":
-    """
-    Sayt (edit.html) savollarni o'zgartirdi:
-    1. Bot RAMdagi eski savollarni tozalaydi
-    2. Yangi savollarni TG kanalga saqlaydi
-    3. RAM meta yangilanadi
-    4. Creator ga hisobot xabar yuboriladi
-    """
     try:
-        import asyncio
-        from utils import tg_db, ram_cache as ram
+        import asyncio, datetime
+        from utils import ram_cache as ram
 
-        tid       = _qp.get("tid", "").strip().upper()
-        qs_json   = _qp.get("questions", "")
-        old_qc    = int(_qp.get("old_qc", "0") or "0")
+        tid     = _qp.get("tid", "").strip().upper()
+        qs_json = _qp.get("questions", "")
+        old_qc  = int(_qp.get("old_qc", "0") or "0")
+        new_msg = _qp.get("new_msg_id", "").strip()
 
         if not tid:
             _json_response({"ok": False, "error": "tid kerak"})
 
         questions = json.loads(qs_json) if qs_json else []
 
-        # Mavjud test meta
-        meta = ram.get_test_meta_any(tid) if hasattr(ram, "get_test_meta_any") else (
-            ram.get_test_meta(tid) or {}
+        # Meta
+        meta = (
+            ram.get_test_meta_any(tid)
+            if hasattr(ram, "get_test_meta_any")
+            else (ram.get_test_meta(tid) or {})
         )
         if not meta:
-            _json_response({"ok": False, "error": "Test topilmadi"})
+            _json_response({"ok": False, "error": "Test meta topilmadi"})
 
-        # To'liq test obyekti
-        async def _do_update():
-            full = await tg_db.get_test_full(tid)
-            if not full:
-                full = dict(meta)
-            full["questions"]      = questions
-            full["question_count"] = len(questions)
-            full["updated_at"]     = str(__import__("datetime").datetime.utcnow().isoformat())
-            full["source"]         = full.get("source", "web")
+        # 1. RAM cache dan eski savollarni o'chirish
+        ram.invalidate_cached_questions(tid)
 
-            # 1. TG kanalga saqlash
-            ok = await tg_db.save_test_full(full)
-            if not ok:
-                return False, full
+        # 2. RAM meta yangilash
+        upd = {
+            "question_count": len(questions),
+            "updated_at":     datetime.datetime.utcnow().isoformat(),
+        }
+        if new_msg:
+            upd["_last_msg_id"] = new_msg
+        ram.update_test_meta(tid, upd)
 
-            # 2. RAM yangilash
-            ram.invalidate_cached_questions(tid)
-            ram.update_test_meta(tid, {
-                "question_count": len(questions),
-                "updated_at":     full["updated_at"],
-            })
-
-            # 3. Creator ga hisobot
-            creator_id = meta.get("creator_id")
-            if creator_id:
+        # 3. Creator ga hisobot (bot orqali)
+        creator_id = meta.get("creator_id")
+        if creator_id:
+            try:
+                from utils import tg_db
                 new_qc = len(questions)
                 diff   = new_qc - old_qc
                 if diff > 0:
-                    change = f"📈 +{diff} ta savol qo'shildi"
+                    change = f"\U0001f4c8 +{diff} ta savol qo'shildi"
                 elif diff < 0:
-                    change = f"📉 {abs(diff)} ta savol o'chirildi"
+                    change = f"\U0001f4c9 {abs(diff)} ta savol o'chirildi"
                 else:
-                    change = "✏️ Savol matnlari / javoblari yangilandi"
+                    change = "\u270f\ufe0f Savol matnlari / javoblari yangilandi"
                 NL  = "\n"
                 txt = (
                     "\u270f\ufe0f <b>Test tahrirlandi!</b>" + NL
@@ -207,24 +195,18 @@ elif _api_action == "ram_update":
                     + "\U0001f4cb Jami: " + str(new_qc) + " ta savol" + NL + NL
                     + "\u2139\ufe0f Yangilangan test keyingi yechishdan kuchga kiradi."
                 )
-                try:
+                async def _send():
                     await tg_db._bot.send_message(creator_id, txt)
-                except Exception:
-                    pass
+                try:
+                    asyncio.run(_send())
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    loop.run_until_complete(_send())
+                    loop.close()
+            except Exception:
+                pass
 
-            return True, full
-
-        try:
-            ok, full = asyncio.run(_do_update())
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            ok, full = loop.run_until_complete(_do_update())
-            loop.close()
-
-        if ok:
-            _json_response({"ok": True, "count": len(questions), "tid": tid})
-        else:
-            _json_response({"ok": False, "error": "TG ga saqlanmadi"})
+        _json_response({"ok": True, "count": len(questions), "tid": tid})
 
     except Exception as e:
         _json_response({"ok": False, "error": str(e)})
