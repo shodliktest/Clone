@@ -1560,6 +1560,19 @@ async def web_sync_loop():
             if added or updated:
                 log.info(f"Web sync: {added} yangi, {updated} yangilangan test")
                 mark_index_dirty()
+                try:
+                    await _save_index()
+                    log.info("Web sync: index TG ga saqlandi")
+                    # Bot o'z pini ni bilsin — keraksiz qayta ishlamasin
+                    try:
+                        chat2 = await _bot.get_chat(_cid)
+                        pin2  = getattr(chat2, "pinned_message", None)
+                        if pin2:
+                            last_pin_msg_id = pin2.message_id
+                    except Exception:
+                        pass
+                except Exception as _se:
+                    log.warning(f"Web sync: index saqlashda xato: {_se}")
 
         except asyncio.CancelledError:
             break
