@@ -1398,6 +1398,35 @@ async def _notify_web_test(meta: dict, tid: str):
         log.warning("_notify_web_test %s: %s", tid, _e)
 
 
+async def _notify_updated_test(meta: dict, tid: str, old_qc: int, new_qc: int):
+    """Tahrirlangan test haqida creator ga hisobot."""
+    if not meta.get("creator_id"):
+        return
+    try:
+        diff = new_qc - old_qc
+        if diff > 0:
+            change = f"\U0001f4c8 +{diff} ta savol qo\u2018shildi"
+        elif diff < 0:
+            change = f"\U0001f4c9 {abs(diff)} ta savol o\u2018chirildi"
+        else:
+            change = "\u270f\ufe0f Savol matnlari / javoblari yangilandi"
+        NL    = "\n"
+        title = meta.get("title", tid)
+        txt   = (
+            "\u270f\ufe0f <b>Test tahrirlandi!</b>" + NL
+            + "\u2501" * 24 + NL
+            + "\U0001f4dd <b>" + title + "</b>" + NL
+            + "\U0001f194 <code>" + tid + "</code>" + NL + NL
+            + change + NL
+            + "\U0001f4cb Jami: " + str(new_qc) + " ta savol" + NL + NL
+            + "\u2139\ufe0f Yangilangan test keyingi yechishdan kuchga kiradi."
+        )
+        await _bot.send_message(meta["creator_id"], txt)
+        log.info(f"_notify_updated_test: {tid} → {meta['creator_id']}")
+    except Exception as _e:
+        log.warning("_notify_updated_test %s: %s", tid, _e)
+
+
 async def _read_pinned_index() -> dict:
     """
     Pinned xabardagi faylni o'qiydi.
@@ -1506,14 +1535,25 @@ async def web_sync_loop():
                         {}
                     )
                     old_qc = old_meta.get("question_count", 0)
-                    # RAMdan tozalash va yangilash
+
+                    # 1. tg_db._tests_cache dan tozalash (asosiy muammo)
+                    _tests_cache.pop(tid, None)
+
+                    # 2. ram_cache dan tozalash
                     ram.invalidate_cached_questions(tid)
-                    clean = {k: v for k, v in meta.items() if k != "questions"}
-                    ram.update_test_meta(tid, clean)
+
+                    # 3. Index yangilash
                     _index[f"test_{tid}"] = new_msg_id
                     _index.pop(f"fid_{old_msg_id}", None)
+
+                    # 4. Meta yangilash
+                    clean = {k: v for k, v in meta.items() if k != "questions"}
+                    ram.update_test_meta(tid, clean)
+
                     updated += 1
-                    # Creator ga hisobot
+                    log.info(f"Web sync: {tid} yangilandi — cache tozalandi")
+
+                    # 5. Creator ga hisobot (bot orqali)
                     new_qc = meta.get("question_count", 0)
                     asyncio.create_task(_notify_updated_test(meta, tid, old_qc, new_qc))
             if added:
