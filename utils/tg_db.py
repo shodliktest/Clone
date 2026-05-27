@@ -1451,6 +1451,7 @@ async def _read_pinned_index() -> dict:
 
 
 async def web_sync_loop():
+    global _index   # Global _index ni o'zgartirish uchun
     await asyncio.sleep(30)
     consecutive_errors  = 0
     last_pin_msg_id     = None   # Oxirgi ko'rgan pinned msg_id
@@ -1556,8 +1557,8 @@ async def web_sync_loop():
                     # 5. Creator ga hisobot (bot orqali)
                     new_qc = meta.get("question_count", 0)
                     asyncio.create_task(_notify_updated_test(meta, tid, old_qc, new_qc))
-            if added:
-                log.info(f"Web sync: {added} yangi test")
+            if added or updated:
+                log.info(f"Web sync: {added} yangi, {updated} yangilangan test")
                 mark_index_dirty()
 
         except asyncio.CancelledError:
