@@ -1093,12 +1093,27 @@ async def _load_tests_stats():
     global _stats_dirty
     fid = _meta.get("tests_stats_fid")
     mid = _meta.get("tests_stats_msg_id")
-    if not mid: return
     data = {}
     if fid:
         data = await _read_file(fid)
     if not data and mid:
         data = await _download_doc(mid)
+    if not data and not mid:
+        # tests_stats_msg_id yo'q — kanaldan qidirish
+        log.info("tests_stats: meta da yo'q, kanaldan qidirilmoqda...")
+        try:
+            # Kanaldan so'nggi TESTS_STATS caption li xabar topish
+            async for msg in _bot.get_chat_history(_cid, limit=200):
+                if msg.document and msg.caption and "TESTS_STATS" in (msg.caption or ""):
+                    found = await _read_file(msg.document.file_id)
+                    if found and found.get("stats"):
+                        data = found
+                        _meta["tests_stats_msg_id"] = msg.message_id
+                        _meta["tests_stats_fid"]    = msg.document.file_id
+                        log.info(f"tests_stats: kanaldan topildi (msg_id={msg.message_id})")
+                        break
+        except Exception as e:
+            log.warning(f"tests_stats kanaldan qidirish: {e}")
     if not data:
         _stats_dirty = True
         return
