@@ -461,6 +461,11 @@ async def start_inline_test(callback: CallbackQuery, state: FSMContext):
     if not qs:
         return await callback.answer("❌ Savollar yo'q.", show_alert=True)
 
+    # Test boshlanganda foydalanuvchi stats ga yozish (yechgan-yechmagan farqsiz)
+    if not is_demo:
+        from utils.db import mark_test_started
+        mark_test_started(uid, tid, callback.from_user)
+
     import random, copy
     qs = copy.deepcopy(qs)
 
