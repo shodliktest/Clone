@@ -442,6 +442,15 @@ def get_test_entry(uid, tid):
     stats = get_user_stats_cache(str(uid)) or {}
     return stats.get(tid, {})
 
+def update_test_entry(uid, tid, updates: dict):
+    """User test entry ni yangilash (started_count, name, username va h.k.)"""
+    key   = f"stats_{uid}"
+    entry = _get(key, {})
+    if tid not in entry:
+        entry[tid] = {}
+    entry[tid].update(updates)
+    _set(key, entry)
+
 def get_user_stat(uid, tid):
     return get_test_entry(uid, tid)
 
@@ -481,7 +490,7 @@ def clear_expired_analysis():
     return removed
 
 def get_all_solvers_for_test(tid):
-    """Test yechgan barcha userlar — stats cache dan"""
+    """Test yechgan yoki boshlagan barcha userlar — stats cache dan"""
     users  = get_users()
     result = []
     with _lck:
@@ -489,21 +498,36 @@ def get_all_solvers_for_test(tid):
     for key in keys:
         uid_str = key[6:]
         e       = _get(key, {})
-        entry   = e.get("data", {}).get(tid)
-        if not entry or entry.get("attempts", 0) == 0:
+        # Yangi format: to'g'ridan dict (started_count)
+        direct_entry = e.get(tid) if isinstance(e, dict) else None
+        # Eski format: data ichida
+        old_entry    = e.get("data", {}).get(tid) if isinstance(e, dict) else None
+        entry = direct_entry or old_entry
+        if not entry:
+            continue
+        attempts      = entry.get("attempts", 0)
+        started_count = entry.get("started_count", 0)
+        # Kamida boshlagan bo'lsin
+        if attempts == 0 and started_count == 0:
             continue
         user = users.get(uid_str, {})
+        name = (entry.get("name") or
+                user.get("name") or
+                f"User {uid_str}")
         result.append({
-            "uid":        uid_str,
-            "name":       user.get("name", f"User {uid_str}"),
-            "username":   user.get("username", ""),
-            "attempts":   entry["attempts"],
-            "all_pcts":   entry["all_pcts"],
-            "best_score": entry["best_score"],
-            "avg_score":  entry["avg_score"],
-            "last_at":    entry.get("last_at", ""),
+            "uid":           uid_str,
+            "name":          name,
+            "username":      entry.get("username") or user.get("username", ""),
+            "attempts":      attempts,
+            "started_count": started_count,
+            "all_pcts":      entry.get("all_pcts", []),
+            "best_score":    entry.get("best_score", 0),
+            "avg_score":     entry.get("avg_score", 0),
+            "last_at":       entry.get("last_at", entry.get("last_started", "")),
+            "completed":     attempts > 0,
         })
-    result.sort(key=lambda x: x["best_score"], reverse=True)
+    # Tugataganlar birinchi, keyin faqat boshlashganlar
+    result.sort(key=lambda x: (x["completed"], x["best_score"]), reverse=True)
     return result
 
 

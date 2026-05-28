@@ -168,6 +168,44 @@ def get_all_tests_admin():
 
 # ══ NATIJALAR ══════════════════════════════════════════════════
 
+def mark_test_started(user_id: int, test_id: str, tg_user=None):
+    """
+    Test boshlanganda chaqiriladi — yechib-yechmagan farqsiz.
+    User stats da 'started' sifatida saqlanadi.
+    """
+    from utils import ram_cache as ram, tg_db
+
+    # User ma'lumotlarini saqlash
+    if tg_user:
+        name = (getattr(tg_user, 'full_name', '') or
+                f"{getattr(tg_user,'first_name','')} {getattr(tg_user,'last_name','')}".strip() or
+                f"User{user_id}")
+        uname = getattr(tg_user, 'username', '') or ''
+        user  = ram.get_user(user_id) or {}
+        if not user:
+            ram.add_user(user_id, {
+                "id":         user_id,
+                "name":       name,
+                "username":   uname,
+                "total_tests": 0,
+                "total_score": 0.0,
+                "avg_score":   0.0,
+            })
+            tg_db.mark_users_dirty_tg()
+
+    # Test stats da started yozish (attempts olmaydi, faqat started_count)
+    entry = ram.get_test_entry(user_id, test_id) or {}
+    started = entry.get("started_count", 0) + 1
+    ram.update_test_entry(user_id, test_id, {
+        "started_count": started,
+        "last_started":  __import__("datetime").datetime.utcnow().isoformat(),
+        "name":          (getattr(tg_user, 'full_name', '') if tg_user else
+                          ram.get_user(user_id, {}).get("name", f"User{user_id}")),
+        "username":      (getattr(tg_user, 'username', '') if tg_user else ""),
+    })
+    tg_db.mark_stats_dirty()
+
+
 def save_result(user_id, test_id, result, via_link=False):
     # Test yechildi — last_access yangilanadi (48h TTL uzayadi)
     ram.touch_test_access(test_id)
