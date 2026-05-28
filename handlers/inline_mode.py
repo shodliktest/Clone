@@ -159,10 +159,15 @@ def _make_result(test: dict, bot_username: str, demo=False) -> InlineQueryResult
             f"🆔 Kod: <code>{tid}</code>\n\n"
             f"👇 <b>Qanday boshlash?</b>"
         )
+        try:
+            from handlers.webauth import WEBAPP_URL as _WU
+        except Exception:
+            _WU = "https://quizmarkerbotweb.vercel.app"
+        _web_url = f"{_WU}/web_test.html?id={tid}"
         b = InlineKeyboardBuilder()
         b.row(
-            InlineKeyboardButton(text="▶️ Inline test", url=f"{base}?start={tid}"),
-            InlineKeyboardButton(text="📊 Quiz Poll",   url=f"{base}?start=poll_{tid}"),
+            InlineKeyboardButton(text="🌐 Web test",  url=_web_url),
+            InlineKeyboardButton(text="📊 Quiz Poll", url=f"{base}?start=poll_{tid}"),
         )
         b.row(
             InlineKeyboardButton(text="👥 Guruhda Poll",
