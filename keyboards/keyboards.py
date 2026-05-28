@@ -122,9 +122,15 @@ def test_info_kb(tid, creator_id=None, viewer_uid=None, back_cb="back_to_cats",
         # Faqat Quiz Poll tugmasi
         b.row(InlineKeyboardButton(text="📊 Quiz Poll boshlash", callback_data=f"start_poll_{tid}"))
     else:
+        from handlers.webauth import WEBAPP_URL as _WU
+        import urllib.parse as _ul
+        _wp = {"id": tid}
+        if viewer_uid:
+            _wp["uid"] = viewer_uid
+        _web = f"{_WU}/web_test.html?" + _ul.urlencode(_wp)
         b.row(
-            InlineKeyboardButton(text="▶️ Inline test", callback_data=f"start_test_{tid}"),
-            InlineKeyboardButton(text="📊 Quiz Poll",   callback_data=f"start_poll_{tid}"),
+            InlineKeyboardButton(text="🌐 Web test",  url=_web),
+            InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
         )
     b.row(InlineKeyboardButton(text="📤 Ulashish", switch_inline_query=f"test_{tid}"))
     if is_own and not paused:
@@ -140,9 +146,11 @@ def test_info_kb(tid, creator_id=None, viewer_uid=None, back_cb="back_to_cats",
 
 
 def test_created_kb(tid, bot_username=""):
+    from handlers.webauth import WEBAPP_URL as _WU
+    _web = f"{_WU}/web_test.html?id={tid}"
     b = InlineKeyboardBuilder()
     b.row(
-        InlineKeyboardButton(text="▶️ Boshlash",  callback_data=f"start_test_{tid}"),
+        InlineKeyboardButton(text="🌐 Web test",  url=_web),
         InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
     )
     b.row(InlineKeyboardButton(text="📤 Ulashish", switch_inline_query=f"test_{tid}"))
@@ -151,10 +159,12 @@ def test_created_kb(tid, bot_username=""):
 
 
 def result_kb(tid, rid):
+    from handlers.webauth import WEBAPP_URL as _WU
+    _web = f"{_WU}/web_test.html?id={tid}"
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="🔍 Batafsil tahlil", callback_data=f"analysis_{rid}_0"))
     b.row(
-        InlineKeyboardButton(text="🔄 Qaytadan",  callback_data=f"start_test_{tid}"),
+        InlineKeyboardButton(text="🌐 Web test",  url=_web),
         InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
     )
     b.row(InlineKeyboardButton(text="📤 Ulashish",    switch_inline_query=f"test_{tid}"))
