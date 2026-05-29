@@ -362,6 +362,33 @@ async def _cache_cleanup_loop():
             log.error(f"Cache cleanup xato: {e}")
 
 
+# ── Baza guruhiga yuborilgan fayllarni handle qilish ──
+from aiogram import F as _F
+from aiogram.types import Message as _Msg
+
+@dp.message(_F.document)
+async def _handle_group_doc(message: _Msg):
+    """Baza guruhiga yuborilgan fayl → parse → test yaratish"""
+    try:
+        from utils.baza_publisher import parse_group_file
+        from config import BAZA_GROUP_ID
+        if not BAZA_GROUP_ID:
+            return
+        if message.chat.id != int(BAZA_GROUP_ID):
+            return
+        u = message.from_user
+        await parse_group_file(
+            bot              = bot,
+            message          = message,
+            creator_id       = u.id,
+            creator_name     = u.full_name or "",
+            creator_username = u.username or "",
+        )
+    except Exception as _e:
+        import logging
+        logging.getLogger(__name__).warning(f"Group doc handler: {_e}")
+
+
 if __name__ == "__main__":
     asyncio.run(main())
 

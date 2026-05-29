@@ -26,6 +26,10 @@ STREAMLIT_URL: str = _s("STREAMLIT_URL", "https://quizmakerbot-hwttylmp5igdczywe
 # GitHub Pages URL — edit.html sahifasi uchun
 GITHUB_PAGES_URL: str = _s("GITHUB_PAGES_URL", "https://shodliktest.github.io/TestPro")
 
+# Test Baza Guruhi — har yangi test shu guruhga e'lon qilinadi
+# Guruh ID ini @userinfobot dan oling va Streamlit secrets ga qo'shing
+BAZA_GROUP_ID: int = int(_s("BAZA_GROUP_ID", "0"))
+
 PASSING_SCORE = 60
 MAX_FILE_MB   = 20
 
