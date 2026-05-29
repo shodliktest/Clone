@@ -1119,18 +1119,12 @@ async def _load_tests_stats():
         return
     from utils import ram_cache as ram
     for tid, s in data.get("stats", {}).items():
-        updates = {
-            "solve_count":    s.get("solve_count", 0),
-            "avg_score":      s.get("avg_score", 0.0),
-            "is_paused":      s.get("is_paused", False),
-            "is_active":      s.get("is_active", True),
-            "question_count": s.get("question_count", 0),
-        }
-        # title, category va boshqa meta maydonlar ham bo'lsa yangilaymiz
-        for key in ("title", "category", "creator_id", "creator_name", "visibility"):
-            if s.get(key):
-                updates[key] = s[key]
-        ram.update_test_meta(tid, updates)
+        ram.update_test_meta(tid, {
+            "solve_count": s.get("solve_count", 0),
+            "avg_score":   s.get("avg_score", 0.0),
+            "is_paused":   s.get("is_paused", False),
+            "is_active":   s.get("is_active", True),
+        })
         if s.get("solvers"):
             ram.load_solvers_to_ram(tid, s["solvers"])
     log.info(f"tests_stats: {len(data.get('stats',{}))} test yuklandi")
@@ -1151,9 +1145,6 @@ async def save_tests_stats():
         tid = m.get("test_id", "")
         if not tid: continue
         solvers = {}
-        from utils import ram_cache as ram_inner
-        # Solvers: tugatganlar (daily) + boshlashganlar (stats)
-        # 1. Daily stats dan (tugatganlar)
         for uid_str, udata in daily.items():
             entry = udata.get("by_test", {}).get(tid)
             if entry and entry.get("attempts", 0) > 0:
@@ -1163,26 +1154,6 @@ async def save_tests_stats():
                     "avg_score":  entry["avg_score"],
                     "all_pcts":   entry["all_pcts"],
                     "last_at":    entry.get("last_at", ""),
-                    "completed":  True,
-                }
-        # 2. Stats cache dan (boshlashganlar)
-        with ram_inner._lck:
-            stat_keys = [k for k in ram_inner._RAM if k.startswith("stats_")]
-        for sk in stat_keys:
-            uid_str2 = sk[6:]
-            se = ram_inner._get(sk, {})
-            te = se.get(tid) if isinstance(se, dict) else None
-            if te and te.get("started_count", 0) > 0 and uid_str2 not in solvers:
-                solvers[uid_str2] = {
-                    "attempts":      0,
-                    "started_count": te.get("started_count", 0),
-                    "best_score":    0,
-                    "avg_score":     0,
-                    "all_pcts":      [],
-                    "last_at":       te.get("last_started", ""),
-                    "name":          te.get("name", ""),
-                    "username":      te.get("username", ""),
-                    "completed":     False,
                 }
         stats[tid] = {
             "solve_count": m.get("solve_count", 0),
@@ -1438,6 +1409,26 @@ async def _notify_web_test(meta: dict, tid: str):
             "\n".join(lines),
             reply_markup=test_created_kb(tid, bu)
         )
+
+        # Baza guruhiga publish
+        try:
+            from utils.baza_publisher import publish_to_baza
+            full = await get_test_full(tid)
+            if full and full.get("questions"):
+                await publish_to_baza(
+                    bot           = _bot,
+                    tid           = tid,
+                    title         = meta.get("title", tid),
+                    questions     = full["questions"],
+                    creator_id    = int(meta.get("creator_id") or 0),
+                    creator_name  = meta.get("creator_name", ""),
+                    bot_username  = bu,
+                    category      = meta.get("category", ""),
+                    difficulty    = meta.get("difficulty", "medium"),
+                    passing_score = int(meta.get("passing_score") or 60),
+                )
+        except Exception as _bp:
+            log.warning("_notify_web_test baza: %s", _bp)
     except Exception as _e:
         log.warning("_notify_web_test %s: %s", tid, _e)
 
