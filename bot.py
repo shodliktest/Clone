@@ -490,6 +490,37 @@ async def _main_no_signals():
     dp.include_router(webauth.router)
     dp.include_router(web_cmd.router)
 
+    # ── Baza guruhiga yuborilgan fayllarni handle qilish ──
+    from aiogram import F as _F
+    from aiogram.types import Message as _Msg
+    from aiogram import Router as _Router
+
+    _baza_router = _Router()
+
+    @_baza_router.message(_F.document)
+    async def _handle_group_doc(message: _Msg):
+        """Baza guruhiga yuborilgan fayl → parse → test yaratish"""
+        try:
+            from utils.baza_publisher import parse_group_file
+            from config import BAZA_GROUP_ID
+            if not BAZA_GROUP_ID:
+                return
+            if message.chat.id != int(BAZA_GROUP_ID):
+                return
+            u = message.from_user
+            await parse_group_file(
+                bot              = message.bot,
+                message          = message,
+                creator_id       = u.id,
+                creator_name     = u.full_name or "",
+                creator_username = u.username or "",
+            )
+        except Exception as _e:
+            import logging
+            logging.getLogger(__name__).warning(f"Group doc handler: {_e}")
+
+    dp.include_router(_baza_router)
+
     if STORAGE_CHANNEL_ID:
         from utils import tg_db
         await tg_db.init(bot, STORAGE_CHANNEL_ID)
