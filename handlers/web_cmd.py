@@ -74,6 +74,8 @@ async def handle_web_cmd(message: Message):
             chunks = parts_str.split("|")
             bu = (await message.bot.get_me()).username
 
+            total_parts = len([x for x in chunks if x.strip()])
+            part_num    = 0
             for ch in chunks:
                 ch = ch.strip()
                 if not ch:
@@ -81,9 +83,13 @@ async def handle_web_cmd(message: Message):
                 sub = ch.split(":", 2)
                 if len(sub) < 3:
                     continue
+                part_num += 1
                 tid   = sub[0].strip().upper()
                 title = sub[1].strip()
                 qc    = int(sub[2]) if sub[2].isdigit() else 0
+                # Bo'lak nomi: "Biologiya - 1-qism" yoki "Biologiya - 2-qism"
+                if total_parts > 1:
+                    title = f"{title} — {part_num}-qism"
 
                 meta = {"creator_id": creator_id, "title": title,
                         "question_count": qc, "source": "web_split"}
@@ -103,6 +109,23 @@ async def handle_web_cmd(message: Message):
                     )
                 except Exception as e:
                     log.warning(f"SPLIT notify {tid}: {e}")
+
+                # Baza guruhiga ham yuborish
+                try:
+                    from utils.baza_publisher import publish_to_baza
+                    from utils import tg_db
+                    full = await tg_db.get_test_full(tid)
+                    if full and full.get("questions"):
+                        await publish_to_baza(
+                            bot           = message.bot,
+                            tid           = tid,
+                            title         = title,
+                            questions     = full["questions"],
+                            creator_id    = creator_id,
+                            bot_username  = bu,
+                        )
+                except Exception as _bp:
+                    log.warning(f"SPLIT baza publish {tid}: {_bp}")
 
         except Exception as e:
             log.error(f"WEB_CMD SPLIT: {e}")

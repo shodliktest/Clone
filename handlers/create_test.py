@@ -784,6 +784,25 @@ async def save_test(callback: CallbackQuery, state: FSMContext):
     if len(keys) <= 4000:
         await callback.message.answer(keys)
 
+    # ── Baza guruhiga e'lon qilish ──
+    try:
+        from utils.baza_publisher import publish_to_baza
+        await publish_to_baza(
+            bot           = callback.bot,
+            tid           = tid,
+            title         = td["title"],
+            questions     = td["questions"],
+            creator_id    = uid,
+            creator_name  = callback.from_user.full_name or "",
+            bot_username  = bu,
+            category      = td.get("category", ""),
+            difficulty    = td.get("difficulty", "medium"),
+            passing_score = td.get("passing_score", 60),
+        )
+    except Exception as _bpe:
+        import logging
+        logging.getLogger(__name__).warning(f"Baza publish xato: {_bpe}")
+
 
 @router.callback_query(F.data == "cancel_create")
 async def cancel_create(callback: CallbackQuery, state: FSMContext):
