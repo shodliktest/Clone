@@ -598,16 +598,24 @@ async def _run_vote(bot, chat_id, tests, done):
     chosen = None
 
     if vote_counts:
-        # Eng ko'p ovoz olgan variant
-        best_idx = max(vote_counts, key=lambda k: vote_counts[k])
-        idx = int(best_idx)
-        if 0 <= idx < len(vote_tids):
-            chosen = vote_tids[idx]
+        # Eng ko'p ovoz — teng bo'lsa random tanlanadi
+        max_votes = max(vote_counts.values())
+        winners   = [int(k) for k, v in vote_counts.items()
+                     if v == max_votes and 0 <= int(k) < len(vote_tids)]
+        if winners:
+            chosen = vote_tids[random.choice(winners)]
 
-    # Hech kim ovoz bermasa — random
+    # Hech kim ovoz bermasa — random (faqat o'tkazilmaganlardan)
     if not chosen:
         not_done = [t for t in tests if t not in done]
-        chosen   = random.choice(not_done) if not_done else random.choice(tests)
+        if not_done:
+            chosen = random.choice(not_done)
+        else:
+            # Barcha testlar o'tdi — done ni tozalaymiz (yangi ayla)
+            log.info(f"Barcha testlar o'tdi, done tozalanmoqda")
+            sched["done"] = []
+            done = []
+            chosen = random.choice(tests)
 
     # Natija xabarini o'chir
     if calc_msg:
