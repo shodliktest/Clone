@@ -53,6 +53,15 @@ async def cmd_start(message: Message, state: FSMContext):
     if user.get("is_blocked"):
         return await message.answer("🚫 Siz bloklangansiz.")
 
+    # ── Majburiy obuna tekshiruv ──
+    try:
+        from utils.force_join import check_user_joined, send_join_request
+        not_joined = await check_user_joined(message.bot, uid)
+        if not_joined:
+            return await send_join_request(message, not_joined, message.bot)
+    except Exception as _fje:
+        log.warning(f"force_join check: {_fje}")
+
     if is_new:
         from datetime import datetime
         at = f"@{uname}" if uname else "Mavjud emas"

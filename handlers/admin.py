@@ -1267,3 +1267,188 @@ async def creation_refs_count(callback: CallbackQuery):
     await callback.answer(f"✅ {new} ta referal kerak")
     await admin_creation_settings(callback)
 
+
+
+# ══════════════════════════════════════════════════════════════
+# 🔒 MAJBURIY OBUNA — FORCE JOIN PANEL
+# ══════════════════════════════════════════════════════════════
+
+def _fj_text():
+    from utils.force_join import get_force_channels, is_force_enabled
+    chs = get_force_channels()
+    en  = is_force_enabled()
+    st  = "✅ YOQILGAN" if en else "❌ O'CHIRILGAN"
+    lines = [
+        f"🔒 <b>MAJBURIY OBUNA</b>",
+        f"━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Holat: <b>{st}</b>",
+        f"Kanallar soni: <b>{len(chs)}</b>",
+        "",
+    ]
+    if chs:
+        lines.append("📋 <b>Ro'yxat:</b>")
+        for i, ch in enumerate(chs, 1):
+            icon = "📢" if ch.get("type") == "channel" else "👥"
+            lines.append(f"  {i}. {icon} {ch['title']} (<code>{ch['id']}</code>)")
+    else:
+        lines.append("➕ Hech qanday kanal/guruh qo'shilmagan")
+    return "\n".join(lines)
+
+
+def _fj_kb():
+    from utils.force_join import is_force_enabled, get_force_channels
+    b   = InlineKeyboardBuilder()
+    en  = is_force_enabled()
+    chs = get_force_channels()
+    b.row(InlineKeyboardButton(
+        text="❌ O'chirish" if en else "✅ Yoqish",
+        callback_data="fj_toggle"
+    ))
+    b.row(InlineKeyboardButton(
+        text="➕ Kanal/Guruh qo'shish",
+        callback_data="fj_add"
+    ))
+    if chs:
+        for ch in chs:
+            icon = "📢" if ch.get("type") == "channel" else "👥"
+            b.row(InlineKeyboardButton(
+                text=f"🗑 {icon} {ch['title']}",
+                callback_data=f"fj_del_{ch['id']}"
+            ))
+    b.row(InlineKeyboardButton(text="◀️ Orqaga", callback_data="admin_panel"))
+    return b.as_markup()
+
+
+@router.callback_query(F.data == "admin_force_join")
+async def admin_force_join(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await callback.message.edit_text(_fj_text(), reply_markup=_fj_kb())
+
+
+@router.callback_query(F.data == "fj_toggle")
+async def fj_toggle(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    from utils.force_join import is_force_enabled, set_force_enabled
+    new_val = not is_force_enabled()
+    set_force_enabled(new_val)
+    st = "✅ Yoqildi" if new_val else "❌ O'chirildi"
+    await callback.answer(f"Majburiy obuna: {st}", show_alert=True)
+    await callback.message.edit_text(_fj_text(), reply_markup=_fj_kb())
+
+
+@router.callback_query(F.data == "fj_add")
+async def fj_add_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await state.set_state(AdminPanel.fj_add)
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin_force_join"))
+    await callback.message.edit_text(
+        "➕ <b>Kanal yoki guruh qo'shish</b>\n\n"
+        "Bot shu kanal/guruhga <b>admin</b> bo'lishi kerak!\n\n"
+        "Quyidagilardan birini yuboring:\n"
+        "• Kanal/guruh ID: <code>-1001234567890</code>\n"
+        "• Yoki kanalga forward qiling\n"
+        "• Yoki @username: <code>@mychanel</code>",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.message(AdminPanel.fj_add)
+async def fj_add_input(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear(); return
+
+    raw = message.text.strip() if message.text else ""
+    # Forward bo'lsa
+    if message.forward_from_chat:
+        raw = str(message.forward_from_chat.id)
+
+    from utils.force_join import add_channel
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="◀️ Orqaga", callback_data="admin_force_join"))
+
+    try:
+        chat = await message.bot.get_chat(raw)
+        ch_id    = chat.id
+        ch_title = chat.title or chat.username or str(ch_id)
+        ch_type  = "channel" if chat.type == "channel" else "group"
+
+        # Invite link
+        invite = ""
+        try:
+            if chat.invite_link:
+                invite = chat.invite_link
+            else:
+                link_res = await message.bot.create_chat_invite_link(ch_id)
+                invite   = link_res.invite_link
+        except Exception:
+            pass
+
+        added = add_channel(ch_id, ch_title, invite, ch_type)
+        icon  = "📢" if ch_type == "channel" else "👥"
+
+        if added:
+            await message.answer(
+                f"✅ Qo'shildi!\n{icon} <b>{ch_title}</b>\n"
+                f"ID: <code>{ch_id}</code>\n"
+                f"Havola: {invite or 'Yo\'q (public)'}",
+                reply_markup=b.as_markup()
+            )
+        else:
+            await message.answer("⚠️ Bu kanal allaqachon ro'yxatda!", reply_markup=b.as_markup())
+    except Exception as e:
+        await message.answer(
+            f"❌ Xato: {e}\n\n"
+            "Bot bu kanal/guruhga admin bo'lishi kerak!",
+            reply_markup=b.as_markup()
+        )
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("fj_del_"))
+async def fj_delete(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    from utils.force_join import remove_channel, get_force_channels
+    try:
+        ch_id = int(callback.data.replace("fj_del_", ""))
+        # Kanal nomini topish
+        chs   = get_force_channels()
+        title = next((c["title"] for c in chs if c["id"] == ch_id), str(ch_id))
+        ok    = remove_channel(ch_id)
+        if ok:
+            await callback.answer(f"🗑 O'chirildi: {title}", show_alert=True)
+        else:
+            await callback.answer("⚠️ Topilmadi", show_alert=True)
+    except Exception as e:
+        await callback.answer(f"❌ {e}", show_alert=True)
+    await callback.message.edit_text(_fj_text(), reply_markup=_fj_kb())
+
+
+@router.callback_query(F.data == "fj_check")
+async def fj_check_cb(callback: CallbackQuery):
+    """Foydalanuvchi 'A'zo bo'ldim' tugmasini bosdi"""
+    from utils.force_join import check_user_joined, send_join_request
+    uid        = callback.from_user.id
+    not_joined = await check_user_joined(callback.bot, uid)
+    if not not_joined:
+        await callback.answer("✅ Rahmat! Davom etishingiz mumkin.", show_alert=True)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        # /start ni qayta ishlatish
+        from handlers.start import cmd_start
+        class _FakeMsg:
+            from_user = callback.from_user
+            chat      = callback.message.chat
+            text      = "/start"
+            bot       = callback.bot
+            async def answer(self, *a, **kw): return await callback.message.answer(*a, **kw)
+        await cmd_start(_FakeMsg(), state=None)
+    else:
+        await callback.answer("❌ Hali ba'zi kanallarga a'zo emassiz!", show_alert=True)
+        await send_join_request(callback, not_joined, callback.bot)
