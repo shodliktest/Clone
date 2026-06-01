@@ -28,7 +28,7 @@ class AdminPanel(StatesGroup):
     block_user        = State()
     delete_test       = State()
     group_broadcast   = State()
-    fj_add          = auto()  # Force join kanal qo'shish
+    fj_add          = State()  # Force join kanal qo'shish
 
 class ContactAdmin(StatesGroup):
     waiting_message = State()
