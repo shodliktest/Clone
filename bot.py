@@ -526,4 +526,10 @@ async def _main_no_signals():
 
     log.info("🚀 Bot ishga tushdi!")
     # handle_signals=False — thread dan ishga tushirilganda signal xatosini oldini oladi
-    await dp.start_polling(bot, drop_pending_updates=True, handle_signals=False, allowed_updates=["message","callback_query","poll_answer","inline_query","my_chat_member"])
+    # Force join keshdan yuklash
+    try:
+        from utils.force_join import load_from_cache
+        load_from_cache()
+    except Exception as _fje:
+        pass
+        await dp.start_polling(bot, drop_pending_updates=True, handle_signals=False, allowed_updates=["message","callback_query","poll_answer","inline_query","my_chat_member"])
