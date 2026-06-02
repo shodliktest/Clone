@@ -98,10 +98,11 @@ async def check_user_joined(bot, user_id: int) -> list:
 
 async def send_join_request(event, not_joined: list, bot):
     """
-    A'zo bo'lmagan kanallarga havola yuborish
+    A'zo bo'lmagan kanallarga havola yuborish.
+    Guruhda bo'lsa — faqat PM ga yuboriladi.
     """
     from aiogram.utils.keyboard import InlineKeyboardBuilder
-    from aiogram.types import InlineKeyboardButton
+    from aiogram.types import InlineKeyboardButton, Message, CallbackQuery
 
     lines = ["🔒 <b>Botdan foydalanish uchun quyidagi kanal(lar)ga a'zo bo'ling:</b>\n"]
     b = InlineKeyboardBuilder()
@@ -122,10 +123,42 @@ async def send_join_request(event, not_joined: list, bot):
     ))
 
     text = "\n".join(lines)
-    if hasattr(event, 'message'):
-        await event.message.answer(text, reply_markup=b.as_markup())
-    else:
-        await event.answer(text, reply_markup=b.as_markup())
+
+    # Chat turini aniqlash
+    try:
+        if isinstance(event, Message):
+            chat_type = event.chat.type
+            uid       = event.from_user.id if event.from_user else None
+        elif isinstance(event, CallbackQuery):
+            chat_type = event.message.chat.type if event.message else "private"
+            uid       = event.from_user.id if event.from_user else None
+        else:
+            chat_type = "private"
+            uid       = None
+
+        if chat_type == "private":
+            # Private chat — to'g'ridan yuborish
+            if isinstance(event, Message):
+                await event.answer(text, reply_markup=b.as_markup())
+            elif isinstance(event, CallbackQuery):
+                await event.message.answer(text, reply_markup=b.as_markup())
+        else:
+            # Guruh/kanal — faqat PM ga yuborish
+            if uid:
+                try:
+                    await bot.send_message(uid, text, reply_markup=b.as_markup())
+                    # Guruhda qisqa xabar
+                    if isinstance(event, Message):
+                        await event.reply(
+                            f"👤 @{event.from_user.username or event.from_user.full_name}, "
+                            f"botdan foydalanish uchun shaxsiy xabarga qarang! 👆"
+                        )
+                except Exception:
+                    # PM blok - guruhda ko'rsatish
+                    if isinstance(event, Message):
+                        await event.reply(text, reply_markup=b.as_markup())
+    except Exception as e:
+        log.warning(f"send_join_request: {e}")
 
 async def handle_fj_check(callback: CallbackQuery):
     """'A'zo bo'ldim' tugmasi bosilganda qayta tekshirish"""
@@ -139,25 +172,16 @@ async def handle_fj_check(callback: CallbackQuery):
             await callback.message.delete()
         except Exception:
             pass
-        # Menyuni ko'rsatish
         try:
-            from keyboards.keyboards import main_kb
-            from utils.db import get_or_create_user
-            u = callback.from_user
-            await get_or_create_user(
-                u.id, u.full_name or str(u.id), u.username or ""
-            )
-            await callback.bot.send_message(
-                callback.from_user.id,
-                "✅ Rahmat! Endi botdan foydalanishingiz mumkin.\n\n"
-                "🏠 <b>Asosiy menyu</b>",
-                reply_markup=main_kb(u.id)
-            )
-        except Exception as _se:
-            await callback.bot.send_message(
-                callback.from_user.id,
-                "✅ A'zolik tasdiqlandi! /start ni bosing."
-            )
+            await callback.message.delete()
+        except Exception:
+            pass
+        await callback.bot.send_message(
+            callback.from_user.id,
+            "✅ <b>A'zolik tasdiqlandi!</b>\n\n"
+            "Endi botdan foydalanishingiz mumkin.\n"
+            "👇 /start bosing."
+        )
     else:
         await callback.answer(
             "❌ Hali ba'zi kanallarga a'zo emassiz!", show_alert=True
