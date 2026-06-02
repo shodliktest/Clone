@@ -426,6 +426,19 @@ async def start_inline_test(callback: CallbackQuery, state: FSMContext):
             _name   = u.full_name or f"User{u.id}"
             _uname  = u.username or ""
             _meta   = get_test_meta(tid) or {}
+
+            # ── Referal tekshiruvi ──
+            from utils.ref_test import check_test_referral, send_referral_required_msg
+            _bu = (await callback.bot.me()).username
+            _ref_result = await check_test_referral(
+                callback.bot, u.id, tid, _meta, _bu
+            )
+            if not _ref_result["ok"]:
+                await send_referral_required_msg(
+                    callback, _ref_result, _meta.get("title", tid), _bu
+                )
+                return
+
             _params = urllib.parse.urlencode({
                 "id": tid, "uid": u.id,
                 "name": _name, "uname": _uname, "auto": "1"
@@ -1188,3 +1201,65 @@ async def _finish_inline(bot, cid, state, d):
         except TelegramBadRequest: pass
 
     await bot.send_message(cid, result_text, reply_markup=kb, protect_content=True)
+
+
+# ── Referal tekshirish callback ──────────────────────────────
+@router.callback_query(F.data.startswith("ref_check_"))
+async def ref_check_callback(callback: CallbackQuery):
+    """Foydalanuvchi 'Tekshirish' tugmasini bosdi"""
+    tid = callback.data.replace("ref_check_", "")
+    uid = callback.from_user.id
+    
+    from utils.ref_test import check_test_referral, send_referral_required_msg, grant_test_access
+    meta = get_test_meta(tid) or {}
+    bu   = (await callback.bot.me()).username
+    
+    result = await check_test_referral(callback.bot, uid, tid, meta, bu)
+    
+    if result["ok"]:
+        await callback.answer("✅ Referal sharti bajarildi!", show_alert=True)
+        grant_test_access(uid, tid)
+        # Test boshlansin
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        from handlers.webauth import WEBAPP_URL
+        import urllib.parse
+        u       = callback.from_user
+        _params = urllib.parse.urlencode({
+            "id": tid, "uid": uid,
+            "name": u.full_name or str(uid),
+            "uname": u.username or "", "auto": "1"
+        })
+        _web_url = f"{WEBAPP_URL}/web_test.html?{_params}"
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+        from aiogram.types import InlineKeyboardButton
+        bld = InlineKeyboardBuilder()
+        bld.row(InlineKeyboardButton(text="🌐 Web testni ochish", url=_web_url))
+        bld.row(InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"))
+        await callback.message.answer(
+            f"✅ <b>Referal sharti bajarildi!</b>\n"
+            f"📝 <b>{meta.get('title', tid)}</b>\n\n"
+            f"👇 Testni boshlang:",
+            reply_markup=bld.as_markup()
+        )
+    else:
+        await callback.answer(
+            f"❌ Hali {result['short']} ta referal yetishmaydi!",
+            show_alert=True
+        )
+        await send_referral_required_msg(
+            callback, result, meta.get("title", tid), bu
+        )
+
+
+@router.callback_query(F.data == "copy_ref_link")
+async def copy_ref_link(callback: CallbackQuery):
+    """Referal havola nusxalash"""
+    uid  = callback.from_user.id
+    bu   = (await callback.bot.me()).username
+    from utils.roles import get_referral_code
+    code = get_referral_code(uid)
+    link = f"https://t.me/{bu}?start={code}"
+    await callback.answer(f"Havolangiz: {link}", show_alert=True)
