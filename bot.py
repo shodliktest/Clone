@@ -223,12 +223,14 @@ async def main():
         log.info(f"✅ Yuklandi: {ram.stats()['tests']} test meta, {ram.stats()['users']} user (savollar lazy)")
         _blocked_mod.load()
 
-    # Background tasklar
-    asyncio.create_task(_midnight_flush_loop(bot))
-    asyncio.create_task(_users_auto_flush_loop(bot))
-    asyncio.create_task(_cache_cleanup_loop())
-    asyncio.create_task(_web_sync_watchdog())   # Watchdog bilan web sync
-    asyncio.create_task(tg_db.auto_flush_loop())
+    # Background tasklar — to'g'ri bekor qilish uchun saqlaymiz
+    _bg_tasks = [
+        asyncio.create_task(_midnight_flush_loop(bot),      name="midnight_flush"),
+        asyncio.create_task(_users_auto_flush_loop(bot),    name="users_flush"),
+        asyncio.create_task(_cache_cleanup_loop(),          name="cache_cleanup"),
+        asyncio.create_task(_web_sync_watchdog(),           name="web_sync_watchdog"),
+        asyncio.create_task(tg_db.auto_flush_loop(),        name="auto_flush"),
+    ]
 
     # Admin ga xabar
     for aid in ADMIN_IDS:
@@ -240,7 +242,17 @@ async def main():
         except Exception: pass
 
     log.info("🚀 Bot ishga tushdi!")
-    await dp.start_polling(bot, drop_pending_updates=True, allowed_updates=["message","callback_query","poll_answer","inline_query","my_chat_member"])
+    try:
+        await dp.start_polling(bot, drop_pending_updates=True, allowed_updates=["message","callback_query","poll_answer","inline_query","my_chat_member"])
+    finally:
+        # Background tasklarni to'g'ri to'xtatish
+        for t in _bg_tasks:
+            t.cancel()
+        await asyncio.gather(*_bg_tasks, return_exceptions=True)
+        # Session ni yopish
+        session = bot.session
+        if hasattr(session, 'close'):
+            await session.close()
 
 
 # ── MIDNIGHT FLUSH — kuniga 1 marta, faqat 00:00 ──────────────
@@ -442,9 +454,15 @@ async def _main_no_signals():
     bot = Bot(token=BOT_TOKEN,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=True))
     dp  = Dispatcher(storage=MemoryStorage())
+    # ── Barcha middlewarelar (main() bilan bir xil) ──
+    dp.message.middleware(BlockedUserMiddleware())
+    dp.callback_query.middleware(BlockedUserMiddleware())
+    dp.poll_answer.middleware(BlockedUserMiddleware())
+    dp.inline_query.middleware(BlockedUserMiddleware())
     dp.message.middleware(ClearMenuMiddleware())
     dp.callback_query.middleware(ClearMenuMiddleware())
-
+    dp.message.middleware(GroupTrackerMiddleware())
+    dp.callback_query.middleware(GroupTrackerMiddleware())
 
     dp.include_router(r_inline)
     dp.include_router(r_poll_router)
@@ -524,12 +542,16 @@ async def _main_no_signals():
                 f"📅 {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC")
         except Exception: pass
 
-    log.info("🚀 Bot ishga tushdi!")
-    # handle_signals=False — thread dan ishga tushirilganda signal xatosini oldini oladi
     # Force join keshdan yuklash
     try:
         from utils.force_join import load_from_cache
         load_from_cache()
     except Exception as _fje:
-        pass
+        log.warning(f"force_join load: {_fje}")
+
+    log.info("🚀 Bot ishga tushdi!")
+    # handle_signals=False — thread dan ishga tushirilganda signal xatosini oldini oladi
+    try:
         await dp.start_polling(bot, drop_pending_updates=True, handle_signals=False, allowed_updates=["message","callback_query","poll_answer","inline_query","my_chat_member"])
+    finally:
+        await bot.session.close()
