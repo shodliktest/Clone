@@ -112,6 +112,9 @@ async def create_test(creator_id, data, creator_name="", creator_username=""):
         "poll_time":        data.get("poll_time", 30),
         "passing_score":    data.get("passing_score", 60),
         "max_attempts":     data.get("max_attempts", 0),
+        # Referal tizimi
+        "ref_required":     data.get("ref_required", False),
+        "ref_count":        int(data.get("ref_count", 0)),
         "questions":        data.get("questions", []),
         "question_count":   len(data.get("questions", [])),
         "solve_count":      0,
