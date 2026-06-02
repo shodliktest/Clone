@@ -139,9 +139,25 @@ async def handle_fj_check(callback: CallbackQuery):
             await callback.message.delete()
         except Exception:
             pass
-        # start ga yo'naltirish
-        from handlers.start import cmd_start
-        await cmd_start(callback.message, state=None)
+        # Menyuni ko'rsatish
+        try:
+            from keyboards.keyboards import main_kb
+            from utils.db import get_or_create_user
+            u = callback.from_user
+            await get_or_create_user(
+                u.id, u.full_name or str(u.id), u.username or ""
+            )
+            await callback.bot.send_message(
+                callback.from_user.id,
+                "✅ Rahmat! Endi botdan foydalanishingiz mumkin.\n\n"
+                "🏠 <b>Asosiy menyu</b>",
+                reply_markup=main_kb(u.id)
+            )
+        except Exception as _se:
+            await callback.bot.send_message(
+                callback.from_user.id,
+                "✅ A'zolik tasdiqlandi! /start ni bosing."
+            )
     else:
         await callback.answer(
             "❌ Hali ba'zi kanallarga a'zo emassiz!", show_alert=True
