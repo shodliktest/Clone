@@ -30,6 +30,59 @@ async def _send_blocked_msg(bot, uid: int):
         pass
 
 
+class ForceJoinMiddleware(BaseMiddleware):
+    """
+    Barcha xabarlarda majburiy obuna tekshiruvi.
+    Admin va bloklash callbacklari tekshirilmaydi.
+    """
+    SKIP_CALLBACKS = {
+        "fj_check",      # A'zo bo'ldim tugmasi
+        "main_menu",
+    }
+    SKIP_COMMANDS = {"/start"}  # /start o'zi tekshiradi
+
+    async def __call__(self, handler, event, data):
+        try:
+            from utils.force_join import (
+                is_force_enabled, check_user_joined, send_join_request
+            )
+            from config import ADMIN_IDS
+
+            if not is_force_enabled():
+                return await handler(event, data)
+
+            uid = None
+            if isinstance(event, Message):
+                uid = event.from_user.id if event.from_user else None
+                # /start o'zi tekshiradi
+                if event.text and event.text.startswith("/start"):
+                    return await handler(event, data)
+            elif isinstance(event, CallbackQuery):
+                uid = event.from_user.id if event.from_user else None
+                # fj_check callback o'zi tekshiradi
+                if event.data in self.SKIP_CALLBACKS:
+                    return await handler(event, data)
+
+            # Admin tekshirilmaydi
+            if uid and uid in ADMIN_IDS:
+                return await handler(event, data)
+
+            if uid:
+                not_joined = await check_user_joined(event.bot, uid)
+                if not_joined:
+                    await send_join_request(event, not_joined, event.bot)
+                    if isinstance(event, CallbackQuery):
+                        await event.answer(
+                            "❌ Avval kanallarga a'zo bo'ling!", show_alert=True
+                        )
+                    return  # Handler ga o'TKAZMAYMIZ
+        except Exception as _fje:
+            import logging
+            logging.getLogger(__name__).warning(f"ForceJoinMiddleware: {_fje}")
+
+        return await handler(event, data)
+
+
 class BlockedUserMiddleware(BaseMiddleware):
     """
     Barcha event turlarida bloklangan userlarni to'xtatadi.
@@ -182,6 +235,8 @@ async def main():
     bot = Bot(token=BOT_TOKEN,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=True))
     dp  = Dispatcher(storage=MemoryStorage())
+    dp.message.middleware(ForceJoinMiddleware())
+    dp.callback_query.middleware(ForceJoinMiddleware())
     dp.message.middleware(BlockedUserMiddleware())
     dp.callback_query.middleware(BlockedUserMiddleware())
     dp.poll_answer.middleware(BlockedUserMiddleware())
@@ -455,6 +510,8 @@ async def _main_no_signals():
               default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=True))
     dp  = Dispatcher(storage=MemoryStorage())
     # ── Barcha middlewarelar (main() bilan bir xil) ──
+    dp.message.middleware(ForceJoinMiddleware())
+    dp.callback_query.middleware(ForceJoinMiddleware())
     dp.message.middleware(BlockedUserMiddleware())
     dp.callback_query.middleware(BlockedUserMiddleware())
     dp.poll_answer.middleware(BlockedUserMiddleware())
