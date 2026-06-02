@@ -70,12 +70,21 @@ class ForceJoinMiddleware(BaseMiddleware):
             if uid:
                 not_joined = await check_user_joined(event.bot, uid)
                 if not_joined:
-                    await send_join_request(event, not_joined, event.bot)
-                    if isinstance(event, CallbackQuery):
-                        await event.answer(
-                            "❌ Avval kanallarga a'zo bo'ling!", show_alert=True
-                        )
-                    return  # Handler ga o'TKAZMAYMIZ
+                    # Guruhda faqat private chatda tekshiriladi
+                    chat_type = "private"
+                    if isinstance(event, Message):
+                        chat_type = event.chat.type
+                    elif isinstance(event, CallbackQuery):
+                        chat_type = event.message.chat.type if event.message else "private"
+
+                    if chat_type == "private":
+                        await send_join_request(event, not_joined, event.bot)
+                        if isinstance(event, CallbackQuery):
+                            await event.answer(
+                                "❌ Avval kanallarga a'zo bo'ling!", show_alert=True
+                            )
+                        return  # Handler ga O'TKAZMAYMIZ
+                    # Guruhda - tekshirmaymiz (guruh uchun alohida qoida)
         except Exception as _fje:
             import logging
             logging.getLogger(__name__).warning(f"ForceJoinMiddleware: {_fje}")
