@@ -240,9 +240,6 @@ def admin_kb():
         InlineKeyboardButton(text="📨 Forward rejimi",    callback_data="admin_forward_mode"),
         InlineKeyboardButton(text="⚙️ Test yaratish",     callback_data="admin_creation_settings"),
     )
-    b.row(
-        InlineKeyboardButton(text="🔒 Majburiy obuna",    callback_data="admin_force_join"),
-    )
     b.row(InlineKeyboardButton(text="🏠 Menyu", callback_data="main_menu"))
     return b.as_markup()
 
@@ -320,6 +317,7 @@ def mytest_settings_kb(tid, is_paused=False, is_admin=False):
         InlineKeyboardButton(text="⏱ Poll vaqti",         callback_data=f"edit_poll_time_{tid}"),
     )
     b.row(InlineKeyboardButton(text="🔐 Kirish nazorati",  callback_data=f"edit_allowed_{tid}"))
-    b.row(InlineKeyboardButton(text="🗑 Testni o'chirish", callback_data=f"del_mytest_{tid}"))
+    b.row(InlineKeyboardButton(text="🔗 Referal sozlash",   callback_data=f"edit_ref_{tid}"))
+    b.row(InlineKeyboardButton(text="🗑 Testni o'chirish",  callback_data=f"del_mytest_{tid}"))
     b.row(InlineKeyboardButton(text="⬅️ Orqaga",           callback_data="back_to_mytests_cat"))
     return b.as_markup()
