@@ -1440,15 +1440,25 @@ async def fj_check_cb(callback: CallbackQuery):
             await callback.message.delete()
         except Exception:
             pass
-        # /start ni qayta ishlatish
-        from handlers.start import cmd_start
-        class _FakeMsg:
-            from_user = callback.from_user
-            chat      = callback.message.chat
-            text      = "/start"
-            bot       = callback.bot
-            async def answer(self, *a, **kw): return await callback.message.answer(*a, **kw)
-        await cmd_start(_FakeMsg(), state=None)
+        # /start ni qayta ishlatish — to'g'ridan xabar yuboramiz
+        await callback.message.answer(
+            "✅ Tekshirildi! Endi botdan foydalanishingiz mumkin.\n"
+            "/start ni bosing yoki quyidagi tugmani bosing:"
+        )
+        # Bot menyusini ko'rsatish
+        try:
+            from keyboards.keyboards import main_kb
+            from utils.db import get_or_create_user
+            u = callback.from_user
+            user = await get_or_create_user(
+                u.id, u.full_name or str(u.id), u.username or ""
+            )
+            await callback.message.answer(
+                f"🏠 <b>Asosiy menyu</b>",
+                reply_markup=main_kb(u.id)
+            )
+        except Exception as _me:
+            pass
     else:
         await callback.answer("❌ Hali ba'zi kanallarga a'zo emassiz!", show_alert=True)
         await send_join_request(callback, not_joined, callback.bot)
