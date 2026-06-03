@@ -32,14 +32,12 @@ async def _send_blocked_msg(bot, uid: int):
 
 class ForceJoinMiddleware(BaseMiddleware):
     """
-    Barcha xabarlarda majburiy obuna tekshiruvi.
-    Admin va bloklash callbacklari tekshirilmaydi.
+    Majburiy obuna tekshiruvi.
+    FAQAT private chatda ishlaydi.
+    Guruh/kanal chatlarida UMUMAN ishlamaydi.
     """
-    SKIP_CALLBACKS = {
-        "fj_check",      # A'zo bo'ldim tugmasi
-        "main_menu",
-    }
-    SKIP_COMMANDS = {"/start"}  # /start o'zi tekshiradi
+    SKIP_CALLBACKS = {"fj_check", "main_menu", "noop"}
+    SKIP_COMMANDS  = {"/start"}
 
     async def __call__(self, handler, event, data):
         try:
@@ -51,45 +49,50 @@ class ForceJoinMiddleware(BaseMiddleware):
             if not is_force_enabled():
                 return await handler(event, data)
 
-            uid = None
+            # Chat turini aniqlash - GURUHDA ISHLAMAYDI
+            chat_type = "private"
+            uid       = None
+
             if isinstance(event, Message):
-                uid = event.from_user.id if event.from_user else None
+                chat_type = event.chat.type if event.chat else "private"
+                uid       = event.from_user.id if event.from_user else None
                 # /start o'zi tekshiradi
                 if event.text and event.text.startswith("/start"):
                     return await handler(event, data)
             elif isinstance(event, CallbackQuery):
-                uid = event.from_user.id if event.from_user else None
-                # fj_check callback o'zi tekshiradi
+                chat_type = (event.message.chat.type
+                             if event.message and event.message.chat
+                             else "private")
+                uid       = event.from_user.id if event.from_user else None
                 if event.data in self.SKIP_CALLBACKS:
                     return await handler(event, data)
+
+            # GURUH — tekshirmasdan o'tkazish
+            if chat_type in ("group", "supergroup", "channel"):
+                return await handler(event, data)
 
             # Admin tekshirilmaydi
             if uid and uid in ADMIN_IDS:
                 return await handler(event, data)
 
+            # Private chatda tekshirish
             if uid:
                 not_joined = await check_user_joined(event.bot, uid)
                 if not_joined:
-                    # Guruhda faqat private chatda tekshiriladi
-                    chat_type = "private"
-                    if isinstance(event, Message):
-                        chat_type = event.chat.type
-                    elif isinstance(event, CallbackQuery):
-                        chat_type = event.message.chat.type if event.message else "private"
+                    await send_join_request(event, not_joined, event.bot)
+                    if isinstance(event, CallbackQuery):
+                        await event.answer(
+                            "❌ Avval kanallarga a'zo bo'ling!",
+                            show_alert=True
+                        )
+                    return   # Bloklaymiz
 
-                    if chat_type == "private":
-                        await send_join_request(event, not_joined, event.bot)
-                        if isinstance(event, CallbackQuery):
-                            await event.answer(
-                                "❌ Avval kanallarga a'zo bo'ling!", show_alert=True
-                            )
-                        return  # Handler ga O'TKAZMAYMIZ
-                    # Guruhda - tekshirmaymiz (guruh uchun alohida qoida)
         except Exception as _fje:
             import logging
             logging.getLogger(__name__).warning(f"ForceJoinMiddleware: {_fje}")
 
         return await handler(event, data)
+
 
 
 class BlockedUserMiddleware(BaseMiddleware):
