@@ -53,15 +53,6 @@ async def cmd_start(message: Message, state: FSMContext):
     if user.get("is_blocked"):
         return await message.answer("🚫 Siz bloklangansiz.")
 
-    # ── Majburiy obuna tekshiruv ──
-    try:
-        from utils.force_join import check_user_joined, send_join_request
-        not_joined = await check_user_joined(message.bot, uid)
-        if not_joined:
-            return await send_join_request(message, not_joined, message.bot)
-    except Exception as _fje:
-        log.warning(f"force_join check: {_fje}")
-
     if is_new:
         from datetime import datetime
         at = f"@{uname}" if uname else "Mavjud emas"
@@ -377,20 +368,27 @@ async def test_resume_cb(callback: CallbackQuery):
 async def back_main(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
-    uid = callback.from_user.id
-    # Faqat inline keyboard ni tozalaymiz — xabarni O'CHIRMAYMIZ
+    uid  = callback.from_user.id
+    # Faqat private chatda menyu chiqarish
+    chat_type = callback.message.chat.type if callback.message else "private"
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    # Keyboard doim pastda turishi uchun qayta yuboramiz
+    if chat_type != "private":
+        return   # Guruhdan chaqirilsa — faqat inline ni tozalab chiqamiz
+    # Private: klaviatura yuboramiz
     from utils import ram_cache as ram
-    msg = await callback.bot.send_message(
-        uid,
-        "🏠 <b>Asosiy menyu</b> 👇",
-        reply_markup=main_kb(uid, "private")
-    )
-    ram.set_menu_msg(uid, uid, msg.message_id)
+    try:
+        msg = await callback.bot.send_message(
+            uid,
+            "🏠 <b>Asosiy menyu</b> 👇",
+            reply_markup=main_kb(uid, "private")
+        )
+        ram.set_menu_msg(uid, uid, msg.message_id)
+    except Exception as _e:
+        import logging
+        logging.getLogger(__name__).warning(f"back_main send: {_e}")
 
 @router.callback_query(F.data == "noop")
 async def noop(callback: CallbackQuery):
