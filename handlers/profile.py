@@ -654,162 +654,6 @@ async def edit_allowed_cb(callback: CallbackQuery, state: FSMContext):
         )
 
 
-
-# ══════════════════════════════════════════════════════
-# 🔗 REFERAL SOZLAMASI — test sozlamalari orqali
-# ══════════════════════════════════════════════════════
-
-def _ref_status_text(meta: dict, tid: str) -> str:
-    ref_required = meta.get("ref_required", False)
-    ref_count    = int(meta.get("ref_count", 0))
-    title        = meta.get("title", tid)
-    st = "✅ YOQILGAN" if ref_required else "❌ O'CHIRILGAN"
-    return (
-        f"🔗 <b>Referal sozlamasi</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📝 Test: <b>{title}</b>\n"
-        f"Holat: <b>{st}</b>\n"
-        f"Talab: <b>{ref_count if ref_required else '—'} ta referal</b>\n\n"
-        f"ℹ️ Referal talab faqat bot private chat va\n"
-        f"web testda ishlaydi. Guruhda tekshirilmaydi."
-    )
-
-
-def _ref_kb(tid: str, ref_required: bool, ref_count: int):
-    b = InlineKeyboardBuilder()
-    if ref_required:
-        b.row(InlineKeyboardButton(
-            text="❌ O'chirish (barchaga ochiq)",
-            callback_data=f"ref_off_{tid}"
-        ))
-        b.row(InlineKeyboardButton(
-            text=f"🔢 Sonini o'zgartirish (hozir: {ref_count})",
-            callback_data=f"ref_cnt_{tid}"
-        ))
-    else:
-        b.row(InlineKeyboardButton(
-            text="✅ Yoqish",
-            callback_data=f"ref_on_{tid}"
-        ))
-    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"mytest_set_{tid}"))
-    return b.as_markup()
-
-
-@router.callback_query(F.data.startswith("edit_ref_"))
-async def edit_ref_cb(callback: CallbackQuery):
-    """Referal sozlamasi menyusi"""
-    await callback.answer()
-    tid  = callback.data.replace("edit_ref_", "")
-    uid  = callback.from_user.id
-    meta = get_test_meta(tid) or {}
-
-    # Yaratuvchi yoki admin tekshiruv
-    from config import ADMIN_IDS
-    creator_id = int(meta.get("creator_id", 0))
-    if uid != creator_id and uid not in ADMIN_IDS:
-        return await callback.answer("❌ Ruxsat yo'q", show_alert=True)
-
-    ref_required = meta.get("ref_required", False)
-    ref_count    = int(meta.get("ref_count", 0))
-
-    await callback.message.edit_text(
-        _ref_status_text(meta, tid),
-        reply_markup=_ref_kb(tid, ref_required, ref_count)
-    )
-
-
-@router.callback_query(F.data.startswith("ref_off_"))
-async def ref_turn_off(callback: CallbackQuery):
-    """Referal talabini o'chirish"""
-    await callback.answer()
-    tid = callback.data.replace("ref_off_", "")
-    await _save_ref_settings(callback, tid, False, 0)
-
-
-@router.callback_query(F.data.startswith("ref_on_"))
-async def ref_turn_on(callback: CallbackQuery):
-    """Referal talabini yoqish - son so'rash"""
-    await callback.answer()
-    tid = callback.data.replace("ref_on_", "")
-    b = InlineKeyboardBuilder()
-    for n in [1, 2, 3, 5, 7, 10]:
-        b.button(text=str(n), callback_data=f"ref_set_{tid}_{n}")
-    b.adjust(3)
-    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data=f"edit_ref_{tid}"))
-    await callback.message.edit_text(
-        f"🔢 <b>Nechta referal talab qilinsin?</b>\n\n"
-        f"Foydalanuvchi bu testni yechish uchun\n"
-        f"qancha odam taklif qilishi kerak?",
-        reply_markup=b.as_markup()
-    )
-
-
-@router.callback_query(F.data.startswith("ref_cnt_"))
-async def ref_change_count(callback: CallbackQuery):
-    """Referal sonini o'zgartirish"""
-    await callback.answer()
-    tid  = callback.data.replace("ref_cnt_", "")
-    meta = get_test_meta(tid) or {}
-    cur  = int(meta.get("ref_count", 1))
-    b = InlineKeyboardBuilder()
-    for n in [1, 2, 3, 5, 7, 10]:
-        text = f"✓ {n}" if n == cur else str(n)
-        b.button(text=text, callback_data=f"ref_set_{tid}_{n}")
-    b.adjust(3)
-    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data=f"edit_ref_{tid}"))
-    await callback.message.edit_text(
-        f"🔢 <b>Yangi referal sonini tanlang</b>\n"
-        f"Hozir: <b>{cur} ta</b>",
-        reply_markup=b.as_markup()
-    )
-
-
-@router.callback_query(F.data.startswith("ref_set_"))
-async def ref_set_count(callback: CallbackQuery):
-    """Referal soni tanlandi"""
-    await callback.answer()
-    parts = callback.data.split("_")  # ref_set_TID_N
-    tid   = parts[2]
-    n     = int(parts[3])
-    await _save_ref_settings(callback, tid, True, n)
-
-
-async def _save_ref_settings(callback, tid: str, enabled: bool, count: int):
-    """Referal sozlamasini saqlash"""
-    from utils import ram_cache as ram, tg_db
-    meta = get_test_meta(tid) or {}
-
-    # RAM da yangilash
-    meta["ref_required"] = enabled
-    meta["ref_count"]    = count
-    ram.update_test_entry(callback.from_user.id, tid, {
-        "ref_required": enabled,
-        "ref_count":    count
-    })
-
-    # TG kanalga saqlash
-    try:
-        await tg_db.update_test_meta(tid, {
-            "ref_required": enabled,
-            "ref_count":    count
-        })
-    except Exception as e:
-        log.warning(f"ref_settings TG save: {e}")
-
-    st = "✅ Yoqildi" if enabled else "❌ O'chirildi"
-    await callback.answer(
-        f"Referal: {st}" + (f" ({count} ta)" if enabled else ""),
-        show_alert=True
-    )
-    # Menyuni yangilash
-    meta["ref_required"] = enabled
-    meta["ref_count"]    = count
-    await callback.message.edit_text(
-        _ref_status_text(meta, tid),
-        reply_markup=_ref_kb(tid, enabled, count)
-    )
-
-
 @router.callback_query(F.data.startswith("allowed_clear_"))
 async def allowed_clear_cb(callback: CallbackQuery):
     await callback.answer()
@@ -1569,3 +1413,196 @@ def _test_to_txt(test):
         lines.append("")  # Bo'sh qator savollar orasida
 
     return "\n".join(lines).strip()
+
+
+# ══════════════════════════════════════════════════════
+# 🔗 REFERAL SOZLAMASI
+# ══════════════════════════════════════════════════════
+
+def _ref_status_text(meta: dict, tid: str) -> str:
+    ref_required = meta.get("ref_required", False)
+    ref_count    = int(meta.get("ref_count", 0))
+    title        = meta.get("title", tid)
+    st = "✅ YOQILGAN" if ref_required else "❌ O\'CHIRILGAN"
+    return (
+        f"🔗 <b>Referal sozlamasi</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 Test: <b>{title}</b>\n"
+        f"Holat: <b>{st}</b>\n"
+        f"Talab: <b>{ref_count if ref_required else '—'} ta referal</b>\n\n"
+        f"ℹ️ Referal talab faqat bot private chat va\n"
+        f"web testda ishlaydi. Guruhda tekshirilmaydi."
+    )
+
+
+def _ref_kb(tid: str, ref_required: bool, ref_count: int):
+    b = InlineKeyboardBuilder()
+    if ref_required:
+        b.row(InlineKeyboardButton(
+            text="❌ O\'chirish (barchaga ochiq)",
+            callback_data=f"ref_off_{tid}"
+        ))
+        b.row(InlineKeyboardButton(
+            text=f"🔢 Sonini o\'zgartirish (hozir: {ref_count})",
+            callback_data=f"ref_cnt_{tid}"
+        ))
+    else:
+        b.row(InlineKeyboardButton(
+            text="✅ Yoqish",
+            callback_data=f"ref_on_{tid}"
+        ))
+    b.row(InlineKeyboardButton(
+        text="⬅️ Orqaga",
+        callback_data=f"mytest_settings_{tid}"
+    ))
+    return b.as_markup()
+
+
+@router.callback_query(F.data.startswith("edit_ref_"))
+async def edit_ref_cb(callback: CallbackQuery):
+    await callback.answer()
+    tid  = callback.data.replace("edit_ref_", "")
+    uid  = callback.from_user.id
+    meta = get_test_meta_any(tid) or {}
+
+    from config import ADMIN_IDS
+    creator_id = int(meta.get("creator_id", 0))
+    if uid != creator_id and uid not in ADMIN_IDS:
+        return await callback.answer("❌ Ruxsat yo\'q", show_alert=True)
+
+    ref_required = meta.get("ref_required", False)
+    ref_count    = int(meta.get("ref_count", 0))
+
+    try:
+        await callback.message.edit_text(
+            _ref_status_text(meta, tid),
+            reply_markup=_ref_kb(tid, ref_required, ref_count)
+        )
+    except Exception:
+        await callback.message.answer(
+            _ref_status_text(meta, tid),
+            reply_markup=_ref_kb(tid, ref_required, ref_count)
+        )
+
+
+@router.callback_query(F.data.startswith("ref_off_"))
+async def ref_turn_off(callback: CallbackQuery):
+    await callback.answer()
+    tid = callback.data.replace("ref_off_", "")
+    await _save_ref_settings(callback, tid, False, 0)
+
+
+@router.callback_query(F.data.startswith("ref_on_"))
+async def ref_turn_on(callback: CallbackQuery):
+    await callback.answer()
+    tid = callback.data.replace("ref_on_", "")
+    b = InlineKeyboardBuilder()
+    for n in [1, 2, 3, 5, 7, 10]:
+        b.button(text=str(n), callback_data=f"ref_set_{tid}_{n}")
+    b.adjust(3)
+    b.row(InlineKeyboardButton(
+        text="❌ Bekor",
+        callback_data=f"edit_ref_{tid}"
+    ))
+    try:
+        await callback.message.edit_text(
+            f"🔢 <b>Nechta referal talab qilinsin?</b>\n\n"
+            f"Foydalanuvchi bu testni yechish uchun\n"
+            f"qancha odam taklif qilishi kerak?",
+            reply_markup=b.as_markup()
+        )
+    except Exception:
+        await callback.message.answer(
+            f"🔢 <b>Nechta referal talab qilinsin?</b>\n\n"
+            f"Qancha odam taklif qilishi kerak?",
+            reply_markup=b.as_markup()
+        )
+
+
+@router.callback_query(F.data.startswith("ref_cnt_"))
+async def ref_change_count(callback: CallbackQuery):
+    await callback.answer()
+    tid  = callback.data.replace("ref_cnt_", "")
+    meta = get_test_meta_any(tid) or {}
+    cur  = int(meta.get("ref_count", 1))
+    b = InlineKeyboardBuilder()
+    for n in [1, 2, 3, 5, 7, 10]:
+        text = f"✓ {n}" if n == cur else str(n)
+        b.button(text=text, callback_data=f"ref_set_{tid}_{n}")
+    b.adjust(3)
+    b.row(InlineKeyboardButton(
+        text="❌ Bekor",
+        callback_data=f"edit_ref_{tid}"
+    ))
+    try:
+        await callback.message.edit_text(
+            f"🔢 <b>Yangi referal sonini tanlang</b>\n"
+            f"Hozir: <b>{cur} ta</b>",
+            reply_markup=b.as_markup()
+        )
+    except Exception:
+        await callback.message.answer(
+            f"🔢 <b>Yangi referal sonini tanlang</b>\nHozir: <b>{cur} ta</b>",
+            reply_markup=b.as_markup()
+        )
+
+
+@router.callback_query(F.data.startswith("ref_set_"))
+async def ref_set_count(callback: CallbackQuery):
+    await callback.answer()
+    # ref_set_TID_N — TID ichida _ bo'lishi mumkin
+    # Oxirgi _ dan keyin N, qolgan qismi TID
+    raw  = callback.data[len("ref_set_"):]
+    # N = oxirgi segment
+    parts = raw.rsplit("_", 1)
+    if len(parts) != 2:
+        return await callback.answer("❌ Format xato", show_alert=True)
+    tid, n_str = parts[0], parts[1]
+    if not n_str.isdigit():
+        return await callback.answer("❌ Son noto\'g\'ri", show_alert=True)
+    n = int(n_str)
+    await _save_ref_settings(callback, tid, True, n)
+
+
+async def _save_ref_settings(callback, tid: str, enabled: bool, count: int):
+    """Referal sozlamasini RAM + TG ga saqlash"""
+    from utils import ram_cache as ram
+    from utils.tg_db import update_test_meta_tg as tg_save
+
+    meta = get_test_meta_any(tid) or {}
+    meta["ref_required"] = enabled
+    meta["ref_count"]    = count
+
+    # RAM da yangilash
+    try:
+        ram.update_test_entry(callback.from_user.id, tid, {
+            "ref_required": enabled,
+            "ref_count":    count
+        })
+    except Exception as e:
+        log.warning(f"ref RAM: {e}")
+
+    # TG kanalga saqlash
+    try:
+        await tg_save(tid, {"ref_required": enabled, "ref_count": count})
+    except Exception as e:
+        log.warning(f"ref TG save: {e}")
+
+    # Javob
+    st = "✅ Yoqildi" if enabled else "❌ O\'chirildi"
+    await callback.answer(
+        f"Referal: {st}" + (f" ({count} ta)" if enabled else ""),
+        show_alert=True
+    )
+
+    # Menyuni yangilash
+    try:
+        await callback.message.edit_text(
+            _ref_status_text(meta, tid),
+            reply_markup=_ref_kb(tid, enabled, count)
+        )
+    except Exception:
+        await callback.message.answer(
+            _ref_status_text(meta, tid),
+            reply_markup=_ref_kb(tid, enabled, count)
+        )
