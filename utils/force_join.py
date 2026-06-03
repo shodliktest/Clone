@@ -104,59 +104,43 @@ async def send_join_request(event, not_joined: list, bot):
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     from aiogram.types import InlineKeyboardButton, Message, CallbackQuery
 
-    lines = ["🔒 <b>Botdan foydalanish uchun quyidagi kanal(lar)ga a'zo bo'ling:</b>\n"]
     b = InlineKeyboardBuilder()
-
+    # Tugmalar - har kanal uchun
     for ch in not_joined:
         invite = ch.get("invite") or ""
         icon   = "📢" if ch.get("type") == "channel" else "👥"
-        lines.append(f"{icon} <b>{ch['title']}</b>")
+        title  = ch['title'][:25] + "..." if len(ch['title']) > 25 else ch['title']
         if invite:
             b.row(InlineKeyboardButton(
-                text=f"{icon} {ch['title']}",
+                text=f"{icon} {title}",
                 url=invite
             ))
-
     b.row(InlineKeyboardButton(
         text="✅ A'zo bo'ldim — Tekshirish",
         callback_data="fj_check"
     ))
+    # Qisqa matn - 4096 limitdan xavfsiz
+    count = len(not_joined)
+    names = ", ".join(
+        (ch['title'][:20] + "...") if len(ch['title']) > 20 else ch['title']
+        for ch in not_joined[:3]
+    )
+    if count > 3: names += f" va yana {count-3} ta"
+    text = (
+        f"🔒 <b>Majburiy obuna</b>\n\n"
+        f"Botdan foydalanish uchun quyidagi "
+        f"{'kanallarga' if count > 1 else 'kanalga'} a'zo bo'ling:\n"
+        f"<b>{names}</b>\n\n"
+        f"👇 Tugmalarni bosib a'zo bo'ling:"
+    )
 
-    text = "\n".join(lines)
-
-    # Chat turini aniqlash
+    # Faqat private chatda yuboriladi (middleware guruhni bloklaydi)
     try:
         if isinstance(event, Message):
-            chat_type = event.chat.type
-            uid       = event.from_user.id if event.from_user else None
+            await event.answer(text, reply_markup=b.as_markup())
         elif isinstance(event, CallbackQuery):
-            chat_type = event.message.chat.type if event.message else "private"
-            uid       = event.from_user.id if event.from_user else None
-        else:
-            chat_type = "private"
-            uid       = None
-
-        if chat_type == "private":
-            # Private chat — to'g'ridan yuborish
-            if isinstance(event, Message):
-                await event.answer(text, reply_markup=b.as_markup())
-            elif isinstance(event, CallbackQuery):
+            if event.message:
                 await event.message.answer(text, reply_markup=b.as_markup())
-        else:
-            # Guruh/kanal — faqat PM ga yuborish
-            if uid:
-                try:
-                    await bot.send_message(uid, text, reply_markup=b.as_markup())
-                    # Guruhda qisqa xabar
-                    if isinstance(event, Message):
-                        await event.reply(
-                            f"👤 @{event.from_user.username or event.from_user.full_name}, "
-                            f"botdan foydalanish uchun shaxsiy xabarga qarang! 👆"
-                        )
-                except Exception:
-                    # PM blok - guruhda ko'rsatish
-                    if isinstance(event, Message):
-                        await event.reply(text, reply_markup=b.as_markup())
     except Exception as e:
         log.warning(f"send_join_request: {e}")
 
