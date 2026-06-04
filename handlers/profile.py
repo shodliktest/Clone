@@ -1155,7 +1155,17 @@ async def del_mytest_confirm(callback: CallbackQuery):
     from utils import ram_cache as ram
     meta = ram.get_test_meta_any(tid)
     if not meta:
-        return await callback.answer("❌ Test topilmadi.", show_alert=True)
+        # TG kanaldan yuklab ko'rish
+        try:
+            from utils import tg_db
+            full = await tg_db.get_test_full(tid)
+            if full:
+                meta = {k: v for k, v in full.items() if k != "questions"}
+                ram.add_test_meta(meta)
+        except Exception:
+            pass
+    if not meta:
+        return await callback.answer("❌ Test topilmadi. Sahifani yangilang.", show_alert=True)
     from config import ADMIN_IDS
     is_admin = uid in ADMIN_IDS
     is_owner = uid == meta.get("creator_id")
@@ -1189,6 +1199,16 @@ async def del_mytest_exec(callback: CallbackQuery):
     uid  = callback.from_user.id
     from utils import ram_cache as ram
     meta = ram.get_test_meta_any(tid)
+    # Meta yo'q bo'lsa TG dan yuklab ko'rish
+    if not meta:
+        try:
+            from utils import tg_db
+            full = await tg_db.get_test_full(tid)
+            if full:
+                meta = {k: v for k, v in full.items() if k != "questions"}
+                ram.add_test_meta(meta)
+        except Exception:
+            pass
     from config import ADMIN_IDS
     is_admin = uid in ADMIN_IDS
     is_owner = uid == (meta or {}).get("creator_id")
