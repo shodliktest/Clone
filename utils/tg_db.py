@@ -505,15 +505,15 @@ async def _load_all_index_chunks_fast():
     actual   = len(all_metas)
     log.info(f"Tezkor yuklash: {actual} test meta (kutilgan: {expected})")
 
-    # question_count = 0 bo'lgan testlarni background da to'ldirish
-    asyncio.create_task(_fix_question_counts())
-
     # Agar to'liq emas — background da to'liq skanerlash
     need_full = (
         not all_metas
         or (expected > 0 and actual < expected * 0.5)
         or (expected == 0 and actual <= 1 and chunks)
     )
+    # question_count = 0 bo'lgan testlarni background da to'ldirish
+    asyncio.create_task(_fix_question_counts())
+
     if need_full:
         log.warning(f"Ma'lumotlar to'liq emas — background skanerlash boshlanadi...")
         asyncio.create_task(_background_full_rescan())
@@ -570,6 +570,7 @@ async def _fix_question_counts():
     if fixed:
         log.info(f"✅ {fixed} ta test question_count to'ldirildi")
         mark_index_dirty()   # Keyingi saqlashda chunk yangilanadi
+
 
 
 async def _background_full_rescan():
