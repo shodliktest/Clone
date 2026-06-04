@@ -361,6 +361,23 @@ async def _migrate_from_old_index(progress_callback=None) -> dict:
 
     _meta.update(new_meta)
 
+    # question_count 0 bo'lgan testlarni to'ldirish
+    from utils import ram_cache as ram
+    fixed = 0
+    for m in _index.get("tests_meta", []):
+        tid = m.get("test_id")
+        if not tid: continue
+        if m.get("question_count", 0) == 0:
+            cached = _tests_cache.get(tid)
+            if cached and cached.get("questions"):
+                qc = len(cached["questions"])
+                if qc > 0:
+                    m["question_count"] = qc
+                    ram.update_test_meta(tid, {"question_count": qc})
+                    fixed += 1
+    if fixed:
+        log.info(f"✅ {fixed} ta test question_count to'ldirildi")
+
     total = len(_index.get("tests_meta", []))
     log.info(f"✅ To'liq skanerlash tugadi: {total} test meta tiklandi")
 
@@ -768,7 +785,10 @@ async def _save_index_chunks():
             rm = ram.get_test_meta(tid)
             if not rm: continue
             for key in ("solve_count", "avg_score", "is_paused", "is_active",
-                        "poll_time", "allowed_users", "title", "max_attempts"):
+                        "poll_time", "allowed_users", "title", "max_attempts",
+                        "question_count", "ref_required", "ref_count",
+                        "visibility", "difficulty", "category",
+                        "time_limit", "passing_score"):
                 if key in rm:
                     m[key] = rm[key]
 
@@ -1128,6 +1148,23 @@ async def _load_tests_stats():
         if s.get("solvers"):
             ram.load_solvers_to_ram(tid, s["solvers"])
     log.info(f"tests_stats: {len(data.get('stats',{}))} test yuklandi")
+
+    # question_count 0 bo'lgan testlarni _tests_cache dan to'ldirish
+    for m in ram.get_all_tests_meta():
+        tid = m.get("test_id")
+        if not tid: continue
+        if m.get("question_count", 0) == 0:
+            # Cache dan tekshirish
+            cached = _tests_cache.get(tid) or ram.get_cached_questions(tid)
+            if cached and cached.get("questions"):
+                qc = len(cached["questions"])
+                if qc > 0:
+                    ram.update_test_meta(tid, {"question_count": qc})
+                    # _index da ham yangilash
+                    for idx_m in _index.get("tests_meta", []):
+                        if idx_m.get("test_id") == tid:
+                            idx_m["question_count"] = qc
+                            break
 
 
 async def save_tests_stats():
