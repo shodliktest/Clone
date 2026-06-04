@@ -505,6 +505,9 @@ async def _load_all_index_chunks_fast():
     actual   = len(all_metas)
     log.info(f"Tezkor yuklash: {actual} test meta (kutilgan: {expected})")
 
+    # question_count = 0 bo'lgan testlarni background da to'ldirish
+    asyncio.create_task(_fix_question_counts())
+
     # Agar to'liq emas — background da to'liq skanerlash
     need_full = (
         not all_metas
@@ -514,6 +517,59 @@ async def _load_all_index_chunks_fast():
     if need_full:
         log.warning(f"Ma'lumotlar to'liq emas — background skanerlash boshlanadi...")
         asyncio.create_task(_background_full_rescan())
+
+
+async def _fix_question_counts():
+    """
+    Bot yoqilganda question_count = 0 bo'lgan testlarni
+    TG kanaldan yuklab to'ldiradi.
+    """
+    await asyncio.sleep(3)   # Polling boshlansin
+    from utils import ram_cache as ram
+    fixed = 0
+    metas = ram.get_all_tests_meta()
+    for m in metas:
+        tid = m.get("test_id")
+        if not tid: continue
+        if m.get("question_count", 0) > 0: continue
+
+        # Cache dan tekshirish
+        cached = _tests_cache.get(tid) or ram.get_cached_questions(tid)
+        if cached and cached.get("questions"):
+            qc = len(cached["questions"])
+        else:
+            # TG dan yuklab olamiz
+            msg_id = _index.get(f"test_{tid}")
+            if not msg_id: continue
+            try:
+                fid = _index.get(f"fid_{msg_id}")
+                data = {}
+                if fid:
+                    data = await _read_file(fid)
+                if not data or not data.get("questions"):
+                    data = await _download_doc(msg_id)
+                if not data or not data.get("questions"):
+                    continue
+                qc = len(data["questions"])
+                _tests_cache[tid] = data
+                ram.cache_questions(tid, data)
+            except Exception as e:
+                log.warning(f"_fix_qc {tid}: {e}")
+                continue
+
+        if qc > 0:
+            m["question_count"] = qc
+            ram.update_test_meta(tid, {"question_count": qc})
+            # _index da ham
+            for im in _index.get("tests_meta", []):
+                if im.get("test_id") == tid:
+                    im["question_count"] = qc
+                    break
+            fixed += 1
+
+    if fixed:
+        log.info(f"✅ {fixed} ta test question_count to'ldirildi")
+        mark_index_dirty()   # Keyingi saqlashda chunk yangilanadi
 
 
 async def _background_full_rescan():
