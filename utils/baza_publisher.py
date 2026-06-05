@@ -409,3 +409,54 @@ async def publish_to_baza(
 
     except Exception as e:
         log.error(f"❌ publish_to_baza xato: {e}", exc_info=True)
+
+
+# ── Guruh faylini parse qilish ─────────────────────────────────
+async def parse_group_file(bot, message, chat_id: int, group_title: str = ""):
+    """
+    Guruhda yuborilgan fayl (docx/pdf/txt) ni parse qilib
+    test sifatida saqlash.
+    """
+    try:
+        from utils.parser import parse_file
+        import tempfile, os
+
+        doc = message.document
+        if not doc:
+            return
+
+        # Faylni yuklab olish
+        with tempfile.NamedTemporaryFile(
+            suffix=os.path.splitext(doc.file_name or "file.txt")[1],
+            delete=False
+        ) as tmp:
+            tmp_path = tmp.name
+
+        file_info = await bot.get_file(doc.file_id)
+        await bot.download_file(file_info.file_path, destination=tmp_path)
+
+        # Parse qilish
+        questions = parse_file(tmp_path)
+        os.remove(tmp_path)
+
+        if not questions:
+            return
+
+        # Test sifatida saqlash
+        from utils.db import create_test
+        title = os.path.splitext(doc.file_name or "Test")[0]
+        tid = await create_test(
+            creator_id=message.from_user.id if message.from_user else 0,
+            data={
+                "title":      title,
+                "category":   group_title or "Boshqa",
+                "questions":  questions,
+                "visibility": "link",
+            },
+            creator_name=getattr(message.from_user, "full_name", "") if message.from_user else "",
+        )
+        log.info(f"parse_group_file: {tid} ({len(questions)} savol) guruh {chat_id}")
+        return tid
+    except Exception as e:
+        log.error(f"parse_group_file: {e}")
+        return None
