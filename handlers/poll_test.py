@@ -97,6 +97,23 @@ async def start_poll(callback: CallbackQuery, state: FSMContext):
     uid    = callback.from_user.id
     meta   = get_test_meta(tid) or {}
 
+    # ── Referral tekshiruvi ──
+    if not is_demo_poll:
+        try:
+            from utils.ref_test import check_test_referral, send_referral_required_msg
+            _bu = (await callback.bot.me()).username
+            _ref = await check_test_referral(
+                callback.bot, uid, tid, meta, _bu
+            )
+            if not _ref["ok"]:
+                await send_referral_required_msg(
+                    callback, _ref, meta.get("title", tid), _bu
+                )
+                return
+        except Exception as _re:
+            import logging
+            logging.getLogger(__name__).warning(f"ref check poll: {_re}")
+
     # Ruxsat tekshiruvi
     allowed = meta.get("allowed_users", [])
     if allowed and uid not in allowed:
@@ -367,6 +384,14 @@ async def _send_poll(bot, cid, state):
         task = asyncio.create_task(_poll_timeout(bot, cid, state, idx, wait))
         _poll_timers[cid] = task
     except Exception as e:
+        err_str = str(e).lower()
+        # User botni bloklagan - sessiyani yakunlaymiz
+        if 'forbidden' in err_str or 'blocked' in err_str or 'kicked' in err_str:
+            log.warning(f"Poll: user botni bloklagan {cid}, sessiya yakunlanadi")
+            _cancel_timer(cid)
+            await state.clear()
+            return
+        # Boshqa xatolar - keyingi savolga o'tamiz
         log.error(f"Poll xatosi: {e}")
         await state.update_data(idx=idx+1)
         await _send_poll(bot, cid, state)

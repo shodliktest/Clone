@@ -110,7 +110,8 @@ async def _del(bot, cid, mid):
 
 # ── Debounce uchun global dictlar ━━━━━━━━━━━━━━━━━━━━━━━━
 # Poll (QuizBot forward)
-_poll_debounce: dict = {}  # {uid: asyncio.Task}
+_poll_debounce:    dict = {}  # {uid: asyncio.Task}
+_save_in_progress: set  = set()   # Double-click himoyasi
 _poll_progress: dict = {}  # {uid: progress_msg_id}
 _poll_count:    dict = {}  # {uid: savol soni}
 
@@ -694,8 +695,20 @@ async def set_att(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("vis_"), CreateTest.set_visibility)
 async def save_test(callback: CallbackQuery, state: FSMContext):
     await callback.answer("⏳")
-    chosen_vis = callback.data[4:]
     uid = callback.from_user.id
+    # Double-click himoyasi: bir vaqtda faqat bitta saqlash
+    if uid in _save_in_progress:
+        return await callback.answer("⏳ Test saqlanmoqda...", show_alert=True)
+    _save_in_progress.add(uid)
+    try:
+        await _do_save_test(callback, state)
+    finally:
+        _save_in_progress.discard(uid)
+
+
+async def _do_save_test(callback: CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    chosen_vis = callback.data[4:]
 
     # ── Ommaviy test faqat teacher/admin ━━━━━━━━━━━━━━━━━━━━━━━━
     if chosen_vis == "public":
@@ -722,7 +735,7 @@ async def save_test(callback: CallbackQuery, state: FSMContext):
         "title":         d.get("title", "Nomsiz"),
         "category":      d.get("category", "Boshqa"),
         "difficulty":    d.get("difficulty", "medium"),
-        "visibility":    callback.data[4:],
+        "visibility":    chosen_vis,
         "time_limit":    d.get("time_limit", 0),
         "poll_time":     d.get("poll_time", 30),
         "passing_score": d.get("passing_score", 60),

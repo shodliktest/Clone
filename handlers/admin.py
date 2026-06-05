@@ -792,6 +792,14 @@ async def group_broadcast_send(message: Message, state: FSMContext):
             err = str(e).lower()
             if "bot was kicked" in err or "bot is not a member" in err or "chat not found" in err:
                 ram.remove_known_group(int(cid))
+            elif "upgraded to a supergroup" in err or "migrated" in err:
+                # Guruh supergroup ga o'tgan - eski ID o'chiramiz
+                ram.remove_known_group(int(cid))
+                log.info(f"Guruh {cid} supergroup ga o'tdi, ro'yxatdan o'chirildi")
+            elif "not enough rights" in err or "forbidden" in err:
+                # Bot xabar yubora olmaydi - guruhni passive qilish
+                g["active"] = False
+                log.info(f"Guruh {cid} passive qilindi (huquq yo'q)")
 
         try:
             await status.edit_text(f"⏳ {ok+fail}/{len(active)} | ✅{ok} ❌{fail}")
