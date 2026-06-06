@@ -61,11 +61,10 @@ def _ref_text(uid: int, bot_username: str) -> str:
         "",
     ]
 
+    from utils.roles import get_creation_settings
+    cs = get_creation_settings()
     if today_bonus:
         lines.append("✅ <b>Bugun test yaratish imkoningiz bor!</b>")
-    else:
-        from utils.roles import get_creation_settings
-    cs = get_creation_settings()
     if cs["test_creation_disabled"]:
         lines.append("🔒 Test yaratish hozircha <b>berkitilgan</b>.")
     elif cs["open_test_creation"]:
