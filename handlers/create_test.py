@@ -446,30 +446,525 @@ async def upload_file(message: Message, state: FSMContext):
         if not questions:
             return await status.edit_text(
                 "❌ <b>Savollar topilmadi!</b>\n\n"
-                "Namuna formatiga qarang va to'g'ri yozing.\n"
-                "Namunani ko'rish uchun turni qaytadan tanlang."
+                "Namuna formatiga qarang va to\'g\'ri yozing.\n"
+                "Namunani ko\'rish uchun turni qaytadan tanlang."
             )
 
-        await state.update_data(questions=questions)
-        b_pt = InlineKeyboardBuilder()
-        for s in POLL_TIMES:
-            b_pt.add(InlineKeyboardButton(text=f"⏱ {s}s", callback_data=f"ptime_{s}"))
-        b_pt.adjust(3)
-        b_pt.row(InlineKeyboardButton(text="♾ Cheksiz", callback_data="ptime_0"))
-        await status.edit_text(
-            f"<b>✅ {len(questions)} TA SAVOL TOPILDI!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏱ <b>Har bir savol uchun necha soniya?</b>",
-            reply_markup=b_pt.as_markup()
-        )
-        await state.set_state(CreateTest.set_poll_time)
+        # To\'g\'ri javob belgilanmagan savollar sonini topamiz
+        unmarked = _count_unmarked(questions)
+        total    = len(questions)
+
+        await state.update_data(questions=questions, file_id=doc.file_id)
+
+        if unmarked > 0:
+            # Belgilanmagan savollar bor — uchta variant taklif qilamiz
+            b = InlineKeyboardBuilder()
+            b.button(text="🔡 Seryalik javob",  callback_data="uj_serial")
+            b.button(text="🤖 AI bilan yechish", callback_data="uj_ai")
+            b.button(text="📨 Adminga murojaat", callback_data="uj_admin")
+            b.button(text="▶️ Shundayicha davom", callback_data="uj_skip")
+            b.adjust(1)
+            await status.edit_text(
+                f"📋 <b>{total} TA SAVOL TOPILDI</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
+                f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n\n"
+                f"<i>Belgilanmagan savollarda to\'g\'ri javob aniqlanmagan.\n"
+                f"Qanday davom etamiz?</i>",
+                reply_markup=b.as_markup()
+            )
+        else:
+            # Hammasi belgilangan — to\'g\'ridan davom
+            await _ask_poll_time(status, state, total)
 
     except Exception as e:
-        log.error(f"Fayl yuklashda xato: {e}")
+        log.error(f"Fayl yuklashda xato: {e}", exc_info=True)
         await status.edit_text(
-            "❌ Faylni o'qishda xatolik yuz berdi.\n"
-            "Boshqa format yoki faylni sinab ko'ring."
+            "❌ Faylni o\'qishda xatolik yuz berdi.\n"
+            "Boshqa format yoki faylni sinab ko\'ring."
         )
+
+
+def _count_unmarked(questions: list) -> int:
+    """To\'g\'ri javob belgilanmagan savollar sonini qaytaradi"""
+    count = 0
+    for q in questions:
+        correct = q.get("correct", "")
+        opts    = q.get("options", [])
+        # Agar correct bo\'sh yoki options[0] ga teng bo\'lsa — belgilanmagan deb olamiz
+        # (chunki parser birinchi variantni default qilib qo\'yadi)
+        # Haqiqiy belgilangan: correct options[0] dan farqli YOKI metadata\'da marked=True
+        if q.get("_marked"):
+            continue  # Aniq belgilangan
+        if not correct or not opts:
+            count += 1
+        # Agar to\'g\'ri javob birinchi variant bo\'lsa ham belgilangan bo\'lishi mumkin
+        # (# bilan) — bu holda parser _marked=True qo\'yadi
+    return count
+
+
+async def _ask_poll_time(msg, state, q_count: int):
+    """Poll time so\'rash"""
+    b_pt = InlineKeyboardBuilder()
+    for s in POLL_TIMES:
+        b_pt.add(InlineKeyboardButton(text=f"⏱ {s}s", callback_data=f"ptime_{s}"))
+    b_pt.adjust(3)
+    b_pt.row(InlineKeyboardButton(text="♾ Cheksiz", callback_data="ptime_0"))
+    await msg.edit_text(
+        f"<b>✅ {q_count} TA SAVOL TOPILDI!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏱ <b>Har bir savol uchun necha soniya?</b>",
+        reply_markup=b_pt.as_markup()
+    )
+    await state.set_state(CreateTest.set_poll_time)
+
+
+# ═══════════════════════════════════════════════════════════
+# BELGILANMAGAN SAVOLLAR — 3 ta variant
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "uj_serial", CreateTest.upload_file)
+async def uj_serial(callback: CallbackQuery, state: FSMContext):
+    """Seryalik javob — A/B/C/D/E variantlardan biri"""
+    await callback.answer()
+    b = InlineKeyboardBuilder()
+    for letter in ["A", "B", "C", "D", "E"]:
+        b.button(text=f"✅ {letter}", callback_data=f"serial_{letter}")
+    b.button(text="⬅️ Orqaga", callback_data="uj_back")
+    b.adjust(5, 1)
+    await callback.message.edit_text(
+        "🔡 <b>SERYALIK JAVOB</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Barcha belgilanmagan savollarda\n"
+        "qaysi variant to\'g\'ri bo\'ladi?\n\n"
+        "<i>💡 Masalan: agar variantlar doim\n"
+        "B bo\'lsa — B ni tanlang</i>",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("serial_"), CreateTest.upload_file)
+async def apply_serial(callback: CallbackQuery, state: FSMContext):
+    """Tanlangan harf bilan barcha savollarga serial javob qo\'yadi"""
+    await callback.answer()
+    letter = callback.data.split("_")[1]  # A, B, C, D, E
+    letter_idx = ord(letter.upper()) - ord("A")  # 0,1,2,3,4
+
+    d = await state.get_data()
+    questions = d.get("questions", [])
+    labels = ["A","B","C","D","E","F","G","H"]
+
+    changed = 0
+    for q in questions:
+        if q.get("_marked"):
+            continue
+        opts = q.get("options", [])
+        if opts and letter_idx < len(opts):
+            q["correct"] = opts[letter_idx]
+            q["_serial"] = letter
+            changed += 1
+
+    await state.update_data(questions=questions)
+    total = len(questions)
+    await callback.message.edit_text(
+        f"✅ <b>Seryalik javob qo\'llandi!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔡 Variant: <b>{letter}</b>\n"
+        f"📝 O\'zgartirildi: <b>{changed}</b> ta savol\n\n"
+        f"<i>Davom etamiz...</i>"
+    )
+    await asyncio.sleep(1)
+    await _ask_poll_time(callback.message, state, total)
+
+
+@router.callback_query(F.data == "uj_ai", CreateTest.upload_file)
+async def uj_ai(callback: CallbackQuery, state: FSMContext):
+    """AI bilan yechish"""
+    await callback.answer()
+    await callback.message.edit_text(
+        "🤖 <b>AI BILAN YECHISH</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "⏳ AI savollarni tahlil qilmoqda...\n\n"
+        "<i>Bu bir necha soniya olishi mumkin</i>"
+    )
+
+    d = await state.get_data()
+    questions = d.get("questions", [])
+
+    try:
+        questions = await _ai_solve_questions(questions, callback.message)
+        await state.update_data(questions=questions)
+        total = len(questions)
+        solved = sum(1 for q in questions if q.get("_ai_solved"))
+        await callback.message.edit_text(
+            f"🤖 <b>AI javoblarni topdi!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Yechildi: <b>{solved}</b> ta savol\n\n"
+            f"<i>Davom etamiz...</i>"
+        )
+        await asyncio.sleep(1.5)
+        await _ask_poll_time(callback.message, state, total)
+    except Exception as e:
+        log.error(f"AI solve xato: {e}", exc_info=True)
+        b = InlineKeyboardBuilder()
+        b.button(text="🔡 Seryalik javob",  callback_data="uj_serial")
+        b.button(text="📨 Adminga murojaat", callback_data="uj_admin")
+        b.button(text="▶️ Shundayicha davom", callback_data="uj_skip")
+        b.adjust(1)
+        await callback.message.edit_text(
+            f"❌ <b>AI xatolik berdi</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{str(e)[:200]}</code>\n\n"
+            f"Boshqa usulni tanlang:",
+            reply_markup=b.as_markup()
+        )
+
+
+# ═══════════════════════════════════════════════════════════
+# GLOBAL NAVBAT TIZIMI — parallel userlar uchun
+# ═══════════════════════════════════════════════════════════
+
+import asyncio as _asyncio
+import time as _time
+
+# Global navbat va worker holati
+_ai_queue: _asyncio.Queue = None          # Batch navbati
+_ai_workers_started: bool = False         # Workerlar ishlaydimi
+_ai_key_idx: int = 0                      # Joriy kalit indeksi
+_ai_rate_wait: float = 0.0               # Rate limit kutish
+
+def _ensure_ai_workers(groq_keys: list):
+    """AI worker tasklarini ishga tushiradi (bir marta)"""
+    global _ai_queue, _ai_workers_started
+    if _ai_workers_started and _ai_queue:
+        return
+    _ai_queue = _asyncio.Queue()
+    n_workers = min(len(groq_keys), 3)  # Max 3 parallel worker
+    for i in range(n_workers):
+        _asyncio.create_task(_ai_worker(groq_keys, i))
+    _ai_workers_started = True
+    log.info(f"AI workers ishga tushdi: {n_workers} ta, {len(groq_keys)} kalit")
+
+
+async def _ai_worker(groq_keys: list, worker_id: int):
+    """
+    Background worker — navbatdan batch olib Groq ga yuboradi.
+    Bir vaqtda N ta worker = N ta parallel so'rov.
+    """
+    global _ai_key_idx, _ai_rate_wait
+    import aiohttp, json
+
+    while True:
+        try:
+            item = await _ai_queue.get()
+            if item is None:  # Poison pill — to'xtat
+                break
+
+            q_data, callback_fn, batch_num, total_batches = item
+
+            SYSTEM_PROMPT = (
+                "Siz akademik test yechuvchi ekspert mutaxasssissiz. "
+                "Sizga berilgan test savollarini academic darajada aniq va xatolarsiz yeching. "
+                "Har bir savol uchun to'g'ri javob indeksini 0 dan boshlab aniqlang. "
+                "Faqat JSON formatda javob bering, boshqa hech narsa yozmang."
+            )
+            USER_PROMPT = (
+                "Quyidagi test savollarini yeching va JSON qaytaring:\n"
+                "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"izoh\"}]\n\n"
+                f"Savollar:\n{json.dumps(q_data, ensure_ascii=False, indent=2)}"
+            )
+
+            # Rate limit kutish
+            if _ai_rate_wait > 0:
+                await _asyncio.sleep(_ai_rate_wait)
+                _ai_rate_wait = 0
+
+            # Kalit rotatsiyasi bilan so'rov
+            result = None
+            for attempt in range(len(groq_keys)):
+                key = groq_keys[_ai_key_idx % len(groq_keys)]
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            "https://api.groq.com/openai/v1/chat/completions",
+                            headers={"Authorization": f"Bearer {key}",
+                                     "Content-Type": "application/json"},
+                            json={
+                                "model":       "llama-3.3-70b-versatile",
+                                "messages":    [
+                                    {"role": "system", "content": SYSTEM_PROMPT},
+                                    {"role": "user",   "content": USER_PROMPT},
+                                ],
+                                "max_tokens":  4000,
+                                "temperature": 0.05,
+                            },
+                            timeout=aiohttp.ClientTimeout(total=90),
+                        ) as resp:
+                            result = await resp.json()
+
+                    err = result.get("error", {})
+                    if err:
+                        etype = str(err.get("type","")) + str(err.get("code",""))
+                        if "rate_limit" in etype or "quota" in etype or "tokens" in etype:
+                            # Rate limit — 60s kutamiz, keyingi kalitga o'tamiz
+                            _ai_rate_wait = 62.0
+                            _ai_key_idx += 1
+                            log.warning(f"Worker {worker_id}: kalit {_ai_key_idx % len(groq_keys) + 1} limit, kutamiz")
+                            await _asyncio.sleep(62)
+                            result = None
+                            continue
+                        raise ValueError(f"Groq: {err.get('message', str(err))}")
+                    break
+
+                except aiohttp.ClientError as e:
+                    log.warning(f"Worker {worker_id} network xato: {e}")
+                    _ai_key_idx += 1
+                    continue
+
+            # Natijani callback ga yuboramiz
+            await callback_fn(result, q_data, batch_num, total_batches)
+            _ai_queue.task_done()
+
+        except _asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.error(f"AI worker {worker_id} xato: {e}", exc_info=True)
+            _ai_queue.task_done()
+
+
+async def _ai_solve_questions(questions: list, msg) -> list:
+    """
+    Groq LLaMA bilan belgilanmagan savollarni yechadi.
+    - Global navbat tizimi: bir vaqtda ko'p user ishlasa navbatda kutadi
+    - Progress bar: har batch dan keyin yangilanadi
+    - Kalit rotatsiya: limit tugasa avtomatik keyingisiga o'tadi
+    """
+    import aiohttp, json, os
+
+    # Kalitlarni olish
+    def _get_groq_keys() -> list:
+        keys = []
+        try:
+            import streamlit as st
+            k = st.secrets.get("GROQ_API_KEY", "")
+            if k: keys.append(k)
+            for i in range(1, 21):
+                k = st.secrets.get(f"GROQ_API_KEY{i}", "")
+                if k: keys.append(k)
+        except Exception:
+            pass
+        if not keys:
+            k = os.environ.get("GROQ_API_KEY", "")
+            if k: keys.append(k)
+            for i in range(1, 21):
+                k = os.environ.get(f"GROQ_API_KEY{i}", "")
+                if k: keys.append(k)
+        return keys
+
+    groq_keys = _get_groq_keys()
+    if not groq_keys:
+        raise ValueError("Hech qanday GROQ_API_KEY topilmadi!")
+
+    # Worker larni ishga tushiramiz
+    _ensure_ai_workers(groq_keys)
+
+    # Belgilanmagan savollarni topamiz
+    unmarked = [(i, q) for i, q in enumerate(questions) if not q.get("_marked")]
+    if not unmarked:
+        return questions
+
+    batch_size   = 40
+    total_q      = len(unmarked)
+    total_batches = (total_q + batch_size - 1) // batch_size
+    solved_count = 0
+    start_time   = _time.time()
+
+    # Progress bar emoji
+    def _bar(done, total, width=10):
+        filled = int(width * done / max(total, 1))
+        return "█" * filled + "░" * (width - filled)
+
+    # Har batch uchun Future (natija kelishini kutamiz)
+    futures = []
+    batch_results = {}  # {batch_num: (results, q_data)}
+
+    def make_callback(batch_num, fut):
+        async def callback(result, q_data_local, bn, tb):
+            batch_results[batch_num] = (result, q_data_local)
+            if not fut.done():
+                fut.set_result(True)
+        return callback
+
+    # Barcha batchlarni navbatga qo'shamiz
+    loop = _asyncio.get_event_loop()
+    for batch_num, batch_start in enumerate(range(0, len(unmarked), batch_size)):
+        batch = unmarked[batch_start:batch_start + batch_size]
+        q_data = []
+        for orig_idx, q in batch:
+            q_data.append({
+                "idx":  orig_idx,
+                "q":    q.get("question", q.get("text", "")),
+                "opts": [re.sub(r"^[A-Ha-h]\s*[).]\s*", "", o)
+                         for o in q.get("options", [])],
+            })
+        fut = loop.create_future()
+        futures.append((batch_num, fut))
+        await _ai_queue.put((q_data, make_callback(batch_num, fut), batch_num, total_batches))
+
+    # Navbatdagi pozitsiyani taxminlaymiz
+    queue_size = _ai_queue.qsize()
+    my_batches = total_batches
+
+    # Har batch natijasini kutamiz va progress yangilaymiz
+    for done_count, (batch_num, fut) in enumerate(futures, 1):
+        # Progress xabari
+        elapsed  = _time.time() - start_time
+        per_batch = elapsed / max(done_count - 1, 1) if done_count > 1 else 8.0
+        remaining = int(per_batch * (total_batches - done_count + 1))
+        done_q   = min((done_count - 1) * batch_size, total_q)
+        bar      = _bar(done_count - 1, total_batches)
+
+        # Navbat xabari
+        if queue_size > my_batches + 5:
+            queue_info = f"\n⏳ Navbat: ~{(queue_size - my_batches) // my_batches} odam oldinda"
+        else:
+            queue_info = ""
+
+        if msg:
+            try:
+                mins, secs = divmod(remaining, 60)
+                time_str = f"{mins}:{secs:02d}" if mins > 0 else f"{secs}s"
+                await msg.edit_text(
+                    f"🤖 <b>AI yechmoqda...</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"[{bar}] {done_count-1}/{total_batches} batch\n"
+                    f"📊 {done_q}/{total_q} savol\n"
+                    f"⏱ Qoldi: ~{time_str}{queue_info}\n"
+                    f"🔑 {len(groq_keys)} ta kalit aktiv"
+                )
+            except Exception:
+                pass
+
+        # Natija kelishini kutamiz
+        await fut
+
+        # Natijani qayta ishlaymiz
+        result, q_data_local = batch_results.get(batch_num, (None, []))
+        if not result:
+            continue
+
+        try:
+            resp_content = result["choices"][0]["message"]["content"].strip()
+            resp_content = re.sub(r"```json\s*|\s*```", "", resp_content).strip()
+            items = json.loads(resp_content)
+            for item in items:
+                orig_idx = item.get("idx", -1)
+                ci       = item.get("correct_idx", 0)
+                expl     = item.get("explanation", "")
+                if 0 <= orig_idx < len(questions):
+                    opts = questions[orig_idx].get("options", [])
+                    if 0 <= ci < len(opts):
+                        questions[orig_idx]["correct"]    = opts[ci]
+                        questions[orig_idx]["explanation"] = f"🤖 {expl}" if expl else ""
+                        questions[orig_idx]["_ai_solved"]  = True
+                        solved_count += 1
+        except Exception as e:
+            log.error(f"Batch {batch_num} parse xato: {e}")
+
+    # Yakuniy progress
+    total_time = int(_time.time() - start_time)
+    mins, secs = divmod(total_time, 60)
+    time_str   = f"{mins}:{secs:02d}" if mins > 0 else f"{secs}s"
+    bar_full   = _bar(total_batches, total_batches)
+
+    if msg:
+        try:
+            await msg.edit_text(
+                f"✅ <b>AI tugatdi!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"[{bar_full}] {total_batches}/{total_batches} batch\n"
+                f"📊 {solved_count}/{total_q} savol yechildi\n"
+                f"⏱ Vaqt: {time_str}"
+            )
+        except Exception:
+            pass
+
+    return questions
+
+
+@router.callback_query(F.data == "uj_admin", CreateTest.upload_file)
+async def uj_admin(callback: CallbackQuery, state: FSMContext):
+    """Adminga murojaat"""
+    await callback.answer()
+    from config import ADMIN_IDS
+
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Orqaga", callback_data="uj_back")
+    b.button(text="❌ Bekor",   callback_data="cancel_create")
+    b.adjust(2)
+
+    # Adminga xabar yuboramiz
+    d = await state.get_data()
+    questions = d.get("questions", [])
+    unmarked = _count_unmarked(questions)
+    uid = callback.from_user.id
+    uname = callback.from_user.full_name or str(uid)
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await callback.bot.send_message(
+                admin_id,
+                f"📨 <b>Yordam so\'rovi</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 Foydalanuvchi: {uname} (<code>{uid}</code>)\n"
+                f"📋 Savollar: {len(questions)} ta\n"
+                f"❓ Belgilanmagan: {unmarked} ta\n\n"
+                f"<i>Test yaratishda yordam kerak</i>",
+            )
+        except Exception:
+            pass
+
+    await callback.message.edit_text(
+        "📨 <b>Adminga murojaat yuborildi!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Admin tez orada javob beradi.\n\n"
+        "Shu orada boshqa usullarni ham sinab ko\'ring:",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.callback_query(F.data == "uj_skip", CreateTest.upload_file)
+async def uj_skip(callback: CallbackQuery, state: FSMContext):
+    """Shundayicha davom — belgilanmagan savollar A bilan qoladi"""
+    await callback.answer()
+    d = await state.get_data()
+    questions = d.get("questions", [])
+    await _ask_poll_time(callback.message, state, len(questions))
+
+
+@router.callback_query(F.data == "uj_back", CreateTest.upload_file)
+async def uj_back(callback: CallbackQuery, state: FSMContext):
+    """Orqaga — asosiy tanlov"""
+    await callback.answer()
+    d = await state.get_data()
+    questions = d.get("questions", [])
+    unmarked = _count_unmarked(questions)
+    total = len(questions)
+
+    b = InlineKeyboardBuilder()
+    b.button(text="🔡 Seryalik javob",  callback_data="uj_serial")
+    b.button(text="🤖 AI bilan yechish", callback_data="uj_ai")
+    b.button(text="📨 Adminga murojaat", callback_data="uj_admin")
+    b.button(text="▶️ Shundayicha davom", callback_data="uj_skip")
+    b.adjust(1)
+    await callback.message.edit_text(
+        f"📋 <b>{total} TA SAVOL TOPILDI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
+        f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n\n"
+        f"<i>Qanday davom etamiz?</i>",
+        reply_markup=b.as_markup()
+    )
 
 
 # ═══════════════════════════════════════════════════════════
