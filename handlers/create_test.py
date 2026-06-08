@@ -1,5 +1,5 @@
 """➕ TEST YARATISH — Fayl yoki QuizBot forward"""
-import os, logging, tempfile, asyncio
+import os, re, logging, tempfile, asyncio
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
 from aiogram.fsm.context import FSMContext
