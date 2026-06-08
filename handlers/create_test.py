@@ -209,6 +209,7 @@ async def create_start(message: Message, state: FSMContext):
             f"🔗 <b>Sizning havolangiz:</b>\n"
             f"<code>{ref_link}</code>\n\n"
             f"💡 Admindan daraja oshirishni so'rashingiz mumkin",
+            parse_mode="HTML",
             reply_markup=b.as_markup()
         )
         return
@@ -227,6 +228,7 @@ async def create_start(message: Message, state: FSMContext):
         "📊 <b>QuizBotdan forward</b> — @QuizBot savollarini\n"
         "   uzating. TXT yuklab olish + Poll rejimi!\n\n"
         "<i>💡 Namunani ko'rish uchun turni tanlang</i>",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
     await state.set_state(CreateTest.choose_method)
@@ -254,6 +256,7 @@ async def cb_show_referral(callback: CallbackQuery):
         f"<code>{link}</code>\n\n"
         f"📊 Jami: <b>{stats['total']}</b> | Bugun: <b>{stats['today']}</b>\n\n"
         f"Havolani do'stlaringizga yuboring — har kuni 1 ta yangi taklif test yaratish imkonini beradi!",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
 
@@ -287,6 +290,7 @@ async def method_text(callback: CallbackQuery, state: FSMContext):
         f"<code>{example}</code>\n\n"
         "<i>💡 To'g'ri javob oldiga <b>===</b> qo'ying\n"
         "Hammasi yuborgach — <b>✅ Tayyor</b> bosing</i>",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
     # Yo'riqnoma xabarini progress sifatida saqlash (birinchi matn kelganda o'chiriladi)
@@ -394,6 +398,7 @@ async def method_file(callback: CallbackQuery, state: FSMContext):
         "Shu formatda fayl yuborasiz:\n\n"
         "<i>💡 Yaratilgan test ▶️ Inline va 📊 Poll\n"
         "ikki rejimda ishlaydi!</i>",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
     await state.set_state(CreateTest.upload_file)
@@ -421,6 +426,7 @@ async def send_sample(callback: CallbackQuery):
         f"Namuna:\n\n"
         f"<code>{mono_text}</code>\n\n"
         f"⏳ <b>Faylingizni yuboring...</b>",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
 
@@ -458,13 +464,14 @@ async def upload_file(message: Message, state: FSMContext):
         unmarked = sum(1 for q in questions if not q.get("_marked"))
 
         await state.update_data(questions=questions, _file_id=doc.file_id)
+        await state.set_state(CreateTest.upload_file)  # state saqlanadi
 
         if unmarked > 0:
             b = InlineKeyboardBuilder()
-            b.button(text="🔡 Seryalik javob",   callback_data="uj_serial")
-            b.button(text="🤖 AI bilan yechish",  callback_data="uj_ai")
-            b.button(text="📨 Adminga murojaat",  callback_data="uj_admin")
-            b.button(text="▶️ Shundayicha davom", callback_data="uj_skip")
+            b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
+            b.button(text="🤖 AI bilan yechish",   callback_data="uj_ai")
+            b.button(text="📨 Adminga murojaat",   callback_data="uj_admin")
+            b.button(text="▶️ Shundayicha davom",  callback_data="uj_skip")
             b.adjust(1)
             await status.edit_text(
                 f"📋 <b>{total} TA SAVOL TOPILDI</b>\n"
@@ -472,6 +479,7 @@ async def upload_file(message: Message, state: FSMContext):
                 f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
                 f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n\n"
                 f"<i>To\'g\'ri javob aniqlanmagan. Nima qilamiz?</i>",
+                parse_mode="HTML",
                 reply_markup=b.as_markup()
             )
         else:
@@ -492,6 +500,7 @@ async def _ask_poll_time(msg, state, q_count: int):
         f"<b>✅ {q_count} TA SAVOL TOPILDI!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⏱ <b>Har bir savol uchun necha soniya?</b>",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
     await state.set_state(CreateTest.set_poll_time)
@@ -515,6 +524,7 @@ async def uj_serial(cb: CallbackQuery, state: FSMContext):
         "Barcha belgilanmagan savollarda\n"
         "qaysi variant to\'g\'ri bo\'ladi?\n\n"
         "<i>Masalan: barcha javoblar B bo\'lsa → B ni tanlang</i>",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
 
@@ -581,6 +591,7 @@ async def uj_ai(cb: CallbackQuery, state: FSMContext):
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"<code>{str(e)[:200]}</code>\n\n"
             f"Boshqa usulni tanlang:",
+            parse_mode="HTML",
             reply_markup=b.as_markup()
         )
 
@@ -609,6 +620,7 @@ async def uj_admin(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
         "📨 <b>Admin xabardor qilindi!</b>\n\n"
         "Tez orada javob olasiz.",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
 
@@ -638,6 +650,7 @@ async def uj_back(cb: CallbackQuery, state: FSMContext):
         f"✅ Belgilangan: <b>{total - unmarked}</b>\n"
         f"❓ Belgilanmagan: <b>{unmarked}</b>\n\n"
         f"<i>Qanday davom etamiz?</i>",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
 
@@ -813,6 +826,7 @@ async def method_poll(callback: CallbackQuery, state: FSMContext):
         "2️⃣ Quiz savollarini bu yerga forward qiling\n"
         "3️⃣ Hammasi yuborilgach — <b>✅ Tayyor</b> bosing\n\n"
         "<i>💡 Faqat 'Viktorina' (Quiz) turi qabul qilinadi!</i>",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
     # Yo'riqnoma xabarini progress sifatida saqlash (birinchi poll kelganda o'chiriladi)
@@ -878,6 +892,7 @@ async def finish_polls(callback: CallbackQuery, state: FSMContext):
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"✅ {len(d['questions'])} ta savol qabul qilindi!\n\n"
         f"Har bir savol uchun necha soniya?",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
     await state.set_state(CreateTest.set_poll_time)
@@ -956,6 +971,7 @@ async def set_diff(callback: CallbackQuery, state: FSMContext):
         "<b>⏱ UMUMIY VAQT LIMITI</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Test uchun umumiy necha daqiqa?",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
     await state.set_state(CreateTest.set_time_limit)
@@ -973,6 +989,7 @@ async def set_tlim(callback: CallbackQuery, state: FSMContext):
         "<b>🎯 O'TISH FOIZI</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Testdan o'tish uchun minimum foiz?",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
     await state.set_state(CreateTest.set_passing)
@@ -991,6 +1008,7 @@ async def set_pass(callback: CallbackQuery, state: FSMContext):
         "<b>🔄 URINISHLAR SONI</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Har foydalanuvchi necha marta ishlashi mumkin?",
+        parse_mode="HTML",
         reply_markup=b.as_markup()
     )
     await state.set_state(CreateTest.set_attempts)
@@ -1049,6 +1067,7 @@ async def _do_save_test(callback: CallbackQuery, state: FSMContext):
                 "  🔗 <b>Havola orqali</b> — havola bilganlarga\n"
                 "  🔒 <b>Shaxsiy</b> — faqat siz\n\n"
                 "💡 Teacher bo'lish uchun adminga murojaat qiling.",
+                parse_mode="HTML",
                 reply_markup=b.as_markup()
             )
             return
