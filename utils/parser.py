@@ -168,7 +168,7 @@ def _parse_table_multicol(tables) -> list:
 
 
 # ═══════════════════════════════════════════════════════════
-#  FORMAT B: ==== + # + ++++ parser
+#  FORMAT B: ==== + # + ++++ parser  (asosiy logika)
 # ═══════════════════════════════════════════════════════════
 
 def _is_eq_format(lines: list) -> bool:
@@ -177,92 +177,110 @@ def _is_eq_format(lines: list) -> bool:
     return has_eq and has_plus
 
 
+def _clean_text(text: str) -> str:
+    """Matnni tozalaydi: bold, pipe, ko'p bo'shliq, bosh raqam"""
+    import re as _re
+    text = _re.sub(r'\*\*', '', text)
+    text = _re.sub(r'\|', '', text)
+    text = _re.sub(r'[ \t]+', ' ', text)
+    text = _re.sub(r'^\d+[\.)\]]\s*', '', text)
+    return text.strip()
+
+
+def _is_valid_block(parts: list) -> bool:
+    if not parts or len(parts[0]) > 800:
+        return False
+    return any(len(a.strip()) < 200 for a in parts[1:])
+
+
+def _clean_table_block(block: str) -> str:
+    lines = block.split('\n')
+    if not any('|' in l for l in lines):
+        return block
+    cells = []
+    for line in lines:
+        line = line.strip()
+        if not line.startswith('|'):
+            if line: cells.append(line)
+            continue
+        if re.match(r'^\|[\s\-\|]+\|$', line):
+            continue
+        parts = [p.strip() for p in line.split('|') if p.strip()]
+        for p in parts:
+            if not re.match(r'^=+$', p):
+                cells.append(p)
+    return '\n'.join(cells)
+
+
 def _parse_eq_hash(lines: list) -> list:
     """
-    Savol matni
-    ====
-    #To'g'ri javob   ← # bilan
-    ====
-    Xato 1
-    ====
-    Xato 2
-    ++++
+    Asosiy logika (hujjatdan):
+      ++++ → savollar chegarasi
+      ==== → savol/javob chegarasi
+      #    → to'g'ri javob belgisi
     """
     LBL = ["A", "B", "C", "D", "E", "F", "G", "H"]
     questions = []
 
-    # ++++ bilan bloklarga ajrat
-    blocks = []
-    cur = []
-    for line in lines:
-        s = line.strip()
-        if re.match(r"^\+{3,}$", s):
-            if cur:
-                blocks.append(cur[:])
-            cur = []
-        elif s:
-            cur.append(s)
-    if cur:
-        blocks.append(cur)
+    content = "\n".join(lines)
+
+    # 1-QADAM: ++++ bo'yicha bloklarga ajratish
+    blocks = re.split(r'\+{4,}', content)
+    blocks = [b.strip() for b in blocks if b.strip()]
 
     for block in blocks:
-        # ==== bilan qismlarga ajrat
-        parts = []
-        cur_part = []
-        for line in block:
-            if re.match(r"^={3,}$", line):
-                joined = " ".join(cur_part).strip()
-                if joined:
-                    parts.append(joined)
-                cur_part = []
-            else:
-                cur_part.append(line)
-        if cur_part:
-            joined = " ".join(cur_part).strip()
-            if joined:
-                parts.append(joined)
+        block = _clean_table_block(block)
 
-        if len(parts) < 3:
+        # 2-QADAM: ==== bo'yicha parts ga ajratish
+        parts = re.split(r'={3,}', block)
+        parts = [p.strip() for p in parts if p.strip()]
+
+        if len(parts) < 2:
+            continue
+        if not _is_valid_block(parts):
             continue
 
-        # Birinchi qism = savol
-        q_text = re.sub(r"^\d+\s*[.)]\s*", "", parts[0]).strip()
-        if not q_text:
+        question = _clean_text(parts[0])
+        if not question:
             continue
 
-        variants = list(parts[1:])
+        # 3-QADAM: # bilan to'g'ri javobni topish
         correct_idx = -1
+        clean_answers = []
 
-        for i, v in enumerate(variants):
-            if v.startswith("#"):
-                correct_idx = i
-                variants[i] = v[1:].strip()
-                break
+        for ans in parts[1:]:
+            ans = ans.strip()
+            if ans.startswith('#'):
+                if correct_idx == -1:
+                    correct_idx = len(clean_answers)
+                clean_answers.append(_clean_text(ans[1:]))
+            else:
+                clean_answers.append(_clean_text(ans))
 
-        variants = [v for v in variants if v]
-        if not variants:
+        clean_answers = [a for a in clean_answers if a]
+        if not clean_answers:
             continue
 
         has_mark = correct_idx != -1
         if correct_idx == -1:
             correct_idx = 0
-        if correct_idx >= len(variants):
+        if correct_idx >= len(clean_answers):
             correct_idx = 0
 
         opts = []
-        for i, v in enumerate(variants):
-            lbl = LBL[i] if i < len(LBL) else str(i+1)
-            opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
+        for i, ans in enumerate(clean_answers):
+            lbl = LBL[i] if i < len(LBL) else str(i + 1)
+            opts.append(ans if re.match(r"^[A-Ha-h]\s*[).]", ans) else f"{lbl}) {ans}")
 
         questions.append({
-            "type": "multiple_choice",
-            "question": q_text,
-            "options": opts,
-            "correct": opts[correct_idx],
-            "explanation": "",
+            "type":             "multiple_choice",
+            "question":         question,
+            "options":          opts,
+            "correct":          opts[correct_idx],
+            "explanation":      "",
             "accepted_answers": [],
-            "points": 1,
-            "_marked": has_mark,
+            "points":           1,
+            "_marked":          has_mark,
         })
 
     return questions
