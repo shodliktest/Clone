@@ -134,8 +134,7 @@ def _parse_docx(path: str) -> list:
             if q:
                 return q
 
-    # FORMAT D1: Ko'p ustunli jadval (4+ ustun)
-    # Intro jadvalni o'tkazib yuboramiz
+    # FORMAT D1/D2/D3: Ko'p ustunli jadvallar
     def _is_real_table(t):
         if len(t.rows) < 5:
             return False
@@ -144,6 +143,14 @@ def _parse_docx(path: str) -> list:
 
     multicol = [t for t in doc.tables if len(t.columns) >= 4 and _is_real_table(t)]
     if multicol:
+        # FORMAT D3: A|B|C|D ustunli jadval
+        hdr_upper = [c.text.strip().upper() for c in multicol[0].rows[0].cells]
+        if any(h in ("A","B","C","D") for h in hdr_upper):
+            q = _parse_abcd_table(multicol)
+            if q:
+                return q
+
+        # FORMAT D1: Sarlavhali jadval (Savol|To'g'ri|Muqobil)
         q = _parse_table_multicol(multicol)
         if q:
             return q
@@ -241,6 +248,60 @@ def _parse_table_double_col(tables) -> list:
                 "options":opts,"correct":opts[0],
                 "explanation":"","accepted_answers":[],"points":1,
                 "_marked": True,
+            })
+    return questions
+
+
+def _parse_abcd_table(tables) -> list:
+    """
+    FORMAT D3: A|B|C|D ustunli jadval
+    Header: [FanBobi, Savol, A, B, C, D]
+    To'g'ri javob belgilanmagan → _marked=False
+    """
+    LBL = ["A","B","C","D","E","F","G","H"]
+    questions = []
+
+    for table in tables:
+        if len(table.columns) < 4 or not table.rows:
+            continue
+        header = [c.text.strip().upper() for c in table.rows[0].cells]
+
+        # A, B, C, D ustunlarini topamiz
+        opt_cols = [i for i, h in enumerate(header)
+                    if h in ("A","B","C","D","E","F","G","H")]
+        q_col    = next((i for i, h in enumerate(header)
+                         if any(k in h.lower() for k in
+                                ["SAVOL","TEST","TOPSHIRIG","ВОПРОС","TOPSHIRIQ"])), None)
+
+        if not opt_cols:
+            continue
+        if q_col is None:
+            # Avtomatik: birinchi A dan oldingi ustun = savol
+            q_col = opt_cols[0] - 1 if opt_cols[0] > 0 else None
+        if q_col is None or q_col >= len(header):
+            continue
+        if len(opt_cols) < 2:
+            continue
+
+        for row in table.rows[1:]:
+            cells = [re.sub(r"\s+", " ", c.text).strip() for c in row.cells]
+            if len(cells) <= max(q_col, max(opt_cols)):
+                continue
+            q_text = cells[q_col] if q_col < len(cells) else ""
+            if not q_text or len(q_text) < 5:
+                continue
+            variants = [cells[ci] for ci in opt_cols if ci < len(cells) and cells[ci]]
+            if len(variants) < 2:
+                continue
+            opts = []
+            for i, v in enumerate(variants):
+                lbl = LBL[i] if i < len(LBL) else str(i+1)
+                opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
+            questions.append({
+                "type": "multiple_choice", "question": q_text,
+                "options": opts, "correct": opts[0],
+                "explanation": "", "accepted_answers": [], "points": 1,
+                "_marked": False,
             })
     return questions
 
