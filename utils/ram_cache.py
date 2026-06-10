@@ -84,6 +84,32 @@ def get_all_settings():  return _get("settings", {})
 def set_all_settings(d): _set("settings", d)
 
 
+# ══ XAVFSIZLIK SOZLAMALARI ═════════════════════════════════════
+
+_SECURITY_KEY = "security_settings"
+
+_DEFAULT_SECURITY = {
+    "protect_content": True,   # Screenshot va forward bloklash
+}
+
+def get_security() -> dict:
+    s = _get(_SECURITY_KEY, {})
+    result = dict(_DEFAULT_SECURITY)
+    result.update(s)
+    return result
+
+def set_security(key: str, value) -> dict:
+    s = _get(_SECURITY_KEY, {})
+    if s is None:
+        s = {}
+    s[key] = value
+    _set(_SECURITY_KEY, s)
+    return get_security()
+
+def is_protect_content() -> bool:
+    return get_security().get("protect_content", True)
+
+
 # ══ TEST META ══════════════════════════════════════════════════
 
 def get_tests_meta():
