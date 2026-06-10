@@ -818,11 +818,70 @@ def parse_text(text: str) -> list:
 
 
 def _is_correct_marker(line: str) -> tuple:
+    """
+    To'g'ri javob belgisini aniqlaydi — 3 ta holat:
+
+    1. BOSHIDA marker:   *A) variant   +B) variant   ===C) variant
+    2. LABEL+MARKER:     A)* variant   A)+ variant   A)# variant
+    3. OXIRIDA marker:   A) variant*   A) variant +   A) variant#
+    """
     ls = line.strip()
+    if not ls:
+        return False, ls
+
+    _M = r'[*+#•►→✓✔√■●▶◆★☑\-=@~^]'
+
+    # 1. BOSHIDA: ===... yoki marker+harf
     if ls.startswith("==="):
         return True, ls[3:].strip()
-    if re.match(r"^[*+]\s*[A-Za-zA-Яа-яёЁ0-9]", ls):
+
+    # ==N (2+ teng belgi): ==To'g'ri, ==== ...
+    m_eq = re.match(r'^={2,}\s*(.+)$', ls)
+    if m_eq:
+        return True, m_eq.group(1).strip()
+
+    # --N (2+ tire): --To'g'ri, --- ...
+    m_dash = re.match(r'^-{2,}\s*(.+)$', ls)
+    if m_dash:
+        return True, m_dash.group(1).strip()
+
+    # =* =+ =# =- =• kombinatsiya (= + boshqa marker)
+    m_comb = re.match(rf'^=[{re.escape("*+#•►→✓✔√■●▶◆★☑-@~^")}]\s*(.+)$', ls)
+    if m_comb:
+        return True, m_comb.group(1).strip()
+
+    # marker + harf/raqam (bitta marker, keyin harf)
+    if re.match(rf'^{_M}\s*[A-Za-zA-Яа-яёЁ0-9]', ls):
         return True, ls[1:].strip()
+
+    # harfsiz: faqat marker + matn (masalan: * To'g'ri, + Javob)
+    if re.match(rf'^{_M}\s+\S', ls):
+        return True, ls[1:].strip()
+
+    # 2. LABEL+MARKER O'RTADA: A)* variant, A)+ variant, A)# variant
+    m = re.match(
+        r'^([A-Ha-hА-Яа-яёЁ1-9])\s*[).]\s*'
+        r'([*+#•►→✓✔√■●▶◆★☑\-=])\s*'
+        r'(.+)$', ls
+    )
+    if m:
+        label, marker, text = m.group(1), m.group(2), m.group(3).strip()
+        if marker in ('-', '=') and not re.match(r'^[A-Za-zA-Яа-яёЁ0-9(«"\']', text):
+            return False, ls
+        return True, f"{label}) {text}"
+
+    # 3. OXIRIDA: A) variant* yoki A) variant +
+    m2 = re.match(
+        r'^([A-Ha-hА-Яа-яёЁ1-9])\s*[).]\s*'
+        r'(.+?)\s*'
+        r'([*+#•►→✓✔√■●▶◆★☑=])\s*$', ls
+    )
+    if m2:
+        label, text, marker = m2.group(1), m2.group(2).strip(), m2.group(3)
+        if len(text) < 1:
+            return False, ls
+        return True, f"{label}) {text}"
+
     return False, ls
 
 
@@ -894,9 +953,19 @@ def _parse_block(block: str) -> dict | None:
     elif corr is None and opts:
         corr = opts[0]
 
-    clean_opts = [re.sub(r"^[*+]\s*", "", re.sub(r"^===\s*", "", o)).strip() for o in opts]
+    # Variantlardan markerlarni tozalaymiz
+    # _is_correct_marker allaqachon toza matn qaytaradi
+    # Lekin opts da hali marker qolgan bo'lishi mumkin
+    def _strip_marker(text: str) -> str:
+        ok, clean = _is_correct_marker(text)
+        if ok:
+            return clean
+        # Oddiy variant — label ni saqlaymiz
+        return re.sub(r"^===\s*", "", text).strip()
+
+    clean_opts = [_strip_marker(o) for o in opts]
     if corr:
-        corr = re.sub(r"^[*+]\s*", "", re.sub(r"^===\s*", "", corr)).strip()
+        corr = _strip_marker(corr)
 
     has_marked = any(_is_correct_marker(l)[0] for l in lines[1:] if l.strip())
 
