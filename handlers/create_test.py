@@ -440,13 +440,16 @@ async def upload_file(message: Message, state: FSMContext):
     status = await message.answer("⏳ Fayl tahlil qilinmoqda...")
     try:
         file   = await message.bot.get_file(doc.file_id)
-        suffix = os.path.splitext(doc.file_name)[1]
+        suffix = os.path.splitext(doc.file_name)[1].lower()
+
+        # Avval fayl yaratamiz, keyin yuklaymiz (lock muammosini oldini oladi)
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            await message.bot.download_file(file.file_path, tmp.name)
             tmp_path = tmp.name
+        await message.bot.download_file(file.file_path, tmp_path)
 
         questions = parse_file(tmp_path)
-        os.remove(tmp_path)
+        try: os.remove(tmp_path)
+        except Exception: pass
         await _del(message.bot, message.chat.id, message.message_id)
 
         if not questions:
@@ -655,70 +658,145 @@ async def uj_back(cb: CallbackQuery, state: FSMContext):
     )
 
 
-# ───────────────────────────────────────────────────────────
-# AI YECHISH FUNKSIYASI
-# ───────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# AI PROVIDER KONFIGURATSIYA
+# ═══════════════════════════════════════════════════════════
+# Secrets ga quyidagilardan BIRINI yoki BARCHASINI yozing:
+#
+# Groq (bepul, tez):
+#   GROQ_API_KEY = "gsk_xxx"
+#   GROQ_API_KEY1 = "gsk_yyy"   ← ko'p kalit rotatsiya uchun
+#
+# OpenAI:
+#   OPENAI_API_KEY = "sk-xxx"
+#
+# Together AI (bepul modellari bor):
+#   TOGETHER_API_KEY = "xxx"
+#
+# OpenRouter (100+ model, ko'plari bepul):
+#   OPENROUTER_API_KEY = "sk-or-xxx"
+#
+# Har qanday OpenAI-compatible API:
+#   CUSTOM_AI_API_KEY = "xxx"
+#   CUSTOM_AI_API_URL = "https://your-api.com/v1/chat/completions"
+#   CUSTOM_AI_MODEL   = "your-model-name"
+#
+# Bir vaqtda bir nechta provider yozilsa — hammasi ishlatiladi,
+# limit tugasa avtomatik keyingisiga o'tadi.
+# ═══════════════════════════════════════════════════════════
+
+_AI_PROVIDERS = [
+    {
+        "name":      "Groq",
+        "url":       "https://api.groq.com/openai/v1/chat/completions",
+        "model":     "llama-3.3-70b-versatile",
+        "key_names": ["GROQ_API_KEY"] + [f"GROQ_API_KEY{i}" for i in range(1, 21)],
+    },
+    {
+        "name":      "OpenAI",
+        "url":       "https://api.openai.com/v1/chat/completions",
+        "model":     "gpt-4o-mini",
+        "key_names": ["OPENAI_API_KEY"] + [f"OPENAI_API_KEY{i}" for i in range(1, 11)],
+    },
+    {
+        "name":      "Together AI",
+        "url":       "https://api.together.xyz/v1/chat/completions",
+        "model":     "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "key_names": ["TOGETHER_API_KEY"] + [f"TOGETHER_API_KEY{i}" for i in range(1, 11)],
+    },
+    {
+        "name":      "OpenRouter",
+        "url":       "https://openrouter.ai/api/v1/chat/completions",
+        "model":     "meta-llama/llama-3.3-70b-instruct:free",
+        "key_names": ["OPENROUTER_API_KEY"] + [f"OPENROUTER_API_KEY{i}" for i in range(1, 11)],
+    },
+]
+
+
+def _load_ai_clients():
+    """
+    Secrets dan barcha mavjud AI kalitlarini yuklaydi.
+    Qaytaradi: [(name, url, model, key), ...]
+    """
+    clients = []
+    try:
+        import streamlit as st
+        sec = st.secrets
+    except Exception:
+        class _E:
+            def get(self, k, d=""): return os.environ.get(k, d)
+        sec = _E()
+
+    # Custom provider
+    c_url   = sec.get("CUSTOM_AI_API_URL", "")
+    c_model = sec.get("CUSTOM_AI_MODEL", "gpt-3.5-turbo")
+    for name in ["CUSTOM_AI_API_KEY"] + [f"CUSTOM_AI_API_KEY{i}" for i in range(1, 11)]:
+        k = sec.get(name, "")
+        if k and c_url:
+            clients.append({"name": "Custom", "url": c_url, "model": c_model, "key": k})
+
+    # Standart providerlar
+    for p in _AI_PROVIDERS:
+        for name in p["key_names"]:
+            k = sec.get(name, "")
+            if k:
+                clients.append({"name": p["name"], "url": p["url"], "model": p["model"], "key": k})
+
+    return clients
+
 
 async def _ai_solve(questions: list, msg) -> list:
     """
-    Groq LLaMA bilan belgilanmagan savollarni yechadi.
-    Kalit rotatsiyasi: GROQ_API_KEY, GROQ_API_KEY1..N
-    Progress bar har batch dan keyin yangilanadi.
+    Universal AI yechish — Groq / OpenAI / Together / OpenRouter / Custom.
+    Limit tugasa avtomatik keyingi kalit yoki providerga o'tadi.
     """
     import aiohttp, json, time
 
-    # Kalitlarni olish
-    def _keys():
-        ks = []
-        try:
-            import streamlit as st
-            for name in ["GROQ_API_KEY"] + [f"GROQ_API_KEY{i}" for i in range(1, 21)]:
-                k = st.secrets.get(name, "")
-                if k: ks.append(k)
-        except Exception:
-            pass
-        if not ks:
-            for name in ["GROQ_API_KEY"] + [f"GROQ_API_KEY{i}" for i in range(1, 21)]:
-                k = os.environ.get(name, "")
-                if k: ks.append(k)
-        return ks
+    clients = _load_ai_clients()
+    if not clients:
+        raise ValueError(
+            "AI API kaliti topilmadi!\n"
+            "Secrets ga qo'shing: GROQ_API_KEY = \"gsk_xxx\""
+        )
 
-    keys = _keys()
-    if not keys:
-        raise ValueError("GROQ_API_KEY topilmadi. Streamlit Secrets ga qo\'shing.")
-
-    key_idx = 0
+    names = list(dict.fromkeys(c["name"] for c in clients))
+    log.info(f"AI: {len(clients)} kalit, {names}")
+    cli_idx = 0
 
     async def _post(payload):
-        nonlocal key_idx
-        for _ in range(len(keys)):
-            token = keys[key_idx % len(keys)]
+        nonlocal cli_idx
+        for _ in range(len(clients)):
+            cli = clients[cli_idx % len(clients)]
+            p   = dict(payload)
+            p["model"] = cli["model"]
             try:
                 async with aiohttp.ClientSession() as s:
                     async with s.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                        json=payload, timeout=aiohttp.ClientTimeout(total=90)
+                        cli["url"],
+                        headers={"Authorization": f"Bearer {cli['key']}",
+                                 "Content-Type": "application/json"},
+                        json=p, timeout=aiohttp.ClientTimeout(total=90),
                     ) as r:
                         data = await r.json()
                 err = data.get("error", {})
                 if err:
                     code = str(err.get("type","")) + str(err.get("code",""))
-                    if "rate_limit" in code or "quota" in code or "tokens" in code:
-                        log.warning(f"Kalit {key_idx%len(keys)+1}/{len(keys)} limit, o\'tamiz")
-                        key_idx += 1
-                        await asyncio.sleep(2)
+                    if any(w in code for w in ["rate_limit","quota","tokens","capacity"]):
+                        log.warning(f"[{cli['name']}] kalit {cli_idx%len(clients)+1}/{len(clients)} limit")
+                        cli_idx += 1
+                        await asyncio.sleep(1)
                         continue
-                    raise ValueError(err.get("message", str(err)))
+                    raise ValueError(f"[{cli['name']}] {err.get('message', str(err))}")
                 return data
-            except aiohttp.ClientError:
-                key_idx += 1
-        raise ValueError(f"Barcha {len(keys)} ta kalit ishlamadi")
+            except aiohttp.ClientError as e:
+                log.warning(f"[{cli['name']}] xato: {e}")
+                cli_idx += 1
+        raise ValueError(f"Barcha {len(clients)} ta kalit/provider ishlamadi! ({names})")
 
     SYSTEM = (
         "Siz akademik test yechuvchi ekspert mutaxasssissiz. "
         "Sizga berilgan test savollarini academic darajada aniq va xatolarsiz yeching. "
-        "Har bir savol uchun to\'g\'ri javob indeksini 0 dan boshlab aniqlang. "
+        "Har bir savol uchun to'g'ri javob indeksini 0 dan boshlab aniqlang. "
         "Faqat JSON formatda javob bering, boshqa hech narsa yozmang."
     )
 
@@ -726,8 +804,8 @@ async def _ai_solve(questions: list, msg) -> list:
         f = int(w * done / max(total, 1))
         return "█" * f + "░" * (w - f)
 
-    unmarked  = [(i, q) for i, q in enumerate(questions) if not q.get("_marked")]
-    total_q   = len(unmarked)
+    unmarked      = [(i, q) for i, q in enumerate(questions) if not q.get("_marked")]
+    total_q       = len(unmarked)
     if not total_q:
         return questions
 
@@ -737,29 +815,30 @@ async def _ai_solve(questions: list, msg) -> list:
     t0            = time.time()
 
     for bn, bs in enumerate(range(0, total_q, batch_size), 1):
-        batch = unmarked[bs:bs+batch_size]
+        batch  = unmarked[bs:bs+batch_size]
         q_data = [
-            {"idx": oi, "q": q.get("question",""), 
+            {"idx": oi, "q": q.get("question",""),
              "opts": [re.sub(r"^[A-Ha-h]\s*[).]\s*","",o) for o in q.get("options",[])]}
             for oi, q in batch
         ]
 
-        # Progress ko'rsatish
         done_q  = (bn-1) * batch_size
         elapsed = time.time() - t0
         eta_sec = int(elapsed / max(bn-1,1) * (total_batches-bn+1)) if bn > 1 else total_batches * 8
         mins, secs = divmod(eta_sec, 60)
         eta_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
-        bar = _bar(bn-1, total_batches)
+        cur_provider = clients[cli_idx % len(clients)]["name"]
+
         if msg:
             try:
                 await msg.edit_text(
                     f"🤖 <b>AI yechmoqda...</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"[{bar}] {bn-1}/{total_batches} batch\n"
+                    f"[{_bar(bn-1, total_batches)}] {bn-1}/{total_batches} batch\n"
                     f"📊 {done_q}/{total_q} savol\n"
                     f"⏱ Qoldi: ~{eta_str}\n"
-                    f"🔑 {len(keys)} ta kalit"
+                    f"🔑 {len(clients)} kalit | {cur_provider}",
+                    parse_mode="HTML"
                 )
             except Exception:
                 pass
@@ -771,9 +850,10 @@ async def _ai_solve(questions: list, msg) -> list:
         )
         try:
             data = await _post({
-                "model": "llama-3.3-70b-versatile",
-                "messages": [{"role":"system","content":SYSTEM},{"role":"user","content":USER}],
-                "max_tokens": 4000, "temperature": 0.05,
+                "messages":    [{"role":"system","content":SYSTEM},
+                                {"role":"user","content":USER}],
+                "max_tokens":  4000,
+                "temperature": 0.05,
             })
             txt = data["choices"][0]["message"]["content"].strip()
             txt = re.sub(r"```json\s*|\s*```", "", txt).strip()
@@ -791,7 +871,6 @@ async def _ai_solve(questions: list, msg) -> list:
         except Exception as e:
             log.error(f"Batch {bn} xato: {e}")
 
-    # Yakuniy
     total_t = int(time.time() - t0)
     m, s = divmod(total_t, 60)
     if msg:
@@ -799,18 +878,14 @@ async def _ai_solve(questions: list, msg) -> list:
             await msg.edit_text(
                 f"✅ <b>AI tugatdi!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"[{_bar(total_batches,total_batches)}] {total_batches}/{total_batches}\n"
+                f"[{_bar(total_batches, total_batches)}] {total_batches}/{total_batches}\n"
                 f"📊 {solved}/{total_q} savol yechildi\n"
-                f"⏱ {m}:{s:02d}"
+                f"⏱ {m}:{s:02d}",
+                parse_mode="HTML"
             )
         except Exception:
             pass
     return questions
-
-
-# ═══════════════════════════════════════════════════════════
-# 3. QUIZBOT FORWARD
-# ═══════════════════════════════════════════════════════════
 
 @router.callback_query(F.data == "method_poll", CreateTest.choose_method)
 async def method_poll(callback: CallbackQuery, state: FSMContext):
