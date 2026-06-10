@@ -12,7 +12,7 @@ from aiogram.exceptions import TelegramBadRequest
 from config import ADMIN_IDS
 from utils import ram_cache as ram
 from utils.db import get_all_users, get_all_tests, block_user
-from keyboards.keyboards import admin_kb, main_kb, CAT_ICONS, get_cat_icon
+from keyboards.keyboards import admin_kb, main_kb, CAT_ICONS, get_cat_icon, security_kb
 from utils.states import AdminPanel
 
 log    = logging.getLogger(__name__)
