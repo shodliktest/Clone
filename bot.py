@@ -244,8 +244,12 @@ async def main():
     from handlers.group_scheduler import router as r_scheduler
     from handlers.photo_upload    import router as r_photo
 
+    # Xavfsizlik sozlamasi (dinamik)
+    from utils.ram_cache import is_protect_content
+    _protect = is_protect_content()
+
     bot = Bot(token=BOT_TOKEN,
-              default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=True))
+              default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=_protect))
     dp  = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(ForceJoinMiddleware())
     dp.callback_query.middleware(ForceJoinMiddleware())
@@ -518,8 +522,12 @@ async def _main_no_signals():
     from handlers.group_scheduler import router as r_scheduler
     from handlers.photo_upload    import router as r_photo
 
+    # Xavfsizlik sozlamasi
+    from utils.ram_cache import is_protect_content
+    _protect = is_protect_content()
+
     bot = Bot(token=BOT_TOKEN,
-              default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=True))
+              default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=_protect))
     dp  = Dispatcher(storage=MemoryStorage())
     # ── Barcha middlewarelar (main() bilan bir xil) ──
     dp.message.middleware(ForceJoinMiddleware())
@@ -559,8 +567,15 @@ async def _main_no_signals():
 
     @_baza_router.message(_F.document)
     async def _handle_group_doc(message: _Msg):
-        """Baza guruhiga yuborilgan fayl → parse → test yaratish"""
+        """Baza guruhiga yuborilgan fayl → parse → test yaratish
+        FAQAT guruh/kanal chatida ishlaydi — private chatda EMAS
+        """
         try:
+            # Private chat — bu handler ISHLAMAYDI
+            # (private chatda create_test.py upload_file ishlaydi)
+            if message.chat.type == "private":
+                return
+
             from utils.baza_publisher import parse_group_file
             from config import BAZA_GROUP_ID
             if not BAZA_GROUP_ID:
