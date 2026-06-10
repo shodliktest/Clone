@@ -1470,3 +1470,85 @@ async def fj_check_cb(callback: CallbackQuery):
     else:
         await callback.answer("❌ Hali ba'zi kanallarga a'zo emassiz!", show_alert=True)
         await send_join_request(callback, not_joined, callback.bot)
+
+
+# ═══════════════════════════════════════════════════════════
+# 🛡 XAVFSIZLIK SOZLAMALARI
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_security")
+async def admin_security(callback: CallbackQuery):
+    """Xavfsizlik sozlamalari paneli"""
+    from config import ADMIN_IDS
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("❌ Ruxsat yo'q!", show_alert=True)
+
+    await callback.answer()
+    from utils.ram_cache import is_protect_content
+    protect = is_protect_content()
+
+    status_icon = "🔒 YOQILGAN" if protect else "🔓 O'CHIRILGAN"
+    status_text = (
+        "✅ Hozir <b>bloklangan:</b>\n"
+        "• Screenshot olish\n"
+        "• Xabarlarni forward qilish\n"
+        "• Botdan tashqariga nusxa olish"
+    ) if protect else (
+        "⚠️ Hozir <b>ruxsat berilgan:</b>\n"
+        "• Screenshot olish\n"
+        "• Xabarlarni forward qilish\n"
+        "• Botdan tashqariga nusxa olish"
+    )
+
+    await callback.message.edit_text(
+        f"🛡 <b>XAVFSIZLIK SOZLAMALARI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>Screenshot/Forward himoyasi: {status_icon}</b>\n\n"
+        f"{status_text}\n\n"
+        f"<i>⚠️ O'zgartirish bot qayta ishga tushirilganda kuchga kiradi</i>",
+        parse_mode="HTML",
+        reply_markup=security_kb(protect)
+    )
+
+
+@router.callback_query(F.data == "sec_protect_on")
+async def sec_protect_on(callback: CallbackQuery):
+    """Screenshot/forward bloklash yoqish"""
+    from config import ADMIN_IDS
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("❌ Ruxsat yo'q!", show_alert=True)
+
+    from utils.ram_cache import set_security
+    from utils import tg_db
+    set_security("protect_content", True)
+
+    # Sozlamani TG ga saqlash
+    try:
+        from utils.ram_cache import get_all_settings
+        await tg_db.save_settings(get_all_settings())
+    except Exception:
+        pass
+
+    await callback.answer("🔒 Himoya yoqildi!", show_alert=True)
+    await admin_security(callback)
+
+
+@router.callback_query(F.data == "sec_protect_off")
+async def sec_protect_off(callback: CallbackQuery):
+    """Screenshot/forward bloklashni o'chirish"""
+    from config import ADMIN_IDS
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("❌ Ruxsat yo'q!", show_alert=True)
+
+    from utils.ram_cache import set_security
+    from utils import tg_db
+    set_security("protect_content", False)
+
+    try:
+        from utils.ram_cache import get_all_settings
+        await tg_db.save_settings(get_all_settings())
+    except Exception:
+        pass
+
+    await callback.answer("🔓 Himoya o'chirildi!", show_alert=True)
+    await admin_security(callback)
