@@ -61,19 +61,52 @@ def parse_file(path: str) -> list:
 
 
 def _convert_doc(path: str) -> str:
-    """LibreOffice bilan .doc → .docx"""
+    """
+    .doc → .docx konvertatsiya.
+    1. LibreOffice (mavjud bo'lsa)
+    2. python-docx2txt (fallback)
+    3. antiword (fallback)
+    """
     outdir = tempfile.mkdtemp()
+
+    # 1. LibreOffice — eng yaxshi natija
     try:
-        subprocess.run(
+        r = subprocess.run(
             ["libreoffice", "--headless", "--convert-to", "docx",
              path, "--outdir", outdir],
-            capture_output=True, timeout=30
+            capture_output=True, timeout=60
         )
         new = os.path.join(outdir, Path(path).stem + ".docx")
-        return new if os.path.exists(new) else ""
+        if os.path.exists(new) and os.path.getsize(new) > 100:
+            log.info(f"DOC → DOCX (LibreOffice): {Path(path).name}")
+            return new
     except Exception as e:
-        log.warning(f"DOC convert xato: {e}")
-        return ""
+        log.warning(f"LibreOffice yo'q yoki xato: {e}")
+
+    # 2. python-docx to'g'ridan o'qib ko'ramiz (ba'zi .doc lar ishlaydi)
+    try:
+        import docx as _docx
+        _docx.Document(path)  # Agar ishlasa — .doc aslida .docx ekan
+        log.info(f"DOC to'g'ridan DOCX sifatida o'qildi: {Path(path).name}")
+        return path
+    except Exception:
+        pass
+
+    # 3. Matn sifatida o'qish (oxirgi fallback)
+    try:
+        import docx2txt
+        txt = docx2txt.process(path)
+        if txt and len(txt) > 50:
+            txt_path = os.path.join(outdir, Path(path).stem + ".txt")
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(txt)
+            log.info(f"DOC → TXT (docx2txt): {Path(path).name}")
+            return txt_path
+    except Exception:
+        pass
+
+    log.error(f"DOC convert qilinmadi: {path}")
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════
