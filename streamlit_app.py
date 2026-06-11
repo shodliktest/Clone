@@ -149,6 +149,61 @@ elif _api_action == "test":
                             )
                             if idx_raw.ok:
                                 idx_json = idx_raw.json()
+                                # ── PROXY (web) format: test_TID to'g'ridan pinned index ichida ──
+                                # Web orqali yaratilgan/bo'lingan testlar shu formatda saqlanadi
+                                if not test_data:
+                                    p_mid = idx_json.get(f"test_{tid}")
+                                    p_fid = idx_json.get(f"fid_{p_mid}") if p_mid else None
+                                    if p_fid:
+                                        try:
+                                            gpf = requests.get(
+                                                f"https://api.telegram.org/bot{bot_token}/getFile",
+                                                params={"file_id": p_fid}, timeout=8
+                                            ).json()
+                                            ppf = (gpf.get("result") or {}).get("file_path")
+                                            if ppf:
+                                                rpf = requests.get(
+                                                    f"https://api.telegram.org/file/bot{bot_token}/{ppf}",
+                                                    timeout=15
+                                                )
+                                                if rpf.ok:
+                                                    try: test_data = rpf.json()
+                                                    except Exception: pass
+                                        except Exception:
+                                            pass
+                                    # fid ishlamasa — forward orqali
+                                    if not test_data and p_mid:
+                                        try:
+                                            fwdp = requests.post(
+                                                f"https://api.telegram.org/bot{bot_token}/forwardMessage",
+                                                json={"chat_id": channel_id,
+                                                      "from_chat_id": channel_id,
+                                                      "message_id": int(p_mid)},
+                                                timeout=15
+                                            ).json()
+                                            docp = (fwdp.get("result") or {}).get("document")
+                                            if docp:
+                                                requests.post(
+                                                    f"https://api.telegram.org/bot{bot_token}/deleteMessage",
+                                                    json={"chat_id": channel_id,
+                                                          "message_id": fwdp["result"]["message_id"]},
+                                                    timeout=5
+                                                )
+                                                gfp2 = requests.get(
+                                                    f"https://api.telegram.org/bot{bot_token}/getFile",
+                                                    params={"file_id": docp["file_id"]}, timeout=8
+                                                ).json()
+                                                fpp2 = (gfp2.get("result") or {}).get("file_path")
+                                                if fpp2:
+                                                    rpf2 = requests.get(
+                                                        f"https://api.telegram.org/file/bot{bot_token}/{fpp2}",
+                                                        timeout=15
+                                                    )
+                                                    if rpf2.ok:
+                                                        try: test_data = rpf2.json()
+                                                        except Exception: pass
+                                        except Exception:
+                                            pass
                                 # Chunklardan test_TID topish
                                 for chunk_info in (idx_json.get("index_chunks") or []):
                                     chunk_fid = chunk_info.get("fid")
@@ -409,6 +464,7 @@ elif _api_action == "ram_split":
                 # Creator ga xabar
                 if creator_id:
                     title = part.get("title", tid)
+                    qc    = len(part.get("questions", []))
                     NL2 = "\n"
                     txt = (
                         "\u2702\ufe0f <b>Test bo'linmasi saqlandi!</b>" + NL2
