@@ -10,7 +10,7 @@ from utils.db import get_test_full, save_result
 from utils.ram_cache import get_test_by_id, get_daily, is_test_paused, get_test_meta
 from utils.states import PollTest
 from utils.scoring import calculate_score, format_result
-from keyboards.keyboards import main_kb, result_kb, poll_pause_kb
+from keyboards.keyboards import main_kb, result_kb, poll_pause_kb, poll_control_reply_kb, poll_pause_reply_kb
 
 log    = logging.getLogger(__name__)
 router = Router()
@@ -294,17 +294,12 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
         except: pass
     except: pass
 
-    b = InlineKeyboardBuilder()
-    b.row(
-        InlineKeyboardButton(text="⏸ Pauza",       callback_data="pause_poll"),
-        InlineKeyboardButton(text="⏹ To'xtatish",  callback_data="cancel_poll"),
-    )
     skip_txt = f"\n⚠️ <i>{skipped} ta matn savol o'tkazildi</i>" if skipped else ""
     try:
         info = await bot.send_message(
             chat_id,
             f"{'🔍 [DEMO] ' if is_demo else ''}📊 <b>{test.get('title','POLL TEST')}</b> | {len(qs)} savol | ⏱ {pt}s{skip_txt}",
-            reply_markup=b.as_markup()
+            reply_markup=poll_control_reply_kb()
         )
         await state.update_data(info_msg_id=info.message_id)
     except: pass
@@ -455,16 +450,27 @@ async def pause_poll(callback: CallbackQuery, state: FSMContext):
     await callback.bot.send_message(
         cid,
         f"⏸ <b>PAUZA</b> | Savol {d.get('idx',0)}/{len(d.get('qs',[]))}",
-        reply_markup=poll_pause_kb()
+        reply_markup=poll_pause_reply_kb()
     )
 
 @router.callback_query(F.data == "resume_poll", PollTest.paused)
 async def resume_poll(callback: CallbackQuery, state: FSMContext):
     await callback.answer("▶️")
     await state.set_state(PollTest.active)
+    cid = callback.message.chat.id if callback.message and callback.message.chat else callback.from_user.id
     try: await callback.message.delete()
     except Exception: pass
-    cid = callback.message.chat.id if callback.message and callback.message.chat else callback.from_user.id
+    # Qayta control keyboard chiqaramiz
+    try:
+        d = await state.get_data()
+        idx = d.get("idx", 0)
+        qs  = d.get("qs", [])
+        await callback.bot.send_message(
+            cid,
+            f"▶️ <b>Davom etildi</b> | Savol {idx}/{len(qs)}",
+            reply_markup=poll_control_reply_kb()
+        )
+    except Exception: pass
     await _send_poll(callback.bot, cid, state)
 
 @router.callback_query(F.data == "cancel_poll")
@@ -591,3 +597,73 @@ async def _finish_poll(bot, cid, state, d):
         return
 
     await bot.send_message(cid, result_text, reply_markup=result_kb(tid, rid))
+
+
+# ── ReplyKeyboard tugmalari (pastdagi tugmalar) ───────────────
+
+@router.message(F.text == "⏸ Pauza", PollTest.active)
+async def reply_pause_poll(message, state: FSMContext):
+    """Pastdagi ⏸ Pauza tugmasi"""
+    from aiogram.types import ReplyKeyboardRemove
+    cid = message.chat.id
+    _cancel_timer(cid)
+    await state.set_state(PollTest.paused)
+    try: await message.delete()
+    except Exception: pass
+    d = await state.get_data()
+    await message.bot.send_message(
+        cid,
+        f"⏸ <b>PAUZA</b> | Savol {d.get('idx', 0)}/{len(d.get('qs', []))}",
+        reply_markup=poll_pause_reply_kb()
+    )
+
+
+@router.message(F.text == "▶️ Davom etish", PollTest.paused)
+async def reply_resume_poll(message, state: FSMContext):
+    """Pastdagi ▶️ Davom etish tugmasi"""
+    await state.set_state(PollTest.active)
+    cid = message.chat.id
+    try: await message.delete()
+    except Exception: pass
+    d = await state.get_data()
+    idx = d.get("idx", 0)
+    qs  = d.get("qs", [])
+    try:
+        await message.bot.send_message(
+            cid,
+            f"▶️ <b>Davom etildi</b> | Savol {idx}/{len(qs)}",
+            reply_markup=poll_control_reply_kb()
+        )
+    except Exception: pass
+    await _send_poll(message.bot, cid, state)
+
+
+@router.message(F.text == "⏹ Tugatish")
+async def reply_cancel_poll(message, state: FSMContext):
+    """Pastdagi ⏹ Tugatish tugmasi — istalgan poll state da"""
+    from config import ADMIN_IDS
+    from aiogram.types import ReplyKeyboardRemove
+    cur = await state.get_state()
+    if cur not in (PollTest.active.state, PollTest.paused.state):
+        return
+    uid = message.from_user.id
+    d   = await state.get_data()
+    if uid != d.get("uid", uid) and uid not in ADMIN_IDS:
+        return await message.answer("🚫 Faqat siz boshlagan testni to'xtata olasiz!")
+    cid = message.chat.id
+    _cancel_timer(cid)
+    await state.clear()
+    try: await message.delete()
+    except Exception: pass
+    for mid in d.get("msg_ids", []):
+        try: await message.bot.stop_poll(cid, mid)
+        except Exception: pass
+    info_mid = d.get("info_msg_id")
+    if info_mid:
+        try: await message.bot.delete_message(cid, info_mid)
+        except Exception: pass
+    await message.bot.send_message(
+        cid,
+        "❌ <b>POLL TEST TO'XTATILDI</b>",
+        reply_markup=main_kb(uid, "private")
+    )
