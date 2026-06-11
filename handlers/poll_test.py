@@ -250,10 +250,15 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
             else _strip(corr) if isinstance(corr, str) else None
         )
         random.shuffle(pure)
+        # Telegram poll max 10 variant qabul qiladi
+        # LABELS 8 ta — 8 dan ortiq bo'lsa kesib olamiz
+        pure = pure[:len(LABELS)]
         q["options"] = [f"{LABELS[i]}) {t}" for i, t in enumerate(pure)]
         if corr_text is not None:
-            ni = next((i for i, t in enumerate(pure) if t == corr_text), 0)
-            q["correct"] = f"{LABELS[ni]}) {corr_text}"
+            # corr_text pure ichida bo'lmasligi mumkin (kesib tashlangan)
+            ni = next((i for i, t in enumerate(pure) if t == corr_text), None)
+            if ni is not None:
+                q["correct"] = f"{LABELS[ni]}) {corr_text}"
 
     qs = [q for q in all_qs if q.get("type", "multiple_choice") in POLL_TYPES]
     skipped = len(all_qs) - len(qs)
