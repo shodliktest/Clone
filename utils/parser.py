@@ -444,6 +444,81 @@ def _parse_paragraph_per_question(lines: list) -> list:
     return questions
 
 
+
+def _parse_question_no_marker(lines: list) -> list:
+    """
+    FORMAT C2: ? savol, keyingi qatorlar = variantlar (marker yo'q)
+
+    ?Savol matni
+    Variant 1
+    Variant 2
+    Variant 3     ← to'g'ri javob belgilanmagan
+    Variant 4
+    ?Keyingi savol
+
+    Yoki ? oldida bo'sh joy bo'lishi mumkin:
+    ? Savol matni
+    ? Savol (bo'sh joy bilan)
+    """
+    LBL = ["A","B","C","D","E","F","G","H"]
+    questions = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Savol: ? bilan boshlanadi
+        if not line.startswith("?"):
+            i += 1
+            continue
+
+        q_text = line[1:].strip()
+        i += 1
+
+        # Savol matni tayyor (? dan keyin)
+        if not q_text:
+            continue
+
+        # Variantlarni yig'amiz — ? bilan tugaguncha
+        variants = []
+        while i < len(lines):
+            vl = lines[i].strip()
+            # Keyingi savol
+            if vl.startswith("?"):
+                break
+            # Variant markeri (= * + # ...) — boshqa format, to'xtaymiz
+            if any(vl.startswith(v) for v in _VAR_STARTS):
+                break
+            # Bo'sh qator
+            if not vl:
+                i += 1
+                continue
+            variants.append(vl)
+            i += 1
+
+        if len(variants) < 2:
+            continue
+
+        # Label qo'shamiz
+        opts = []
+        for j, v in enumerate(variants):
+            lbl = LBL[j] if j < len(LBL) else str(j+1)
+            opts.append(f"{lbl}) {v}" if not re.match(r"^[A-Ha-h]\s*[).]", v) else v)
+
+        questions.append({
+            "type":             "multiple_choice",
+            "question":         q_text,
+            "options":          opts,
+            "correct":          opts[0],  # Belgilanmagan
+            "explanation":      "",
+            "accepted_answers": [],
+            "points":           1,
+            "_marked":          False,    # AI/Serial kerak
+        })
+
+    return questions
+
+
 def _parse_question_list_only(lines: list) -> list:
     """
     FORMAT F: Faqat savollar ro'yxati (variantsiz)
@@ -663,6 +738,13 @@ def _parse_pdf(path: str) -> list:
                   if any(l.startswith(v) for v in _VAR_STARTS))
     if q_cnt > 0 and var_cnt > q_cnt:
         q = _parse_question_eq(full_text)
+        if q:
+            return q
+
+    # FORMAT C2: ? savol, keyingi qatorlar variant (= yo'q, marker yo'q)
+    # Misol: "?Savol\nVariant1\nVariant2\nVariant3\n?Keyingi..."
+    if q_cnt > 0:
+        q = _parse_question_no_marker(lines)
         if q:
             return q
 
