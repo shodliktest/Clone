@@ -180,13 +180,19 @@ def _parse_docx(path: str) -> list:
         if q:
             return q
 
-    # FORMAT F: Faqat savollar ro'yxati (variantsiz)
+    # FORMAT G: Har paragraf = 1 savol (ichida \n bilan variantlar)
+    if any('\n' in l for l in lines):
+        q = _parse_paragraph_per_question(lines)
+        if q:
+            return q
+
+    # FORMAT F: Standart raqamli
     full_text = "\n".join(lines)
     q = parse_text(full_text)
     if q:
         return q
 
-    # FORMAT F2: Variantsiz savollar — har qator = 1 savol
+    # FORMAT F2: Variantsiz
     return _parse_question_list_only(lines)
 
 
@@ -339,6 +345,102 @@ def _parse_5x1_tables(tables) -> list:
             "explanation":"","accepted_answers":[],"points":1,
             "_marked": False,  # Belgilanmagan — AI/serial kerak
         })
+    return questions
+
+
+def _parse_paragraph_per_question(lines: list) -> list:
+    """
+    FORMAT G: Har paragraf = 1 to'liq savol (raqam yo'q)
+
+    Har element ichida \n bilan ajratilgan:
+      Savol matni
+      A) Variant 1
+      B) ✅ To'g'ri variant
+      C) Variant 3
+
+    Har paragraf MUSTAQIL parse qilinadi.
+    """
+    LBL = ["A","B","C","D","E","F","G","H"]
+    questions = []
+
+    for raw_para in lines:
+        # \n bo'lmasa — bu format emas
+        if '\n' not in raw_para:
+            continue
+
+        sub = [l.strip() for l in raw_para.split('\n') if l.strip()]
+        if len(sub) < 3:
+            continue
+
+        # Birinchi variant qatorini topamiz
+        first_opt = None
+        for idx, l in enumerate(sub):
+            if re.match(r'^[A-Ha-h1-9]\s*[).]', l):
+                first_opt = idx
+                break
+
+        if first_opt is None or first_opt == 0:
+            continue
+
+        # Savol matni
+        q_text = ' '.join(sub[:first_opt]).strip()
+        if not q_text:
+            continue
+
+        # Variantlar — FAQAT bu paragraf ichidagi
+        opts = []
+        correct_idx = -1
+
+        for opt_line in sub[first_opt:]:
+            vm = re.match(r'^([A-Ha-h1-9])\s*[).](.*)', opt_line)
+            if not vm:
+                continue
+
+            label = vm.group(1).upper()
+            rest  = vm.group(2).strip()
+            is_correct = False
+
+            # Boshida marker: ✅ * + # ...
+            m_start = re.match(
+                r'^([✅✓✔★☑•►→√■●▶◆*#+@]|={1,}[*+#]?|-{1,2})\s*(.+)',
+                rest
+            )
+            if m_start:
+                is_correct = True
+                rest = m_start.group(2).strip()
+            else:
+                # Oxirida marker
+                m_end = re.match(r'^(.+?)\s*([✅✓✔★☑•►→√■●▶◆*#+@])\s*$', rest)
+                if m_end:
+                    is_correct = True
+                    rest = m_end.group(1).strip()
+
+            if not rest:
+                continue
+
+            clean = f"{label}) {rest}"
+            if is_correct and correct_idx == -1:
+                correct_idx = len(opts)
+            opts.append(clean)
+
+        if len(opts) < 2:
+            continue
+
+        has_mark = correct_idx >= 0
+        if correct_idx == -1:
+            correct_idx = 0
+
+        questions.append({
+            "type":             "multiple_choice",
+            "question":         q_text,
+            "options":          opts,
+            "correct":          opts[correct_idx],
+            "explanation":      "",
+            "accepted_answers": [],
+            "points":           1,
+            "_marked":          has_mark,
+        })
+
     return questions
 
 

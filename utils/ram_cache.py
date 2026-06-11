@@ -89,7 +89,7 @@ def set_all_settings(d): _set("settings", d)
 _SECURITY_KEY = "security_settings"
 
 _DEFAULT_SECURITY = {
-    "protect_content": True,   # Screenshot va forward bloklash
+    "protect_content": False,  # Screenshot va forward RUXSAT (default ochiq)
 }
 
 def get_security() -> dict:
@@ -107,7 +107,7 @@ def set_security(key: str, value) -> dict:
     return get_security()
 
 def is_protect_content() -> bool:
-    return get_security().get("protect_content", True)
+    return get_security().get("protect_content", False)
 
 
 # ══ TEST META ══════════════════════════════════════════════════
