@@ -556,6 +556,10 @@ async def _run_vote(bot, chat_id, tests, done):
         options.append(opt)
 
     vote_msg = None
+    # Telegram: 2..10 ta variant, har biri 1..100 belgi
+    options = [(str(o).strip()[:100] or "—") for o in options][:10]
+    while len(options) < 2:
+        options.append("—")
     try:
         vote_msg = await bot.send_poll(
             chat_id,

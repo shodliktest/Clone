@@ -17,6 +17,8 @@ import logging
 import re
 from typing import Dict, Optional
 
+from utils.poll_safe import sanitize_poll, sanitize_explanation
+
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -264,8 +266,6 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
         total    = len(qs)
         current  = i + 1
         hdr_poll = f"【{current}/{total}】"
-        if len(hdr_poll + qtxt) > 295:
-            qtxt = qtxt[:295 - len(hdr_poll)] + "..."
 
         prog_msg = None
 
@@ -277,10 +277,16 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
             except Exception as e:
                 log.error(f"Rasm yuborishda xato (savol {current}): {e}")
 
+        # ── Telegram cheklovlariga moslab xavfsizlantirish ──
+        question, clean_opts, ci = sanitize_poll(
+            hdr_poll + qtxt, clean_opts, ci, true_false=(qtype == "true_false")
+        )
+        expl = sanitize_explanation(expl)
+
         try:
             pm = await bot.send_poll(
                 chat_id=chat_id,
-                question=hdr_poll + qtxt,
+                question=question,
                 options=clean_opts,
                 type="quiz",
                 correct_option_id=ci,

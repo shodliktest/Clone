@@ -1059,33 +1059,28 @@ async def quiz_poll_export(callback: CallbackQuery, state: FSMContext):
 
     sent = 0
     for i, q in enumerate(qs):
+        from utils.poll_safe import sanitize_poll, sanitize_explanation
         # Savol matni — raqamsiz
         qtxt = _clean_q(q.get("question", q.get("q", q.get("text", "Savol?"))))
-        if len(qtxt) > 295:
-            qtxt = qtxt[:292] + "..."
 
         # Variantlar — prefiks olib tashlanadi
         raw_opts = q.get("options", [])
         opts = [_strip(o) for o in raw_opts]
-        opts = [o[:95] + "..." if len(o) > 95 else o for o in opts if o]
 
-        if not opts or len(opts) < 2:
+        if len([o for o in opts if o]) < 2:
             continue
 
         # To'g'ri javob indeksini aniqlash
         corr = q.get("correct", q.get("correct_index", 0))
         if isinstance(corr, int):
-            ci = max(0, min(corr, len(opts) - 1))
+            ci = corr
         else:
             m  = _re.match(r"^([A-Za-z])", str(corr).strip())
             ci = (ord(m.group(1).upper()) - ord("A")) if m else 0
-        ci = max(0, min(ci, len(opts) - 1))
 
-        expl = q.get("explanation", "") or None
-        if expl in (None, "Izoh kiritilmagan.", "Izoh yo'q", "Izoh kiritilmagan"):
-            expl = None
-        if expl and len(expl) > 195:
-            expl = expl[:195] + "..."
+        # ── Telegram cheklovlariga moslab xavfsizlantirish ──
+        qtxt, opts, ci = sanitize_poll(qtxt, opts, ci)
+        expl = sanitize_explanation(q.get("explanation"))
 
         try:
             await callback.bot.send_poll(
