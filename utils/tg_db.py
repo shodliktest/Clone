@@ -1583,7 +1583,7 @@ async def web_sync_loop():
     global _index   # Global _index ni o'zgartirish uchun
     await asyncio.sleep(30)
     consecutive_errors  = 0
-    last_pin_msg_id     = None   # Oxirgi ko'rgan pinned msg_id
+    last_sig            = None   # (msg_id, file_unique_id) — kontent o'zgarishini ham tutadi
     while True:
         try:
             await asyncio.sleep(60)    # 1 daqiqa
@@ -1596,15 +1596,20 @@ async def web_sync_loop():
                 pin  = getattr(chat, "pinned_message", None)
                 if not pin:
                     continue
-                cur_pin_id = pin.message_id
+                # Faqat msg_id emas — hujjat file_unique_id ham:
+                # web tomoni pinned xabarni JOYIDA tahrir qilsa msg_id o'zgarmaydi,
+                # lekin yangi fayl yuklangani uchun file_unique_id o'zgaradi.
+                doc = getattr(pin, "document", None)
+                doc_uid = getattr(doc, "file_unique_id", None) if doc else None
+                cur_sig = (pin.message_id, doc_uid, getattr(pin, "edit_date", None))
             except Exception:
                 consecutive_errors += 1
                 continue
 
-            # Pin o'zgarmagan bo'lsa — tekshirish shart emas
-            if cur_pin_id == last_pin_msg_id:
+            # Hech narsa o'zgarmagan bo'lsa — tekshirish shart emas
+            if cur_sig == last_sig:
                 continue
-            last_pin_msg_id = cur_pin_id
+            last_sig = cur_sig
 
             # Pinned faylni o'qish
             try:
@@ -1697,7 +1702,9 @@ async def web_sync_loop():
                         chat2 = await _bot.get_chat(_cid)
                         pin2  = getattr(chat2, "pinned_message", None)
                         if pin2:
-                            last_pin_msg_id = pin2.message_id
+                            doc2 = getattr(pin2, "document", None)
+                            uid2 = getattr(doc2, "file_unique_id", None) if doc2 else None
+                            last_sig = (pin2.message_id, uid2, getattr(pin2, "edit_date", None))
                     except Exception:
                         pass
                 except Exception as _se:

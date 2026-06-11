@@ -121,8 +121,10 @@ async def send_join_request(event, not_joined: list, bot):
     ))
     # Qisqa matn - 4096 limitdan xavfsiz
     count = len(not_joined)
+    def _e(s):  # HTML-escape (kanal nomida "<" bo'lsa xato bermasin)
+        return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
     names = ", ".join(
-        (ch['title'][:20] + "...") if len(ch['title']) > 20 else ch['title']
+        _e((ch['title'][:20] + "...") if len(ch['title']) > 20 else ch['title'])
         for ch in not_joined[:3]
     )
     if count > 3: names += f" va yana {count-3} ta"
@@ -133,14 +135,20 @@ async def send_join_request(event, not_joined: list, bot):
         f"<b>{names}</b>\n\n"
         f"👇 Tugmalarni bosib a'zo bo'ling:"
     )
+    # Telegram 4096 limitidan qat'iy himoya (kanal soni ko'p bo'lsa ham)
+    if len(text) > 4000:
+        text = text[:3990] + "\n…"
 
     # Faqat private chatda yuboriladi (middleware guruhni bloklaydi)
     try:
+        markup = b.as_markup()
         if isinstance(event, Message):
-            await event.answer(text, reply_markup=b.as_markup())
+            await event.answer(text, reply_markup=markup)
         elif isinstance(event, CallbackQuery):
             if event.message:
-                await event.message.answer(text, reply_markup=b.as_markup())
+                await event.message.answer(text, reply_markup=markup)
+            elif event.from_user:
+                await bot.send_message(event.from_user.id, text, reply_markup=markup)
     except Exception as e:
         log.warning(f"send_join_request: {e}")
 

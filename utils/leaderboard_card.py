@@ -234,6 +234,45 @@ def generate_leaderboard_image(
         return None
 
 
+def _esc(s) -> str:
+    """HTML uchun xavfsiz ('&' birinchi)."""
+    s = str(s if s is not None else "")
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def build_leaderboard_text(quiz_title, results, passing_score=60.0, total_questions=0):
+    """Rasm yuborib bo'lmaganda — matnli reyting (4096 limitidan xavfsiz)."""
+    if not results:
+        return None
+    n      = len(results)
+    passed = sum(1 for r in results if r["score"] >= passing_score)
+    avg    = sum(r["score"] for r in results) / n
+    medals = ["🥇", "🥈", "🥉"]
+
+    lines = [
+        f"🏆 <b>{_esc(quiz_title)}</b>",
+        f"👥 {n} ishtirokchi · ✅ {passed} o'tdi "
+        f"({passed*100//n if n else 0}%) · 📊 O'rtacha {avg:.0f}%",
+        "",
+    ]
+    for i, r in enumerate(results[:30]):      # ko'pi bilan 30 ta
+        name = _esc(_clean_name(r.get("first_name") or r.get("username") or "?", 25))
+        pct  = r["score"]
+        cor  = r["correct"]
+        tot  = r["total"] or total_questions or 1
+        rank = medals[i] if i < 3 else f"{i+1}."
+        lines.append(f"{rank} {name} — <b>{pct:.0f}%</b> ({cor}/{tot})")
+
+    if n > 30:
+        lines.append(f"\n… va yana {n-30} ta ishtirokchi")
+    lines.append(f"\n🎯 O'tish bali: {passing_score:.0f}% · {total_questions} ta savol")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:                      # 4096 limitidan xavfsiz
+        text = text[:3990] + "\n…"
+    return text
+
+
 async def send_leaderboard_card(
     bot, chat_id, quiz_title, results,
     passing_score=60.0, total_questions=0,
@@ -246,22 +285,60 @@ async def send_leaderboard_card(
         None, generate_leaderboard_image,
         quiz_title, results, passing_score, total_questions
     )
-    if not img_bytes: return None
-    try:
-        msg = await bot.send_photo(
-            chat_id=chat_id,
-            photo=BufferedInputFile(img_bytes, filename="leaderboard.png"),
-            caption=caption or None,
-            parse_mode="HTML" if caption else None,
-            reply_markup=reply_markup or None,
-        )
-        if delete_after > 0:
+
+    async def _maybe_autodelete(mid):
+        if delete_after > 0 and mid:
             async def _d():
                 await asyncio.sleep(delete_after)
-                try: await bot.delete_message(chat_id, msg.message_id)
+                try: await bot.delete_message(chat_id, mid)
                 except: pass
             asyncio.create_task(_d())
+
+    # ── 1) Rasm yuborishga urinish ──
+    if img_bytes:
+        try:
+            msg = await bot.send_photo(
+                chat_id=chat_id,
+                photo=BufferedInputFile(img_bytes, filename="leaderboard.png"),
+                caption=caption or None,
+                parse_mode="HTML" if caption else None,
+                reply_markup=reply_markup or None,
+            )
+            await _maybe_autodelete(msg.message_id)
+            return msg.message_id
+        except Exception as e:
+            err = str(e).lower()
+            # Guruhda rasm yuborish taqiqlangan bo'lsa — matnga o'tamiz
+            photo_forbidden = (
+                "not enough rights" in err
+                or "send photos" in err
+                or "chat_send_photos_forbidden" in err
+                or "can't send" in err
+            )
+            if not photo_forbidden:
+                logger.error(f"Yuborishda xato: {e}")
+                # baribir matnli variant bilan urinib ko'ramiz
+            else:
+                logger.info("Reyting rasm taqiqlangan — matnli variant yuboriladi")
+
+    # ── 2) Matnli zaxira (fallback) ──
+    text = build_leaderboard_text(quiz_title, results, passing_score, total_questions)
+    if caption:
+        text = f"{caption}\n\n{text}" if text else caption
+        if len(text) > 4000:
+            text = text[:3990] + "\n…"
+    if not text:
+        return None
+    try:
+        msg = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=reply_markup or None,
+            disable_web_page_preview=True,
+        )
+        await _maybe_autodelete(msg.message_id)
         return msg.message_id
     except Exception as e:
-        logger.error(f"Yuborishda xato: {e}")
+        logger.error(f"Reyting matn yuborishda ham xato: {e}")
         return None
