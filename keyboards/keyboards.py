@@ -207,6 +207,39 @@ def poll_pause_kb():
     b.row(InlineKeyboardButton(text="❌ Testni yakunlash", callback_data="cancel_poll"))
     return b.as_markup()
 
+
+def poll_control_reply_kb() -> ReplyKeyboardMarkup:
+    """
+    Test yechayotganda pastda ko'rinadigan ReplyKeyboard.
+    Faqat private chatda ishlatiladi.
+    """
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="⏸ Pauza"),
+                KeyboardButton(text="⏹ Tugatish"),
+            ]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="⏸ yoki ⏹ bosing...",
+    )
+
+
+def poll_pause_reply_kb() -> ReplyKeyboardMarkup:
+    """Pauza holatida ko'rinadigan ReplyKeyboard."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="▶️ Davom etish"),
+                KeyboardButton(text="⏹ Tugatish"),
+            ]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="▶️ davom yoki ⏹ tugating...",
+    )
+
 def inline_pause_kb():
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="▶️ Davom etish",     callback_data="resume_inline"))
