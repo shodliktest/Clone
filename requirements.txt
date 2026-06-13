@@ -5,3 +5,4 @@ pdfplumber>=0.10.0
 python-docx>=1.1.0
 aiohttp>=3.9.0
 pillow
+openpyxl>=3.1.0
