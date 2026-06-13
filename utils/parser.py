@@ -51,8 +51,10 @@ def parse_file(path: str) -> list:
             return _parse_docx(path)
         elif ext == ".pdf":
             return _parse_pdf(path)
-        elif ext == ".txt":
+        elif ext in (".txt", ".csv"):
             return _parse_txt(path)
+        elif ext in (".xlsx", ".xls", ".xlsm"):
+            return _parse_xlsx(path)
         else:
             return []
     except Exception as e:
@@ -514,6 +516,203 @@ def _parse_question_no_marker(lines: list) -> list:
             "accepted_answers": [],
             "points":           1,
             "_marked":          False,    # AI/Serial kerak
+        })
+
+    return questions
+
+
+
+def _parse_xlsx(path: str) -> list:
+    """
+    XLSX/XLS formatidan savollar ajratish.
+
+    FORMAT X1 — Sarlavhali jadval:
+      Savol | To'g'ri javob | Noto'g'ri 1 | Noto'g'ri 2 | Noto'g'ri 3
+
+    FORMAT X2 — A/B/C/D ustunlar (belgilanmagan):
+      Savol | A | B | C | D
+
+    FORMAT X3 — Marker bilan (*To'g'ri):
+      Savol | *To'g'ri | Xato 1 | Xato 2
+
+    FORMAT X4 — To'g'ri raqam bilan:
+      Savol | A | B | C | D | To'g'ri(1)
+    """
+    try:
+        import pandas as pd
+    except ImportError:
+        log.error("pandas o'rnatilmagan: pip install pandas openpyxl")
+        return []
+
+    try:
+        xl = pd.ExcelFile(path)
+    except Exception as e:
+        log.error(f"XLSX ochilmadi: {e}")
+        return []
+
+    all_questions = []
+
+    for sheet_name in xl.sheet_names:
+        try:
+            df = pd.read_excel(xl, sheet_name=sheet_name, header=None)
+            qs = _parse_xlsx_sheet(df)
+            all_questions.extend(qs)
+        except Exception as e:
+            log.warning(f"Sheet '{sheet_name}' xato: {e}")
+
+    return all_questions
+
+
+def _parse_xlsx_sheet(df) -> list:
+    """Bitta sheet dan savollar ajratadi"""
+    import pandas as pd
+
+    LBL = ["A","B","C","D","E","F","G","H"]
+
+    # Sarlavha qatorini topamiz (birinchi 5 qator ichida)
+    header_row = None
+    Q_KW   = ["savol","вопрос","question","topshiriq","топшириқ"]
+    C_KW   = ["to'g'ri","tog'ri","to`g`ri","правильн","correct","answer","togri"]
+    BAD_KW = ["noto'g'ri","xato","муқобил","incorrect","wrong","notogri","нот"]
+
+    for ri in range(min(5, len(df))):
+        row_vals = [str(v).strip().lower() for v in df.iloc[ri] if str(v).strip() and str(v) != "nan"]
+        if any(any(k in v for k in Q_KW) for v in row_vals):
+            header_row = ri
+            break
+
+    if header_row is None:
+        # Sarlavha yo'q — birinchi qatordan boshlaymiz
+        header_row = -1
+
+    header = [str(v).strip().lower() if str(v) != "nan" else ""
+              for v in df.iloc[header_row]] if header_row >= 0 else []
+
+    # Ustunlarni aniqlaymiz
+    q_col   = -1
+    corr_col = -1
+    num_col  = -1   # To'g'ri raqam ustuni (FORMAT X4)
+    opt_cols = []   # Variant ustunlari
+
+    if header:
+        for i, h in enumerate(header):
+            if any(k in h for k in Q_KW):
+                q_col = i
+            elif any(k in h for k in C_KW) and not any(k in h for k in BAD_KW):
+                if re.search(r'\d', h):  # "to'g'ri(1-4)" kabi
+                    num_col = i
+                else:
+                    corr_col = i
+            elif any(k in h for k in BAD_KW):
+                opt_cols.append(i)
+            elif h in ('a','b','c','d','e','f','g','h'):
+                opt_cols.append(i)
+
+    # Ustunlar topilmasa — avtomatik aniqlash
+    if q_col == -1:
+        q_col = 0
+    if corr_col == -1 and num_col == -1 and not opt_cols:
+        # Birinchi variant to'g'ri (FORMAT X2/belgilanmagan)
+        corr_col = 1
+        opt_cols = list(range(2, min(df.shape[1], 7)))
+
+    # Data qatorlari
+    data_start = header_row + 1 if header_row >= 0 else 0
+    questions  = []
+
+    for ri in range(data_start, len(df)):
+        row = df.iloc[ri]
+        vals = [str(v).strip() if str(v) != "nan" and v == v else ""
+                for v in row]
+
+        # Savol matni
+        q_text = vals[q_col] if q_col < len(vals) else ""
+        q_text = re.sub(r"^\d+[\.\)	]\s*", "", q_text).strip()
+        if not q_text or len(q_text) < 3:
+            continue
+
+        marked   = False
+        correct  = ""
+        variants = []
+
+        if corr_col >= 0:
+            # FORMAT X1: To'g'ri javob alohida ustunda
+            correct = vals[corr_col] if corr_col < len(vals) else ""
+            wrong   = [vals[i] for i in opt_cols if i < len(vals) and vals[i]]
+            if not correct:
+                continue
+            # Marker tekshirish (FORMAT X3: *To'g'ri)
+            is_c, clean = _is_correct_marker(correct)
+            if is_c:
+                correct = clean
+            variants = [correct] + wrong
+            marked   = True
+
+        elif num_col >= 0:
+            # FORMAT X4: To'g'ri raqam bilan ko'rsatilgan
+            num_str = vals[num_col] if num_col < len(vals) else ""
+            try:
+                corr_idx = int(float(num_str)) - 1
+            except (ValueError, TypeError):
+                corr_idx = 0
+            variants = [vals[i] for i in opt_cols if i < len(vals) and vals[i]]
+            if not variants:
+                continue
+            corr_idx = max(0, min(corr_idx, len(variants)-1))
+            correct  = variants[corr_idx]
+            # Tartibi: to'g'ri birinchiga
+            variants = [variants[corr_idx]] + [v for i, v in enumerate(variants) if i != corr_idx]
+            marked   = True
+
+        else:
+            # FORMAT X2: Belgilanmagan — birinchi variant to'g'ri
+            opt_pool = [vals[i] for i in opt_cols if i < len(vals) and vals[i]]
+            if not opt_pool:
+                opt_pool = [vals[i] for i in range(q_col+1, min(len(vals), q_col+6)) if vals[i]]
+
+            # FORMAT X3: Marker tekshirish
+            corr_idx = -1
+            clean_pool = []
+            for vi, v in enumerate(opt_pool):
+                is_c, clean = _is_correct_marker(v)
+                if is_c and corr_idx == -1:
+                    corr_idx = vi
+                    clean_pool.append(clean)
+                else:
+                    clean_pool.append(v)
+            opt_pool = clean_pool
+
+            if corr_idx >= 0:
+                # Marker topildi
+                correct  = opt_pool[corr_idx]
+                variants = [opt_pool[corr_idx]] + [v for i,v in enumerate(opt_pool) if i != corr_idx]
+                marked   = True
+            else:
+                # Belgilanmagan
+                if not opt_pool:
+                    continue
+                correct  = opt_pool[0]
+                variants = opt_pool
+                marked   = False
+
+        if len(variants) < 2:
+            continue
+
+        # Label qo'shamiz
+        opts = []
+        for i, v in enumerate(variants):
+            lbl = LBL[i] if i < len(LBL) else str(i+1)
+            opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
+
+        questions.append({
+            "type":             "multiple_choice",
+            "question":         q_text,
+            "options":          opts,
+            "correct":          opts[0],
+            "explanation":      "",
+            "accepted_answers": [],
+            "points":           1,
+            "_marked":          marked,
         })
 
     return questions
@@ -992,7 +1191,7 @@ def _read_txt(path: str) -> str:
 
 def parse_text(text: str) -> list:
     text = text.replace("\r\n", "\n")
-    blocks = re.split(r"\n(?=\d+[\.)] *\S)", "\n" + text.strip())
+    blocks = re.split(r"\n(?=\s*\d+[\.)] *\S)", "\n" + text.strip())
     result = []
     for b in blocks:
         q = _parse_block(b.strip())
