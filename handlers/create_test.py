@@ -434,7 +434,7 @@ async def send_sample(callback: CallbackQuery):
 @router.message(F.document, CreateTest.upload_file)
 async def upload_file(message: Message, state: FSMContext):
     doc = message.document
-    if not doc.file_name.lower().endswith((".txt", ".pdf", ".docx", ".doc")):
+    if not doc.file_name.lower().endswith((".txt", ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".xlsm")):
         return await message.answer("❌ Faqat TXT, PDF yoki DOCX fayllar qabul qilinadi!")
 
     status = await message.answer("⏳ Fayl tahlil qilinmoqda...")
@@ -710,6 +710,12 @@ _AI_PROVIDERS = [
         "model":     "meta-llama/llama-3.3-70b-instruct:free",
         "key_names": ["OPENROUTER_API_KEY"] + [f"OPENROUTER_API_KEY{i}" for i in range(1, 11)],
     },
+    {
+        "name":      "Gemini",
+        "url":       "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "model":     "gemini-2.0-flash",
+        "key_names": ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY{i}" for i in range(1, 11)],
+    },
 ]
 
 
@@ -782,9 +788,22 @@ async def _ai_solve(questions: list, msg) -> list:
                 if err:
                     code = str(err.get("type","")) + str(err.get("code",""))
                     if any(w in code for w in ["rate_limit","quota","tokens","capacity"]):
-                        log.warning(f"[{cli['name']}] kalit {cli_idx%len(clients)+1}/{len(clients)} limit")
                         cli_idx += 1
-                        await asyncio.sleep(1)
+                        tried = attempt + 1
+                        log.warning(
+                            f"[{cli['name']}] kalit "
+                            f"{cli_idx % len(clients) + 1}/{len(clients)} limit "
+                            f"({tried}/{len(clients)} sinab ko'rildi)"
+                        )
+                        if tried >= len(clients):
+                            # Barcha kalitlar limitda — 62s kutamiz (Groq: 1 daqiqa)
+                            log.warning(
+                                f"Barcha {len(clients)} kalit limitda. 62s kutamiz..."
+                            )
+                            await asyncio.sleep(62)
+                            cli_idx = 0  # Qayta boshidan
+                        else:
+                            await asyncio.sleep(2)
                         continue
                     raise ValueError(f"[{cli['name']}] {err.get('message', str(err))}")
                 return data
@@ -813,6 +832,7 @@ async def _ai_solve(questions: list, msg) -> list:
     total_batches = (total_q + batch_size - 1) // batch_size
     solved        = 0
     t0            = time.time()
+    failed_batches = []  # Xato bo'lgan batchlar
 
     for bn, bs in enumerate(range(0, total_q, batch_size), 1):
         batch  = unmarked[bs:bs+batch_size]
@@ -870,9 +890,64 @@ async def _ai_solve(questions: list, msg) -> list:
                         solved += 1
         except Exception as e:
             log.error(f"Batch {bn} xato: {e}")
+            # Xato bo'lgan batchni keyinroq qayta urinish uchun saqlaymiz
+            failed_batches.append((bn, bs))
+        else:
+            log.info(f"AI batch {bn}/{total_batches}: {solved} ta yechildi")
+
+    # Xato bo'lgan batchlarni qayta urinib ko'ramiz (1 marta)
+    if failed_batches:
+        log.info(f"Xato batchlar ({len(failed_batches)} ta) qayta urinilmoqda...")
+        if msg:
+            try:
+                await msg.edit_text(
+                    f"🔄 <b>Qayta urinilmoqda...</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⏳ {len(failed_batches)} ta batch qayta yuborilmoqda",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        await asyncio.sleep(65)  # Rate limit uchun kutamiz
+        for bn, bs in failed_batches:
+            batch  = unmarked[bs:bs+batch_size]
+            q_data = [
+                {"idx": oi, "q": q.get("question",""),
+                 "opts": [re.sub(r"^[A-Ha-h]\s*[).]\s*","",o)
+                          for o in q.get("options",[])]}
+                for oi, q in batch
+            ]
+            USER = (
+                "Savollarni yeching va JSON qaytaring:\n"
+                "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"izoh\"}]\n\n"
+                f"Savollar:\n{json.dumps(q_data, ensure_ascii=False)}"
+            )
+            try:
+                data = await _post({
+                    "messages": [{"role":"system","content":SYSTEM},
+                                 {"role":"user","content":USER}],
+                    "max_tokens": 4000, "temperature": 0.05,
+                })
+                txt = data["choices"][0]["message"]["content"].strip()
+                txt = re.sub(r"```json\s*|\s*```", "", txt).strip()
+                for item in json.loads(txt):
+                    oi = item.get("idx", -1)
+                    ci = item.get("correct_idx", 0)
+                    ex = item.get("explanation", "")
+                    if 0 <= oi < len(questions):
+                        opts = questions[oi].get("options", [])
+                        if 0 <= ci < len(opts):
+                            questions[oi]["correct"]    = opts[ci]
+                            questions[oi]["explanation"] = f"🤖 {ex}" if ex else ""
+                            questions[oi]["_ai_solved"]  = True
+                            solved += 1
+                log.info(f"Retry batch {bn}: muvaffaqiyatli")
+            except Exception as e:
+                log.error(f"Retry batch {bn} ham xato: {e}")
 
     total_t = int(time.time() - t0)
     m, s = divmod(total_t, 60)
+    log.info(f"AI yakunlandi: {solved}/{total_q} savol yechildi, {m}:{s:02d}")
     if msg:
         try:
             await msg.edit_text(
