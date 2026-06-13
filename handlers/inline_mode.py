@@ -175,6 +175,12 @@ def _make_result(test: dict, bot_username: str, demo=False) -> InlineQueryResult
             InlineKeyboardButton(text="👥 Guruhda Inline",
                 url=f"https://t.me/{bot_username}?startgroup=ginline_{tid}"),
         )
+        b.row(
+            InlineKeyboardButton(
+                text="📨 Testni ulashish",
+                switch_inline_query=f"test_{tid}"
+            )
+        )
         result_id    = tid if tid else "noid"
         result_title = f"📝 {title}"
         result_desc  = f"📁 {cat} | 📋 {qc} savol | 👥 {sc} marta"
