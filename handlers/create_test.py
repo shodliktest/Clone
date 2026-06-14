@@ -448,8 +448,13 @@ async def upload_file(message: Message, state: FSMContext):
         await message.bot.download_file(file.file_path, tmp_path)
 
         questions = parse_file(tmp_path)
-        try: os.remove(tmp_path)
-        except Exception: pass
+        # Rasmli savollar uchun tmp_path ni state da saqlaymiz
+        has_img_qs = any(q.get("_has_image") for q in questions)
+        if has_img_qs:
+            await state.update_data(_tmp_path=tmp_path)  # O'chirilmaydi
+        else:
+            try: os.remove(tmp_path)
+            except Exception: pass
         await _del(message.bot, message.chat.id, message.message_id)
 
         if not questions:
@@ -560,41 +565,75 @@ async def apply_serial(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "uj_ai", CreateTest.upload_file)
 async def uj_ai(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
-    d = await state.get_data()
+    d         = await state.get_data()
     questions = d.get("questions", [])
+    file_id   = d.get("_file_id", "")
+    docx_path = d.get("_tmp_path", "")
     unmarked  = [q for q in questions if not q.get("_marked")]
+    img_qs    = [q for q in unmarked if q.get("_has_image")]
+    txt_qs    = [q for q in unmarked if not q.get("_has_image")]
+    has_images = len(img_qs) > 0
+    has_texts  = len(txt_qs) > 0
 
     await cb.message.edit_text(
         "🤖 <b>AI BILAN YECHISH</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 {len(unmarked)} ta savol AI ga yuborilmoqda...\n\n"
-        "<i>Bir necha soniya kutib turing</i>"
+        f"📊 Belgilanmagan: {len(unmarked)} ta\n"
+        + (f"🖼️ Rasmli: {len(img_qs)} ta (Gemini Vision)\n" if has_images else "")
+        + (f"📝 Matnli: {len(txt_qs)} ta (Groq/OpenAI)\n" if has_texts else "")
+        + "\n<i>AI ishlamoqda...</i>",
+        parse_mode="HTML"
     )
     try:
-        questions = await _ai_solve(questions, cb.message)
+        # Matnli savollar — oddiy AI
+        if has_texts:
+            questions = await _ai_solve(questions,
+                                        cb.message if not has_images else None)
+
+        # Rasmli savollar — Gemini Vision
+        if has_images:
+            path = docx_path
+            if not path or not os.path.exists(path):
+                if file_id:
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+                        path = tmp.name
+                    fi = await cb.message.bot.get_file(file_id)
+                    await cb.message.bot.download_file(fi.file_path, path)
+            if path and os.path.exists(path):
+                questions = await _solve_image_questions(questions, path, cb.message)
+
         await state.update_data(questions=questions)
-        solved = sum(1 for q in questions if q.get("_ai_solved"))
+        solved     = sum(1 for q in questions if q.get("_ai_solved"))
+        total_un   = sum(1 for q in questions if not q.get("_marked") or q.get("_ai_solved"))
+        img_solved = sum(1 for q in questions if q.get("_ai_solved") and q.get("_has_image"))
+        txt_solved = solved - img_solved
+        total_q    = len(questions)
         await cb.message.edit_text(
-            f"🤖 <b>AI tugatdi!</b>\n"
+            f"✅ <b>AI tugatdi!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ {solved} ta savol yechildi\n\n"
-            f"<i>Davom etamiz...</i>"
+            f"📊 Jami: <b>{total_q}</b> ta savol\n"
+            + (f"📝 Matnli: <b>{txt_solved}</b> ta yechildi\n" if has_texts else "")
+            + (f"🖼️ Rasmli: <b>{img_solved}</b> ta yechildi\n" if has_images else "")
+            + f"✅ Yechildi: <b>{solved}</b> / <b>{len(unmarked)}</b> ta\n"
+            + ("\n⚠️ <i>Ayrimlari yechilmadi — seryalik qo\'llanildi</i>\n" if solved < len(unmarked) else "")
+            + "\n<i>Davom etamiz...</i>",
+            parse_mode="HTML"
         )
         await asyncio.sleep(1)
         await _ask_poll_time(cb.message, state, len(questions))
     except Exception as e:
         log.error(f"AI solve xato: {e}", exc_info=True)
         b = InlineKeyboardBuilder()
-        b.button(text="🔡 Seryalik javob",   callback_data="uj_serial")
-        b.button(text="📨 Adminga murojaat", callback_data="uj_admin")
+        b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
+        b.button(text="📨 Adminga murojaat",  callback_data="uj_admin")
         b.button(text="▶️ Shundayicha davom", callback_data="uj_skip")
         b.adjust(1)
         await cb.message.edit_text(
             f"❌ <b>AI xatolik berdi</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"<code>{str(e)[:200]}</code>\n\n"
-            f"Boshqa usulni tanlang:",
-            parse_mode="HTML",
+            "Boshqa usulni tanlang:",
             reply_markup=b.as_markup()
         )
 
@@ -686,35 +725,40 @@ async def uj_back(cb: CallbackQuery, state: FSMContext):
 # ═══════════════════════════════════════════════════════════
 
 _AI_PROVIDERS = [
+    # 1. Groq — tez, bepul (birinchi)
     {
         "name":      "Groq",
         "url":       "https://api.groq.com/openai/v1/chat/completions",
         "model":     "llama-3.3-70b-versatile",
         "key_names": ["GROQ_API_KEY"] + [f"GROQ_API_KEY{i}" for i in range(1, 21)],
     },
+    # 2. Gemini — ko'p limit, aniq (ikkinchi)
     {
-        "name":      "OpenAI",
-        "url":       "https://api.openai.com/v1/chat/completions",
-        "model":     "gpt-4o-mini",
-        "key_names": ["OPENAI_API_KEY"] + [f"OPENAI_API_KEY{i}" for i in range(1, 11)],
+        "name":      "Gemini",
+        "url":       "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "model":     "gemini-2.0-flash",
+        "key_names": ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY{i}" for i in range(1, 11)],
     },
+    # 3. Together AI
     {
         "name":      "Together AI",
         "url":       "https://api.together.xyz/v1/chat/completions",
         "model":     "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         "key_names": ["TOGETHER_API_KEY"] + [f"TOGETHER_API_KEY{i}" for i in range(1, 11)],
     },
+    # 4. OpenRouter
     {
         "name":      "OpenRouter",
         "url":       "https://openrouter.ai/api/v1/chat/completions",
         "model":     "meta-llama/llama-3.3-70b-instruct:free",
         "key_names": ["OPENROUTER_API_KEY"] + [f"OPENROUTER_API_KEY{i}" for i in range(1, 11)],
     },
+    # 5. OpenAI
     {
-        "name":      "Gemini",
-        "url":       "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-        "model":     "gemini-2.0-flash",
-        "key_names": ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY{i}" for i in range(1, 11)],
+        "name":      "OpenAI",
+        "url":       "https://api.openai.com/v1/chat/completions",
+        "model":     "gpt-4o-mini",
+        "key_names": ["OPENAI_API_KEY"] + [f"OPENAI_API_KEY{i}" for i in range(1, 11)],
     },
 ]
 
@@ -749,6 +793,226 @@ def _load_ai_clients():
                 clients.append({"name": p["name"], "url": p["url"], "model": p["model"], "key": k})
 
     return clients
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# GEMINI VISION — Rasmli savollar (daqiqada max 15 ta)
+# ═══════════════════════════════════════════════════════════════
+
+def _get_gemini_keys() -> list:
+    keys = []
+    try:
+        import streamlit as st
+        for n in ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY{i}" for i in range(1, 11)]:
+            k = st.secrets.get(n, "")
+            if k: keys.append(k)
+    except Exception:
+        pass
+    if not keys:
+        for n in ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY{i}" for i in range(1, 11)]:
+            k = os.environ.get(n, "")
+            if k: keys.append(k)
+    return keys
+
+
+async def _solve_image_questions(questions: list, docx_path: str, msg) -> list:
+    """
+    Rasmli savollarni Gemini Vision bilan yechadi.
+    Qoidalar:
+      - Faqat Gemini API (boshqa API lar yo'q)
+      - Daqiqada max 15 ta * kalit_soni
+      - Har so'rov orasida 5 soniya
+      - 429 kelsa: kutib qayta urinish
+    """
+    import aiohttp, json, base64, zipfile, time
+
+    gemini_keys = _get_gemini_keys()
+    if not gemini_keys:
+        log.warning("GEMINI_API_KEY topilmadi - rasmli savollar o'tkazib yuborildi")
+        return questions
+
+    img_unmarked = [
+        (i, q) for i, q in enumerate(questions)
+        if q.get("_has_image") and not q.get("_marked")
+    ]
+    if not img_unmarked:
+        return questions
+
+    log.info(f"Gemini Vision: {len(img_unmarked)} savol, {len(gemini_keys)} kalit")
+
+    # DOCX ZIP dan rasmlarni olish
+    img_cache = {}
+    try:
+        with zipfile.ZipFile(docx_path) as z:
+            for name in z.namelist():
+                if "word/media/" in name:
+                    fname = os.path.basename(name)
+                    img_cache[fname] = base64.b64encode(z.read(name)).decode()
+    except Exception as e:
+        log.error(f"Rasm ajratish: {e}")
+        return questions
+
+    key_idx = 0
+    req_in_minute = 0
+    minute_start = time.time()
+    max_per_minute = 15 * len(gemini_keys)
+
+    PROMPT = (
+        "Medical/anatomy test image question. "
+        "Identify the correct answer based on the image and options. "
+        "Return ONLY JSON: {\"correct_idx\": N, \"explanation\": \"brief\"}"
+    )
+
+    def _bar(d, t, w=8):
+        f = int(w * d / max(t, 1))
+        return "█" * f + "░" * (w - f)
+
+    solved = 0
+    t0 = time.time()
+
+    for n, (orig_idx, q) in enumerate(img_unmarked, 1):
+        img_b64 = img_cache.get(q.get("_img_file", ""), "")
+        if not img_b64:
+            continue
+
+        # Daqiqada limit nazorat
+        now = time.time()
+        if now - minute_start >= 60:
+            req_in_minute = 0
+            minute_start = now
+
+        if req_in_minute >= max_per_minute:
+            wait = 62 - (now - minute_start)
+            if wait > 0:
+                log.info(f"Gemini limit: {wait:.0f}s kutamiz")
+                if msg:
+                    try:
+                        await msg.edit_text(
+                            f"🖼️ <b>Gemini Vision...</b>\n"
+                            f"[{_bar(n-1, len(img_unmarked))}] {n-1}/{len(img_unmarked)}\n"
+                            f"⏳ Limit: {wait:.0f}s kutilmoqda...",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+                await asyncio.sleep(wait)
+                req_in_minute = 0
+                minute_start = time.time()
+
+        # Progress
+        elapsed = time.time() - t0
+        eta = int(elapsed / max(n-1,1) * (len(img_unmarked)-n+1)) if n>1 else len(img_unmarked)*7
+        m2, s2 = divmod(eta, 60)
+        if msg:
+            try:
+                await msg.edit_text(
+                    f"🖼️ <b>Gemini Vision rasmlarni tahlil qilmoqda...</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"[{_bar(n-1, len(img_unmarked))}] {n-1}/{len(img_unmarked)} rasm\n"
+                    f"📊 {solved} ta yechildi\n"
+                    f"⏱ Qoldi: ~{m2}:{s2:02d}\n"
+                    f"🔑 Gemini kalit {key_idx%len(gemini_keys)+1}/{len(gemini_keys)}",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+        opts_clean = [re.sub(r"^[A-Ha-h]\s*[).]\s*", "", o) for o in q.get("options", [])]
+        question_text = (
+            f"{PROMPT}\n\n"
+            f"Question: {q.get('question', '')}\n"
+            f"Options:\n" + "\n".join(f"{j}. {o}" for j, o in enumerate(opts_clean))
+        )
+
+        answered = False
+        for attempt in range(len(gemini_keys) * 2):
+            key = gemini_keys[key_idx % len(gemini_keys)]
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/"
+                f"models/gemini-2.0-flash:generateContent?key={key}"
+            )
+            payload = {
+                "contents": [{
+                    "parts": [
+                        {"inline_data": {"mime_type": "image/png", "data": img_b64}},
+                        {"text": question_text}
+                    ]
+                }],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 150}
+            }
+
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.post(
+                        url, json=payload,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as resp:
+                        rdata = await resp.json()
+
+                if resp.status == 429:
+                    key_idx += 1
+                    wait_t = 62 if attempt >= len(gemini_keys)-1 else 10
+                    log.warning(f"Gemini 429 ({wait_t}s kutamiz)")
+                    await asyncio.sleep(wait_t)
+                    if attempt >= len(gemini_keys)-1:
+                        req_in_minute = 0
+                        minute_start = time.time()
+                    continue
+
+                if resp.status != 200:
+                    key_idx += 1
+                    await asyncio.sleep(3)
+                    continue
+
+                raw = (
+                    rdata.get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [{}])[0]
+                    .get("text", "").strip()
+                )
+                raw = re.sub(r"```json\s*|\s*```", "", raw).strip()
+                result = json.loads(raw)
+                ci = int(result.get("correct_idx", 0))
+                ex = result.get("explanation", "")
+                opts = q.get("options", [])
+                if 0 <= ci < len(opts):
+                    questions[orig_idx]["correct"]    = opts[ci]
+                    questions[orig_idx]["explanation"] = f"🤖🖼️ {ex}" if ex else ""
+                    questions[orig_idx]["_ai_solved"]  = True
+                    questions[orig_idx]["_marked"]     = True
+                    solved += 1
+                req_in_minute += 1
+                answered = True
+                break
+
+            except aiohttp.ClientError as e:
+                log.warning(f"Gemini network: {e}")
+                key_idx += 1
+                await asyncio.sleep(3)
+            except Exception as e:
+                log.warning(f"Gemini parse: {e}")
+                answered = True
+                break
+
+        if answered:
+            await asyncio.sleep(5)  # Har so'rov orasida 5 soniya
+
+    total_t = int(time.time() - t0)
+    m3, s3 = divmod(total_t, 60)
+    log.info(f"Gemini Vision: {solved}/{len(img_unmarked)} yechildi, {m3}:{s3:02d}")
+    if msg:
+        try:
+            await msg.edit_text(
+                f"✅ <b>Gemini Vision tugatdi!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🖼️ {solved}/{len(img_unmarked)} rasm yechildi\n"
+                f"⏱ {m3}:{s3:02d}",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+    return questions
 
 
 async def _ai_solve(questions: list, msg) -> list:
@@ -813,10 +1077,10 @@ async def _ai_solve(questions: list, msg) -> list:
         raise ValueError(f"Barcha {len(clients)} ta kalit/provider ishlamadi! ({names})")
 
     SYSTEM = (
-        "Siz akademik test yechuvchi ekspert mutaxasssissiz. "
-        "Sizga berilgan test savollarini academic darajada aniq va xatolarsiz yeching. "
-        "Har bir savol uchun to'g'ri javob indeksini 0 dan boshlab aniqlang. "
-        "Faqat JSON formatda javob bering, boshqa hech narsa yozmang."
+        "You are an academic test expert. "
+        "Answer each question correctly. "
+        "Return ONLY JSON, no other text. "
+        "Keep explanations under 10 words."
     )
 
     def _bar(done, total, w=10):
@@ -864,9 +1128,9 @@ async def _ai_solve(questions: list, msg) -> list:
                 pass
 
         USER = (
-            "Savollarni yeching va JSON qaytaring:\n"
-            "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"izoh\"}]\n\n"
-            f"Savollar:\n{json.dumps(q_data, ensure_ascii=False)}"
+            "Solve and return JSON:\n"
+            "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"short\"}]\n\n"
+            f"{json.dumps(q_data, ensure_ascii=False)}"
         )
         try:
             data = await _post({
@@ -951,9 +1215,8 @@ async def _ai_solve(questions: list, msg) -> list:
     if msg:
         try:
             await msg.edit_text(
-                f"✅ <b>AI tugatdi!</b>\n"
+                f"✅ <b>AI (matn) tugatdi!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"[{_bar(total_batches, total_batches)}] {total_batches}/{total_batches}\n"
                 f"📊 {solved}/{total_q} savol yechildi\n"
                 f"⏱ {m}:{s:02d}",
                 parse_mode="HTML"
