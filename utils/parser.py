@@ -182,11 +182,30 @@ def _parse_docx(path: str) -> list:
         if q:
             return q
 
+
+    # FORMAT H: Rasmli savollar (# savol + inline rasm + - variantlar)
+    # Bu birinchi tekshiriladi — rasmlar aniqlangan bo'lsa
+    if doc.inline_shapes:
+        try:
+            q = _parse_docx_with_images(doc)
+            if q:
+                return q
+        except Exception as _e:
+            log.warning(f"_parse_docx_with_images: {_e}")
+
     # FORMAT G: Har paragraf = 1 savol (ichida \n bilan variantlar)
     if any('\n' in l for l in lines):
         q = _parse_paragraph_per_question(lines)
         if q:
             return q
+
+    # FORMAT H: Rasmli savollar (# savol + rasm + - variantlar)
+    try:
+        q = _parse_docx_with_images(doc)
+        if q:
+            return q
+    except Exception as e:
+        log.warning(f"_parse_docx_with_images: {e}")
 
     # FORMAT F: Standart raqamli
     full_text = "\n".join(lines)
@@ -347,6 +366,253 @@ def _parse_5x1_tables(tables) -> list:
             "explanation":"","accepted_answers":[],"points":1,
             "_marked": False,  # Belgilanmagan — AI/serial kerak
         })
+    return questions
+
+
+
+def _parse_docx_with_images(doc) -> list:
+    """
+    FORMAT H: DOCX ichidagi rasmli savollar.
+
+    Tuzilish:
+      #Savol matni?              ← # bilan boshlanadi
+      [🖼️ inline rasm]           ← bo'sh paragraf, rasm ichida
+      - Variant A
+      - *Variant B (to'g'ri)   ← marker bilan
+      - Variant C
+
+    Qaytaradi:
+      [{"question": "...", "_img_bytes": b"...", "_img_ext": ".png", ...}]
+      _img_bytes — keyinchalik TG ga yuklanadi → file_id olinadi
+    """
+    import zipfile, os
+    from docx.oxml.ns import qn as _qn
+
+    LBL = ["A", "B", "C", "D", "E", "F", "G", "H"]
+    questions = []
+
+    # Rasm relationship map: rId → image bytes
+    img_map = {}  # para_idx → (img_bytes, ext)
+    for i, p in enumerate(doc.paragraphs):
+        blips = p._element.findall('.//' + _qn('a:blip'))
+        if blips:
+            for blip in blips:
+                rId = blip.get(
+                    '{http://schemas.openxmlformats.org/officeDocument/2006/'
+                    'relationships}embed'
+                )
+                if rId:
+                    try:
+                        part = doc.part.related_parts[rId]
+                        img_bytes = part.blob
+                        ext = os.path.splitext(part.partname)[1].lower() or '.png'
+                        img_map[i] = (img_bytes, ext)
+                    except Exception:
+                        pass
+
+    if not img_map:
+        return []
+
+    paras = doc.paragraphs
+    n     = len(paras)
+    i     = 0
+
+    while i < n:
+        p    = paras[i]
+        text = p.text.strip()
+
+        # # bilan boshlanuvchi savol
+        if not (text.startswith('#') or
+                (text and text[0] == ' ' and '#' in text[:5])):
+            i += 1
+            continue
+
+        q_text = text.lstrip('# ').strip()
+        i += 1
+
+        # Keyingi paragrafda rasm bormi?
+        img_bytes = None
+        img_ext   = '.png'
+        if i < n and i in img_map:
+            img_bytes, img_ext = img_map[i]
+            i += 1
+
+        # Variantlarni yig'amiz
+        variants    = []
+        correct_idx = -1
+
+        while i < n:
+            vp   = paras[i]
+            vt   = vp.text.strip()
+
+            # Keyingi savol boshlanganmi?
+            if vt.startswith('#') or (vt and '#' in vt[:5] and vt[0] in ('#', ' ')):
+                break
+            # Keyingi rasm paragraf
+            if i in img_map and not vt:
+                break
+
+            if not vt:
+                i += 1
+                continue
+
+            # Variant?
+            if vt.startswith(('-', '*', '+', '•')):
+                is_c, clean = _is_correct_marker(vt)
+                # - bilan boshlanuvchini ham tekshiramiz
+                if vt.startswith('-') and not is_c:
+                    # Oddiy variant — - ni olib tashlaymiz
+                    clean    = vt[1:].strip()
+                    is_c     = False
+
+                # Run rangini tekshiramiz (qizil/yashil = to'g'ri)
+                for run in vp.runs:
+                    try:
+                        c = run.font.color.rgb
+                        if c and str(c).upper() in ('FF0000','00B050','00FF00','FF0000'):
+                            is_c = True
+                    except Exception:
+                        pass
+
+                if is_c and correct_idx == -1:
+                    correct_idx = len(variants)
+                variants.append(clean or vt[1:].strip())
+                i += 1
+            else:
+                i += 1
+
+        if not q_text or len(variants) < 2:
+            continue
+
+        # Label qo'shamiz
+        opts = []
+        for j, v in enumerate(variants):
+            lbl = LBL[j] if j < len(LBL) else str(j + 1)
+            opts.append(
+                v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}"
+            )
+
+        has_mark = correct_idx >= 0
+        if correct_idx == -1:
+            correct_idx = 0
+
+        q = {
+            "type":             "multiple_choice",
+            "question":         q_text,
+            "options":          opts,
+            "correct":          opts[correct_idx],
+            "explanation":      "",
+            "accepted_answers": [],
+            "points":           1,
+            "_marked":          has_mark,
+            "_has_image":       img_bytes is not None,
+        }
+
+        # Rasm bytes ni saqlaymiz (keyinchalik TG ga yuklanadi)
+        if img_bytes:
+            q["_img_bytes"] = img_bytes
+            q["_img_ext"]   = img_ext
+
+        questions.append(q)
+
+    return questions
+
+
+def _parse_pdf_with_images(path: str) -> list:
+    """
+    PDF ichidagi rasmli savollar.
+    pdfplumber + PyMuPDF bilan rasmlarni chiqaramiz.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        log.warning("PyMuPDF o'rnatilmagan, rasmli PDF qo'llab-quvvatlanmaydi")
+        return []
+
+    questions = []
+    LBL = ["A", "B", "C", "D", "E", "F", "G", "H"]
+
+    doc = fitz.open(path)
+    for page_num, page in enumerate(doc):
+        # Sahifadan matn va rasmlarni ajratamiz
+        blocks = page.get_text("blocks")  # [(x0,y0,x1,y1,text,block_no,type)]
+        images = page.get_images(full=True)  # [(xref,...)]
+
+        # Rasmlar pozitsiyasi
+        img_rects = {}
+        for img_info in images:
+            xref = img_info[0]
+            img_bytes = doc.extract_image(xref)["image"]
+            img_ext   = "." + doc.extract_image(xref).get("ext", "png")
+            # Rasmning sahifadagi joylashishi
+            for block in page.get_image_bbox(img_info):
+                img_rects[xref] = (block, img_bytes, img_ext)
+
+        # Matn bloklarini tartiblаymiz (Y koordinatasi bo'yicha)
+        text_blocks = sorted(
+            [(b[1], b[4].strip()) for b in blocks if b[6] == 0 and b[4].strip()],
+            key=lambda x: x[0]
+        )
+
+        # Savol + rasm + variant pattern ni topamiz
+        j = 0
+        while j < len(text_blocks):
+            y, text = text_blocks[j]
+
+            if text.startswith('#'):
+                q_text   = text[1:].strip()
+                img_data = None
+                variants = []
+                correct_idx = -1
+                j += 1
+
+                # Keyingi bloklarda rasm va variantlarni topamiz
+                while j < len(text_blocks):
+                    ny, nt = text_blocks[j]
+                    if nt.startswith('#'):
+                        break
+                    if nt.startswith(('-', '*', '+')):
+                        is_c, clean = _is_correct_marker(nt)
+                        if not is_c and nt.startswith('-'):
+                            clean = nt[1:].strip()
+                        if is_c and correct_idx == -1:
+                            correct_idx = len(variants)
+                        variants.append(clean or nt[1:].strip())
+                    j += 1
+
+                # Y pozitsiyasiga qarab eng yaqin rasmni topamiz
+                for xref, (rect, ibytes, iext) in img_rects.items():
+                    img_data = (ibytes, iext)
+                    break
+
+                if q_text and len(variants) >= 2:
+                    opts = []
+                    for k, v in enumerate(variants):
+                        lbl = LBL[k] if k < len(LBL) else str(k+1)
+                        opts.append(f"{lbl}) {v}" if not re.match(r"^[A-Ha-h]\s*[).]", v) else v)
+
+                    has_mark = correct_idx >= 0
+                    if correct_idx == -1:
+                        correct_idx = 0
+
+                    q = {
+                        "type": "multiple_choice",
+                        "question": q_text,
+                        "options": opts,
+                        "correct": opts[correct_idx],
+                        "explanation": "",
+                        "accepted_answers": [],
+                        "points": 1,
+                        "_marked": has_mark,
+                    }
+                    if img_data:
+                        q["_img_bytes"] = img_data[0]
+                        q["_img_ext"]   = img_data[1]
+                    questions.append(q)
+            else:
+                j += 1
+
+    doc.close()
     return questions
 
 
@@ -716,6 +982,474 @@ def _parse_xlsx_sheet(df) -> list:
         })
 
     return questions
+
+
+
+def _parse_pdf_with_images(path: str) -> list:
+    """
+    PDF ichidagi rasmli savollar.
+    pdfplumber + PyMuPDF bilan rasmlarni chiqaramiz.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        log.warning("PyMuPDF o'rnatilmagan, rasmli PDF qo'llab-quvvatlanmaydi")
+        return []
+
+    questions = []
+    LBL = ["A", "B", "C", "D", "E", "F", "G", "H"]
+
+    doc = fitz.open(path)
+    for page_num, page in enumerate(doc):
+        # Sahifadan matn va rasmlarni ajratamiz
+        blocks = page.get_text("blocks")  # [(x0,y0,x1,y1,text,block_no,type)]
+        images = page.get_images(full=True)  # [(xref,...)]
+
+        # Rasmlar pozitsiyasi
+        img_rects = {}
+        for img_info in images:
+            xref = img_info[0]
+            img_bytes = doc.extract_image(xref)["image"]
+            img_ext   = "." + doc.extract_image(xref).get("ext", "png")
+            # Rasmning sahifadagi joylashishi
+            for block in page.get_image_bbox(img_info):
+                img_rects[xref] = (block, img_bytes, img_ext)
+
+        # Matn bloklarini tartiblаymiz (Y koordinatasi bo'yicha)
+        text_blocks = sorted(
+            [(b[1], b[4].strip()) for b in blocks if b[6] == 0 and b[4].strip()],
+            key=lambda x: x[0]
+        )
+
+        # Savol + rasm + variant pattern ni topamiz
+        j = 0
+        while j < len(text_blocks):
+            y, text = text_blocks[j]
+
+            if text.startswith('#'):
+                q_text   = text[1:].strip()
+                img_data = None
+                variants = []
+                correct_idx = -1
+                j += 1
+
+                # Keyingi bloklarda rasm va variantlarni topamiz
+                while j < len(text_blocks):
+                    ny, nt = text_blocks[j]
+                    if nt.startswith('#'):
+                        break
+                    if nt.startswith(('-', '*', '+')):
+                        is_c, clean = _is_correct_marker(nt)
+                        if not is_c and nt.startswith('-'):
+                            clean = nt[1:].strip()
+                        if is_c and correct_idx == -1:
+                            correct_idx = len(variants)
+                        variants.append(clean or nt[1:].strip())
+                    j += 1
+
+                # Y pozitsiyasiga qarab eng yaqin rasmni topamiz
+                for xref, (rect, ibytes, iext) in img_rects.items():
+                    img_data = (ibytes, iext)
+                    break
+
+                if q_text and len(variants) >= 2:
+                    opts = []
+                    for k, v in enumerate(variants):
+                        lbl = LBL[k] if k < len(LBL) else str(k+1)
+                        opts.append(f"{lbl}) {v}" if not re.match(r"^[A-Ha-h]\s*[).]", v) else v)
+
+                    has_mark = correct_idx >= 0
+                    if correct_idx == -1:
+                        correct_idx = 0
+
+                    q = {
+                        "type": "multiple_choice",
+                        "question": q_text,
+                        "options": opts,
+                        "correct": opts[correct_idx],
+                        "explanation": "",
+                        "accepted_answers": [],
+                        "points": 1,
+                        "_marked": has_mark,
+                    }
+                    if img_data:
+                        q["_img_bytes"] = img_data[0]
+                        q["_img_ext"]   = img_data[1]
+                    questions.append(q)
+            else:
+                j += 1
+
+    doc.close()
+    return questions
+
+
+def _parse_paragraph_per_question(lines: list) -> list:
+    """
+    FORMAT G: Har paragraf = 1 to'liq savol (raqam yo'q)
+
+    Har element ichida \n bilan ajratilgan:
+      Savol matni
+      A) Variant 1
+      B) ✅ To'g'ri variant
+      C) Variant 3
+
+    Har paragraf MUSTAQIL parse qilinadi.
+    """
+    LBL = ["A","B","C","D","E","F","G","H"]
+    questions = []
+
+    for raw_para in lines:
+        # \n bo'lmasa — bu format emas
+        if '\n' not in raw_para:
+            continue
+
+        sub = [l.strip() for l in raw_para.split('\n') if l.strip()]
+        if len(sub) < 3:
+            continue
+
+        # Birinchi variant qatorini topamiz
+        first_opt = None
+        for idx, l in enumerate(sub):
+            if re.match(r'^[A-Ha-h1-9]\s*[).]', l):
+                first_opt = idx
+                break
+
+        if first_opt is None or first_opt == 0:
+            continue
+
+        # Savol matni
+        q_text = ' '.join(sub[:first_opt]).strip()
+        if not q_text:
+            continue
+
+        # Variantlar — FAQAT bu paragraf ichidagi
+        opts = []
+        correct_idx = -1
+
+        for opt_line in sub[first_opt:]:
+            vm = re.match(r'^([A-Ha-h1-9])\s*[).](.*)', opt_line)
+            if not vm:
+                continue
+
+            label = vm.group(1).upper()
+            rest  = vm.group(2).strip()
+            is_correct = False
+
+            # Boshida marker: ✅ * + # ...
+            m_start = re.match(
+                r'^([✅✓✔★☑•►→√■●▶◆*#+@]|={1,}[*+#]?|-{1,2})\s*(.+)',
+                rest
+            )
+            if m_start:
+                is_correct = True
+                rest = m_start.group(2).strip()
+            else:
+                # Oxirida marker
+                m_end = re.match(r'^(.+?)\s*([✅✓✔★☑•►→√■●▶◆*#+@])\s*$', rest)
+                if m_end:
+                    is_correct = True
+                    rest = m_end.group(1).strip()
+
+            if not rest:
+                continue
+
+            clean = f"{label}) {rest}"
+            if is_correct and correct_idx == -1:
+                correct_idx = len(opts)
+            opts.append(clean)
+
+        if len(opts) < 2:
+            continue
+
+        has_mark = correct_idx >= 0
+        if correct_idx == -1:
+            correct_idx = 0
+
+        questions.append({
+            "type":             "multiple_choice",
+            "question":         q_text,
+            "options":          opts,
+            "correct":          opts[correct_idx],
+            "explanation":      "",
+            "accepted_answers": [],
+            "points":           1,
+            "_marked":          has_mark,
+        })
+
+    return questions
+
+
+
+def _parse_question_no_marker(lines: list) -> list:
+    """
+    FORMAT C2: ? savol, keyingi qatorlar = variantlar (marker yo'q)
+
+    ?Savol matni
+    Variant 1
+    Variant 2
+    Variant 3     ← to'g'ri javob belgilanmagan
+    Variant 4
+    ?Keyingi savol
+
+    Yoki ? oldida bo'sh joy bo'lishi mumkin:
+    ? Savol matni
+    ? Savol (bo'sh joy bilan)
+    """
+    LBL = ["A","B","C","D","E","F","G","H"]
+    questions = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Savol: ? bilan boshlanadi
+        if not line.startswith("?"):
+            i += 1
+            continue
+
+        q_text = line[1:].strip()
+        i += 1
+
+        # Savol matni tayyor (? dan keyin)
+        if not q_text:
+            continue
+
+        # Variantlarni yig'amiz — ? bilan tugaguncha
+        variants = []
+        while i < len(lines):
+            vl = lines[i].strip()
+            # Keyingi savol
+            if vl.startswith("?"):
+                break
+            # Variant markeri (= * + # ...) — boshqa format, to'xtaymiz
+            if any(vl.startswith(v) for v in _VAR_STARTS):
+                break
+            # Bo'sh qator
+            if not vl:
+                i += 1
+                continue
+            variants.append(vl)
+            i += 1
+
+        if len(variants) < 2:
+            continue
+
+        # Label qo'shamiz
+        opts = []
+        for j, v in enumerate(variants):
+            lbl = LBL[j] if j < len(LBL) else str(j+1)
+            opts.append(f"{lbl}) {v}" if not re.match(r"^[A-Ha-h]\s*[).]", v) else v)
+
+        questions.append({
+            "type":             "multiple_choice",
+            "question":         q_text,
+            "options":          opts,
+            "correct":          opts[0],  # Belgilanmagan
+            "explanation":      "",
+            "accepted_answers": [],
+            "points":           1,
+            "_marked":          False,    # AI/Serial kerak
+        })
+
+    return questions
+
+
+
+def _parse_xlsx(path: str) -> list:
+    """
+    XLSX/XLS formatidan savollar ajratish.
+
+    FORMAT X1 — Sarlavhali jadval:
+      Savol | To'g'ri javob | Noto'g'ri 1 | Noto'g'ri 2 | Noto'g'ri 3
+
+    FORMAT X2 — A/B/C/D ustunlar (belgilanmagan):
+      Savol | A | B | C | D
+
+    FORMAT X3 — Marker bilan (*To'g'ri):
+      Savol | *To'g'ri | Xato 1 | Xato 2
+
+    FORMAT X4 — To'g'ri raqam bilan:
+      Savol | A | B | C | D | To'g'ri(1)
+    """
+    try:
+        import pandas as pd
+    except ImportError:
+        log.error("pandas o'rnatilmagan: pip install pandas openpyxl")
+        return []
+
+    try:
+        xl = pd.ExcelFile(path)
+    except Exception as e:
+        log.error(f"XLSX ochilmadi: {e}")
+        return []
+
+    all_questions = []
+
+    for sheet_name in xl.sheet_names:
+        try:
+            df = pd.read_excel(xl, sheet_name=sheet_name, header=None)
+            qs = _parse_xlsx_sheet(df)
+            all_questions.extend(qs)
+        except Exception as e:
+            log.warning(f"Sheet '{sheet_name}' xato: {e}")
+
+    return all_questions
+
+
+def _parse_xlsx_sheet(df) -> list:
+    """Bitta sheet dan savollar ajratadi"""
+    import pandas as pd
+
+    LBL = ["A","B","C","D","E","F","G","H"]
+
+    # Sarlavha qatorini topamiz (birinchi 5 qator ichida)
+    header_row = None
+    Q_KW   = ["savol","вопрос","question","topshiriq","топшириқ"]
+    C_KW   = ["to'g'ri","tog'ri","to`g`ri","правильн","correct","answer","togri"]
+    BAD_KW = ["noto'g'ri","xato","муқобил","incorrect","wrong","notogri","нот"]
+
+    for ri in range(min(5, len(df))):
+        row_vals = [str(v).strip().lower() for v in df.iloc[ri] if str(v).strip() and str(v) != "nan"]
+        if any(any(k in v for k in Q_KW) for v in row_vals):
+            header_row = ri
+            break
+
+    if header_row is None:
+        # Sarlavha yo'q — birinchi qatordan boshlaymiz
+        header_row = -1
+
+    header = [str(v).strip().lower() if str(v) != "nan" else ""
+              for v in df.iloc[header_row]] if header_row >= 0 else []
+
+    # Ustunlarni aniqlaymiz
+    q_col   = -1
+    corr_col = -1
+    num_col  = -1   # To'g'ri raqam ustuni (FORMAT X4)
+    opt_cols = []   # Variant ustunlari
+
+    if header:
+        for i, h in enumerate(header):
+            if any(k in h for k in Q_KW):
+                q_col = i
+            elif any(k in h for k in C_KW) and not any(k in h for k in BAD_KW):
+                if re.search(r'\d', h):  # "to'g'ri(1-4)" kabi
+                    num_col = i
+                else:
+                    corr_col = i
+            elif any(k in h for k in BAD_KW):
+                opt_cols.append(i)
+            elif h in ('a','b','c','d','e','f','g','h'):
+                opt_cols.append(i)
+
+    # Ustunlar topilmasa — avtomatik aniqlash
+    if q_col == -1:
+        q_col = 0
+    if corr_col == -1 and num_col == -1 and not opt_cols:
+        # Birinchi variant to'g'ri (FORMAT X2/belgilanmagan)
+        corr_col = 1
+        opt_cols = list(range(2, min(df.shape[1], 7)))
+
+    # Data qatorlari
+    data_start = header_row + 1 if header_row >= 0 else 0
+    questions  = []
+
+    for ri in range(data_start, len(df)):
+        row = df.iloc[ri]
+        vals = [str(v).strip() if str(v) != "nan" and v == v else ""
+                for v in row]
+
+        # Savol matni
+        q_text = vals[q_col] if q_col < len(vals) else ""
+        q_text = re.sub(r"^\d+[\.\)	]\s*", "", q_text).strip()
+        if not q_text or len(q_text) < 3:
+            continue
+
+        marked   = False
+        correct  = ""
+        variants = []
+
+        if corr_col >= 0:
+            # FORMAT X1: To'g'ri javob alohida ustunda
+            correct = vals[corr_col] if corr_col < len(vals) else ""
+            wrong   = [vals[i] for i in opt_cols if i < len(vals) and vals[i]]
+            if not correct:
+                continue
+            # Marker tekshirish (FORMAT X3: *To'g'ri)
+            is_c, clean = _is_correct_marker(correct)
+            if is_c:
+                correct = clean
+            variants = [correct] + wrong
+            marked   = True
+
+        elif num_col >= 0:
+            # FORMAT X4: To'g'ri raqam bilan ko'rsatilgan
+            num_str = vals[num_col] if num_col < len(vals) else ""
+            try:
+                corr_idx = int(float(num_str)) - 1
+            except (ValueError, TypeError):
+                corr_idx = 0
+            variants = [vals[i] for i in opt_cols if i < len(vals) and vals[i]]
+            if not variants:
+                continue
+            corr_idx = max(0, min(corr_idx, len(variants)-1))
+            correct  = variants[corr_idx]
+            # Tartibi: to'g'ri birinchiga
+            variants = [variants[corr_idx]] + [v for i, v in enumerate(variants) if i != corr_idx]
+            marked   = True
+
+        else:
+            # FORMAT X2: Belgilanmagan — birinchi variant to'g'ri
+            opt_pool = [vals[i] for i in opt_cols if i < len(vals) and vals[i]]
+            if not opt_pool:
+                opt_pool = [vals[i] for i in range(q_col+1, min(len(vals), q_col+6)) if vals[i]]
+
+            # FORMAT X3: Marker tekshirish
+            corr_idx = -1
+            clean_pool = []
+            for vi, v in enumerate(opt_pool):
+                is_c, clean = _is_correct_marker(v)
+                if is_c and corr_idx == -1:
+                    corr_idx = vi
+                    clean_pool.append(clean)
+                else:
+                    clean_pool.append(v)
+            opt_pool = clean_pool
+
+            if corr_idx >= 0:
+                # Marker topildi
+                correct  = opt_pool[corr_idx]
+                variants = [opt_pool[corr_idx]] + [v for i,v in enumerate(opt_pool) if i != corr_idx]
+                marked   = True
+            else:
+                # Belgilanmagan
+                if not opt_pool:
+                    continue
+                correct  = opt_pool[0]
+                variants = opt_pool
+                marked   = False
+
+        if len(variants) < 2:
+            continue
+
+        # Label qo'shamiz
+        opts = []
+        for i, v in enumerate(variants):
+            lbl = LBL[i] if i < len(LBL) else str(i+1)
+            opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
+
+        questions.append({
+            "type":             "multiple_choice",
+            "question":         q_text,
+            "options":          opts,
+            "correct":          opts[0],
+            "explanation":      "",
+            "accepted_answers": [],
+            "points":           1,
+            "_marked":          marked,
+        })
+
+    return questions
+
 
 
 def _parse_question_list_only(lines: list) -> list:
