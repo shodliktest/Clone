@@ -1,5 +1,5 @@
 """⌨️ BARCHA KLAVIATURALAR"""
-from aiogram.types import (InlineKeyboardMarkup, InlineKeyboardButton,
+from aiogram.types import (InlineKeyboardMarkup, InlineKeyboardButton, SwitchInlineQueryChosenChat,
                             ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import SUBJECTS
@@ -153,7 +153,19 @@ def test_created_kb(tid, bot_username=""):
         InlineKeyboardButton(text="🌐 Web test",  url=_web),
         InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
     )
-    b.row(InlineKeyboardButton(text="📤 Ulashish", switch_inline_query=f"test_{tid}"))
+    b.row(
+        InlineKeyboardButton(
+            text="📨 Testni ulashish",
+            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                query=f"test_{tid}",
+                allow_user_chats=True,
+                allow_bot_chats=False,
+                allow_group_chats=True,
+                allow_channel_chats=True,
+            )
+        ),
+    )
+    b.row(InlineKeyboardButton(text="📤 Inline ulashish", switch_inline_query=f"test_{tid}"))
     b.row(InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="main_menu"))
     return b.as_markup()
 
@@ -167,7 +179,19 @@ def result_kb(tid, rid):
         InlineKeyboardButton(text="🌐 Web test",  url=_web),
         InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
     )
-    b.row(InlineKeyboardButton(text="📤 Ulashish",    switch_inline_query=f"test_{tid}"))
+    b.row(
+        InlineKeyboardButton(
+            text="📨 Testni ulashish",
+            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                query=f"test_{tid}",
+                allow_user_chats=True,
+                allow_bot_chats=False,
+                allow_group_chats=True,
+                allow_channel_chats=True,
+            )
+        ),
+    )
+    b.row(InlineKeyboardButton(text="📤 Inline ulashish", switch_inline_query=f"test_{tid}"))
     b.row(InlineKeyboardButton(text="🏠 Bosh sahifa", callback_data="main_menu"))
     return b.as_markup()
 
@@ -345,7 +369,19 @@ def mytest_settings_kb(tid, is_paused=False, is_admin=False):
         url=edit_url
     ))
     b.row(
-        InlineKeyboardButton(text="📤 Ulashish",           switch_inline_query=f"test_{tid}"),
+        InlineKeyboardButton(
+            text="📨 Testni ulashish",
+            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                query=f"test_{tid}",
+                allow_user_chats=True,
+                allow_bot_chats=False,
+                allow_group_chats=True,
+                allow_channel_chats=True,
+            )
+        ),
+    )
+    b.row(
+        InlineKeyboardButton(text="📤 Inline ulashish",    switch_inline_query=f"test_{tid}"),
         InlineKeyboardButton(text="🔍 Demo ulashish",      switch_inline_query=f"demo_{tid}"),
     )
     b.row(
@@ -365,6 +401,12 @@ def mytest_settings_kb(tid, is_paused=False, is_admin=False):
     )
     b.row(
         InlineKeyboardButton(text="✏️ Nomini o'zgartirish", callback_data=f"edit_title_{tid}"),
+    )
+    b.row(
+        InlineKeyboardButton(text="🤖 AI bilan qayta yechish", callback_data=f"reai_{tid}"),
+    )
+    b.row(
+        InlineKeyboardButton(text="📄 Yangi fayl yuklash",     callback_data=f"reupload_{tid}"),
     )
     b.row(
         InlineKeyboardButton(text="🔄 Urinishlar soni", callback_data=f"edit_att_{tid}"),
