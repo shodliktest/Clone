@@ -870,7 +870,7 @@ async def uj_back(cb: CallbackQuery, state: FSMContext):
 # Har provayder uchun batch'lar orasida kutish (soniya) — free-tier RPM ga mos
 _PROVIDER_PAUSE = {
     "Groq":        6.0,
-    "Gemini":      6.0,
+    "Gemini":      10.0,
     "OpenRouter":  6.0,
     "Together AI": 6.0,
     "OpenAI":      6.0,
@@ -1401,7 +1401,7 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
     if not total_q:
         return questions
 
-    batch_size    = 40
+    batch_size    = 10
     total_batches = (total_q + batch_size - 1) // batch_size
     solved        = 0
     t0            = time.time()
