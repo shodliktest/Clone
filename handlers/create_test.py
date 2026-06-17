@@ -667,7 +667,32 @@ async def apply_serial(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "uj_ai", CreateTest.upload_file)
 async def uj_ai(cb: CallbackQuery, state: FSMContext):
+    """1-bosqich: izoh turini so'raydi"""
     await cb.answer()
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📖 To'liq izoh (asoslab)", callback_data="aimode_full"))
+    b.row(InlineKeyboardButton(text="✂️ Qisqa izoh",            callback_data="aimode_short"))
+    b.row(InlineKeyboardButton(text="🚫 Izohsiz (faqat javob)", callback_data="aimode_none"))
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga",                callback_data="uj_back"))
+    await cb.message.edit_text(
+        "🤖 <b>AI BILAN YECHISH</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Izoh qanday bo'lsin?</b>\n\n"
+        "📖 <b>To'liq</b> — har javob asoslab tushuntiriladi (2-4 jumla)\n"
+        "✂️ <b>Qisqa</b> — bir jumlalik izoh\n"
+        "🚫 <b>Izohsiz</b> — faqat to'g'ri javob belgilanadi",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("aimode_"))
+async def do_ai_solve(cb: CallbackQuery, state: FSMContext):
+    """2-bosqich: tanlangan izoh turi bilan yechadi"""
+    await cb.answer()
+    explain_mode = cb.data[len("aimode_"):]  # full / short / none
+    await state.update_data(_explain_mode=explain_mode)
+
     d         = await state.get_data()
     questions = d.get("questions", [])
     file_id   = d.get("_file_id", "")
@@ -678,10 +703,12 @@ async def uj_ai(cb: CallbackQuery, state: FSMContext):
     has_images = len(img_qs) > 0
     has_texts  = len(txt_qs) > 0
 
+    mode_label = {"full": "To'liq izoh", "short": "Qisqa izoh", "none": "Izohsiz"}.get(explain_mode, "")
     await cb.message.edit_text(
         "🤖 <b>AI BILAN YECHISH</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Belgilanmagan: {len(unmarked)} ta\n"
+        f"💬 Rejim: {mode_label}\n"
         + (f"🖼️ Rasmli: {len(img_qs)} ta (Gemini Vision)\n" if has_images else "")
         + (f"📝 Matnli: {len(txt_qs)} ta (Groq/OpenAI)\n" if has_texts else "")
         + "\n<i>AI ishlamoqda...</i>",
@@ -691,7 +718,8 @@ async def uj_ai(cb: CallbackQuery, state: FSMContext):
         # Matnli savollar — oddiy AI
         if has_texts:
             questions = await _ai_solve(questions,
-                                        cb.message if not has_images else None)
+                                        cb.message if not has_images else None,
+                                        explain_mode)
 
         # Rasmli savollar — Gemini Vision
         if has_images:
@@ -704,7 +732,7 @@ async def uj_ai(cb: CallbackQuery, state: FSMContext):
                     fi = await cb.message.bot.get_file(file_id)
                     await cb.message.bot.download_file(fi.file_path, path)
             if path and os.path.exists(path):
-                questions = await _solve_image_questions(questions, path, cb.message)
+                questions = await _solve_image_questions(questions, path, cb.message, explain_mode)
 
         await state.update_data(questions=questions)
         await state.update_data(questions=questions)
@@ -839,6 +867,15 @@ async def uj_back(cb: CallbackQuery, state: FSMContext):
 # limit tugasa avtomatik keyingisiga o'tadi.
 # ═══════════════════════════════════════════════════════════
 
+# Har provayder uchun batch'lar orasida kutish (soniya) — free-tier RPM ga mos
+_PROVIDER_PAUSE = {
+    "Groq":        6.0,
+    "Gemini":      6.0,
+    "OpenRouter":  6.0,
+    "Together AI": 6.0,
+    "OpenAI":      6.0,
+}
+
 _AI_PROVIDERS = [
     # 1. Groq — tez, bepul (birinchi)
     {
@@ -941,13 +978,13 @@ def _get_gemini_keys() -> list:
     return keys
 
 
-async def _solve_image_questions(questions: list, docx_path: str, msg) -> list:
+async def _solve_image_questions(questions: list, docx_path: str, msg, explain_mode: str = "full") -> list:
     """
     Rasmli savollarni Gemini Vision bilan yechadi.
     Qoidalar:
       - Faqat Gemini API (boshqa API lar yo'q)
       - Daqiqada max 15 ta * kalit_soni
-      - Har so'rov orasida 5 soniya
+      - Har so'rov orasida 6 soniya
       - 429 kelsa: kutib qayta urinish
     """
     import aiohttp, json, base64, zipfile, time
@@ -983,10 +1020,15 @@ async def _solve_image_questions(questions: list, docx_path: str, msg) -> list:
     minute_start = time.time()
     max_per_minute = 15 * len(gemini_keys)
 
+    _vexp = {
+        "full":  "to'liq o'zbek izoh: nega to'g'ri ekanligini asoslab tushuntiring (2-4 jumla)",
+        "short": "qisqa o'zbek izoh, bir jumla",
+        "none":  "bo'sh qoldiring",
+    }.get(explain_mode, "qisqa o'zbek izoh")
     PROMPT = (
         "Rasmli test savoli. "
-        "Rasm va variantlarga qarab to\'g\'ri javobni toping. "
-        "Faqat JSON qaytaring: {\"correct_idx\": N, \"explanation\": \"o\'zbek izoh (10 so\'zdan qisqa)\"}"
+        "Rasm va variantlarga qarab to'g'ri javobni toping. "
+        "Faqat JSON qaytaring: {\"correct_idx\": N, \"explanation\": \"" + _vexp + "\"}"
     )
 
     def _bar(d, t, w=8):
@@ -1121,7 +1163,7 @@ async def _solve_image_questions(questions: list, docx_path: str, msg) -> list:
                 break
 
         if answered:
-            await asyncio.sleep(5)  # Har so'rov orasida 5 soniya
+            await asyncio.sleep(6)  # Har so'rov orasida 6 soniya
 
     total_t = int(time.time() - t0)
     m3, s3 = divmod(total_t, 60)
@@ -1140,7 +1182,7 @@ async def _solve_image_questions(questions: list, docx_path: str, msg) -> list:
     return questions
 
 
-async def _ai_solve(questions: list, msg) -> list:
+async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
     """
     Universal AI yechish — Groq / OpenAI / Together / OpenRouter / Custom.
     Limit tugasa avtomatik keyingi kalit yoki providerga o'tadi.
@@ -1272,12 +1314,23 @@ async def _ai_solve(questions: list, msg) -> list:
                     ) as r:
                         # HTTP status tekshirish
                         status = r.status
+                        # Retry-After header — server qancha kutishni aytadi
+                        retry_after = r.headers.get("Retry-After", "")
                         data   = await r.json(content_type=None)
 
                 # Rate limit — HTTP 429 yoki error kodida
                 is_rate = False
                 if status == 429:
                     is_rate = True
+                    # 429 ning ANIQ sababini log qilamiz (kvota/limit/kalit)
+                    try:
+                        _emsg = ""
+                        if isinstance(data, dict):
+                            _e = data.get("error", {})
+                            _emsg = _e.get("message", str(_e)) if isinstance(_e, dict) else str(_e)
+                        log.warning(f"[{cli['name']}] 429 SABABI: {_emsg[:250]}")
+                    except Exception:
+                        pass
                 elif isinstance(data, dict):
                     err  = data.get("error", {}) or {}
                     code = str(err.get("type","")) + str(err.get("code","")) + str(err.get("message",""))
@@ -1293,8 +1346,15 @@ async def _ai_solve(questions: list, msg) -> list:
                         f"({tried}/{len(clients)} sinab ko'rildi)"
                     )
                     if tried >= len(clients):
-                        log.warning(f"Barcha {len(clients)} kalit limitda. 62s kutamiz...")
-                        await asyncio.sleep(62)
+                        # Server aytgan vaqt bor bo'lsa — shuni ishlatamiz, yo'q bo'lsa 62s
+                        wait_s = 62
+                        try:
+                            if retry_after and retry_after.isdigit():
+                                wait_s = min(int(retry_after) + 2, 120)
+                        except Exception:
+                            pass
+                        log.warning(f"Barcha {len(clients)} kalit limitda. {wait_s}s kutamiz...")
+                        await asyncio.sleep(wait_s)
                         cli_idx = 0
                     else:
                         await asyncio.sleep(3)
@@ -1319,11 +1379,17 @@ async def _ai_solve(questions: list, msg) -> list:
 
         raise ValueError(f"Barcha {len(clients)} provider ishlamadi! ({names})")
 
+    # Izoh turi bo'yicha ko'rsatma
+    _exp_instr = {
+        "full":  "Izohni O'ZBEK TILIDA yozing: to'g'ri javob nega to'g'ri ekanligini to'liq tushuntiring va asoslang (2-4 jumla).",
+        "short": "Izohni O'ZBEK TILIDA, bir qisqa jumlada yozing.",
+        "none":  "Izoh yozmang, explanation ni bo'sh qoldiring.",
+    }.get(explain_mode, "Izohni O'ZBEK TILIDA qisqa yozing.")
     SYSTEM = (
         "Siz akademik test ekspertisiz. "
-        "Har bir savolni to\'g\'ri yeching. "
+        "Har bir savolni to'g'ri yeching. "
         "Faqat JSON qaytaring, boshqa hech narsa yozmang. "
-        "Izohni O\'ZBEK TILIDA, 10 so\'zdan qisqa yozing."
+        + _exp_instr
     )
 
     def _bar(done, total, w=10):
@@ -1372,7 +1438,7 @@ async def _ai_solve(questions: list, msg) -> list:
 
         USER = (
             "Yeching va JSON qaytaring:\n"
-            "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"o\'zbek izoh\"}]\n\n"
+            "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"to'liq o'zbek izoh, asoslab tushuntiring\"}]\n\n"
             f"{json.dumps(q_data, ensure_ascii=False)}"
         )
         try:
@@ -1395,10 +1461,21 @@ async def _ai_solve(questions: list, msg) -> list:
                         solved += 1
         except Exception as e:
             log.error(f"Batch {bn} xato: {e}")
-            # Xato bo'lgan batchni keyinroq qayta urinish uchun saqlaymiz
             failed_batches.append((bn, bs))
         else:
             log.info(f"AI batch {bn}/{total_batches}: {solved} ta yechildi")
+
+        # ── So'rovlar orasida pauza (RPM limitiga urilmaslik) ──
+        # Har provayder o'z free-tier RPM limitiga ega:
+        #   Groq:       30 RPM → 2.5s
+        #   Gemini:     15 RPM → 4.5s
+        #   OpenRouter: 20 RPM → 3.5s
+        #   Together:   ~60 RPM → 1.5s
+        #   OpenAI:     ~3 RPM (free) → 5s
+        if bn < total_batches:
+            cur = clients[cli_idx % len(clients)]["name"] if clients else ""
+            pause = _PROVIDER_PAUSE.get(cur, 6.0)
+            await asyncio.sleep(pause)
 
     # Xato bo'lgan batchlarni qayta urinib ko'ramiz (1 marta)
     if failed_batches:
@@ -1424,7 +1501,7 @@ async def _ai_solve(questions: list, msg) -> list:
             ]
             USER = (
                 "Yeching va JSON qaytaring:\n"
-                "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"o\'zbek izoh\"}]\n\n"
+                "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"to'liq o'zbek izoh, asoslab tushuntiring\"}]\n\n"
                 f"{json.dumps(q_data, ensure_ascii=False)}"
             )
             try:
@@ -1447,6 +1524,9 @@ async def _ai_solve(questions: list, msg) -> list:
                 log.info(f"Retry batch {bn}: muvaffaqiyatli")
             except Exception as e:
                 log.error(f"Retry batch {bn} ham xato: {e}")
+            # Retry'da ham provayderga mos pauza
+            _cur = clients[cli_idx % len(clients)]["name"] if clients else ""
+            await asyncio.sleep(_PROVIDER_PAUSE.get(_cur, 6.0))
 
     total_t = int(time.time() - t0)
     m, s = divmod(total_t, 60)
