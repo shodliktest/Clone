@@ -1026,9 +1026,16 @@ async def _solve_image_questions(questions: list, docx_path: str, msg, explain_m
         "none":  "bo'sh qoldiring",
     }.get(explain_mode, "qisqa o'zbek izoh")
     PROMPT = (
-        "Rasmli test savoli. "
-        "Rasm va variantlarga qarab to'g'ri javobni toping. "
-        "Faqat JSON qaytaring: {\"correct_idx\": N, \"explanation\": \"" + _vexp + "\"}"
+        "Siz akademik test ekspertisiz. Rasmli test savolini MAKSIMAL ANIQLIK bilan yeching.\n"
+        "QOIDALAR:\n"
+        "1. AVVAL \"reasoning\" maydonida rasm va har bir variantni tahlil qiling, "
+        "qaysi variant to'g'ri ekanini mantiqiy asoslang. FAQAT shundan keyin "
+        "\"correct_idx\" ni tanlang — u reasoning xulosasi bilan 100% mos bo'lishi shart.\n"
+        "2. Ikkilanmang, lekin asossiz taxmin ham qilmang — faqat rasmda ko'ringan "
+        "aniq dalillarga va mantiqqa tayaning.\n"
+        "3. Gallyutsinatsiya qilmang — rasmda yo'q narsani to'qib chiqarmang.\n"
+        "Faqat JSON qaytaring (boshqa matn yozmang): "
+        "{\"reasoning\": \"tahlil\", \"correct_idx\": N, \"explanation\": \"" + _vexp + "\"}"
     )
 
     def _bar(d, t, w=8):
@@ -1106,7 +1113,7 @@ async def _solve_image_questions(questions: list, docx_path: str, msg, explain_m
                         {"text": question_text}
                     ]
                 }],
-                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 150}
+                "generationConfig": {"temperature": 0.0, "maxOutputTokens": 500}
             }
 
             try:
@@ -1379,16 +1386,41 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
 
         raise ValueError(f"Barcha {len(clients)} provider ishlamadi! ({names})")
 
-    # Izoh turi bo'yicha ko'rsatma
+    # Izoh turi bo'yicha ko'rsatma (foydalanuvchiga ko'rinadigan "explanation" uchun)
     _exp_instr = {
-        "full":  "Izohni O'ZBEK TILIDA yozing: to'g'ri javob nega to'g'ri ekanligini to'liq tushuntiring va asoslang (2-4 jumla).",
-        "short": "Izohni O'ZBEK TILIDA, bir qisqa jumlada yozing.",
-        "none":  "Izoh yozmang, explanation ni bo'sh qoldiring.",
-    }.get(explain_mode, "Izohni O'ZBEK TILIDA qisqa yozing.")
+        "full":  "\"explanation\" maydonini O'ZBEK TILIDA, 2-4 jumlada, \"reasoning\" mazmuniga TO'LIQ MOS holda yozing — nega bu javob to'g'ri va qolganlari nega noto'g'ri ekanini asoslang.",
+        "short": "\"explanation\" maydonini O'ZBEK TILIDA bir qisqa jumlada, \"reasoning\" xulosasiga mos yozing.",
+        "none":  "\"explanation\" maydonini bo'sh satr (\"\") qilib qoldiring — lekin \"reasoning\" maydonini baribir to'liq yozing, chunki javobni shu orqali aniqlaysiz.",
+    }.get(explain_mode, "\"explanation\" maydonini O'ZBEK TILIDA qisqa yozing.")
+
     SYSTEM = (
-        "Siz akademik test ekspertisiz. "
-        "Har bir savolni to'g'ri yeching. "
-        "Faqat JSON qaytaring, boshqa hech narsa yozmang. "
+        "Siz yuqori malakali, ko'p sohali (IT, matematika, fizika, tarix, til, tibbiyot, "
+        "huquq va boshqa) AKADEMIK TEST EKSPERTISIZ. Vazifangiz — har bir test savolini "
+        "MAKSIMAL ANIQLIK bilan, akademik darajada, xatosiz yechish.\n\n"
+        "QATTIQ QOIDALAR (har biriga so'zsiz amal qiling):\n"
+        "1. Har bir savol uchun AVVAL \"reasoning\" maydonida qisqa, lekin to'liq mantiqiy "
+        "zanjir bilan ISHLANG: berilgan barcha variantlarni birma-bir ko'rib chiqing, har "
+        "birining nega to'g'ri yoki noto'g'ri ekanini aniqlang, FAQAT shundan keyin "
+        "\"correct_idx\" ni tanlang. \"correct_idx\" sizning \"reasoning\"da chiqargan "
+        "xulosangiz bilan 100% MOS bo'lishi SHART — bu ikkisi orasida hech qachon "
+        "ZIDDIYAT bo'lmasligi kerak.\n"
+        "2. IKKILANMANG. Agar savol noaniq yoki ma'lumot etarli bo'lmasa ham, mavjud "
+        "kontekst, umumiy bilim va eng katta ehtimollik asosida ENG MANTIQIY variantni "
+        "tanlang — \"bilmadim\" yoki taxminiy javob bermang, lekin asossiz taxmin ham "
+        "qilmang: faqat aniq bilim va mantiqqa tayanib qaror qiling.\n"
+        "3. GALLYUTSINATSIYA QILMANG: mavjud bo'lmagan faktlarni to'qib chiqarmang. "
+        "Agar biror atama, sana, formula yoki qoidani aniq bilmasangiz, eng yaqin va "
+        "ishonchli bilimingizga asoslanib qaror qiling, lekin uni reasoning'da noaniq "
+        "deb belgilang.\n"
+        "4. Matematik/texnik hisob-kitoblar bo'lsa — reasoning ichida QADAM-BAQADAM "
+        "hisoblang (masalan: \"=(A1+B1+C1)/D1\" kabi formulalar uchun har bir sonni "
+        "qo'yib chiqib, natijani aniq hisoblang), keyin natijani variantlar bilan "
+        "solishtiring.\n"
+        "5. Bir nechta variant to'g'riga o'xshab ko'rinsa — ENG TO'LIQ va ENG ANIQ "
+        "variantni tanlang (qisman to'g'ri yoki umumiy variantlarni emas).\n"
+        "6. \"correct_idx\" — variantlar ro'yxatidagi 0-based index (birinchi variant = 0).\n"
+        "7. Faqat va faqat JSON massiv qaytaring. JSON dan tashqari birorta ham so'z, "
+        "izoh, markdown belgisi (```), preambula yoki postambula yozmang.\n\n"
         + _exp_instr
     )
 
@@ -1401,6 +1433,10 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
     if not total_q:
         return questions
 
+    # Kichikroq batch = model har bir savolga ko'proq "e'tibor" beradi.
+    # 40 ta savol bir vaqtda yuborilganda aniqlik pasayadi (reasoning va
+    # tanlangan javob orasida nomuvofiqlik kuzatilgan) — shuning uchun
+    # batch hajmi kamaytirildi.
     batch_size    = 10
     total_batches = (total_q + batch_size - 1) // batch_size
     solved        = 0
@@ -1437,16 +1473,29 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
                 pass
 
         USER = (
-            "Yeching va JSON qaytaring:\n"
-            "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"to'liq o'zbek izoh, asoslab tushuntiring\"}]\n\n"
-            f"{json.dumps(q_data, ensure_ascii=False)}"
+            "Quyidagi savollarni AKADEMIK ANIQLIK bilan yeching.\n\n"
+            "Har bir savol uchun MAJBURIY JSON tartibi (\"reasoning\" har doim "
+            "\"correct_idx\"dan OLDIN yozilishi shart — avval fikrlang, keyin tanlang):\n"
+            "[\n"
+            "  {\n"
+            "    \"idx\": N,\n"
+            "    \"reasoning\": \"variantlarni birma-bir tahlil qiling, qaysi to'g'ri "
+            "ekanini mantiqiy asoslang (o'zbek yoki ingliz tilida, qisqa lekin to'liq)\",\n"
+            "    \"correct_idx\": <reasoning xulosasiga 100% mos index>,\n"
+            "    \"explanation\": \"foydalanuvchi uchun izoh\"\n"
+            "  }\n"
+            "]\n\n"
+            "ESLATMA: \"correct_idx\" va \"reasoning\" xulosasi ZIDDIYATLI bo'lishi "
+            "MUTLAQO TAQIQLANADI — agar reasoning'da bir variant to'g'ri deb topilsa, "
+            "correct_idx aynan SHU variant indeksini ko'rsatishi kerak.\n\n"
+            f"Savollar:\n{json.dumps(q_data, ensure_ascii=False)}"
         )
         try:
             parsed_items = await _post({
                 "messages":    [{"role":"system","content":SYSTEM},
                                 {"role":"user","content":USER}],
-                "max_tokens":  4000,
-                "temperature": 0.05,
+                "max_tokens":  8000,
+                "temperature": 0.0,
             })
             for item in parsed_items:
                 oi = item.get("idx", -1)
@@ -1500,15 +1549,28 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
                 for oi, q in batch
             ]
             USER = (
-                "Yeching va JSON qaytaring:\n"
-                "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"to'liq o'zbek izoh, asoslab tushuntiring\"}]\n\n"
-                f"{json.dumps(q_data, ensure_ascii=False)}"
+                "Quyidagi savollarni AKADEMIK ANIQLIK bilan yeching.\n\n"
+                "Har bir savol uchun MAJBURIY JSON tartibi (\"reasoning\" har doim "
+                "\"correct_idx\"dan OLDIN yozilishi shart — avval fikrlang, keyin tanlang):\n"
+                "[\n"
+                "  {\n"
+                "    \"idx\": N,\n"
+                "    \"reasoning\": \"variantlarni birma-bir tahlil qiling, qaysi to'g'ri "
+                "ekanini mantiqiy asoslang (o'zbek yoki ingliz tilida, qisqa lekin to'liq)\",\n"
+                "    \"correct_idx\": <reasoning xulosasiga 100% mos index>,\n"
+                "    \"explanation\": \"foydalanuvchi uchun izoh\"\n"
+                "  }\n"
+                "]\n\n"
+                "ESLATMA: \"correct_idx\" va \"reasoning\" xulosasi ZIDDIYATLI bo'lishi "
+                "MUTLAQO TAQIQLANADI — agar reasoning'da bir variant to'g'ri deb topilsa, "
+                "correct_idx aynan SHU variant indeksini ko'rsatishi kerak.\n\n"
+                f"Savollar:\n{json.dumps(q_data, ensure_ascii=False)}"
             )
             try:
                 parsed_items = await _post({
                     "messages": [{"role":"system","content":SYSTEM},
                                  {"role":"user","content":USER}],
-                    "max_tokens": 4000, "temperature": 0.05,
+                    "max_tokens": 8000, "temperature": 0.0,
                 })
                 for item in parsed_items:
                     oi = item.get("idx", -1)
