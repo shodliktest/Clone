@@ -139,16 +139,25 @@ async def send_join_request(event, not_joined: list, bot):
     if len(text) > 4000:
         text = text[:3990] + "\n…"
 
-    # Faqat private chatda yuboriladi (middleware guruhni bloklaydi)
+    # Har doim FOYDALANUVCHINING SHAXSIY chatiga yuboriladi —
+    # guruhda yozish huquqi bo'lmasa ham xato chiqmaydi.
     try:
         markup = b.as_markup()
-        if isinstance(event, Message):
-            await event.answer(text, reply_markup=markup)
-        elif isinstance(event, CallbackQuery):
-            if event.message:
+        target_uid = getattr(event.from_user, "id", None)
+        sent = False
+        if target_uid:
+            try:
+                await bot.send_message(target_uid, text, reply_markup=markup)
+                sent = True
+            except Exception:
+                sent = False
+        if not sent:
+            # Zaxira: faqat private chat bo'lsa joyida javob beramiz
+            if isinstance(event, Message) and event.chat.type == "private":
+                await event.answer(text, reply_markup=markup)
+            elif isinstance(event, CallbackQuery) and event.message \
+                    and event.message.chat.type == "private":
                 await event.message.answer(text, reply_markup=markup)
-            elif event.from_user:
-                await bot.send_message(event.from_user.id, text, reply_markup=markup)
     except Exception as e:
         log.warning(f"send_join_request: {e}")
 

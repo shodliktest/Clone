@@ -52,6 +52,58 @@ def _get_lock():
 
 
 # ══════════════════════════════════════════════════════════════
+# FLOOD-SAFE SendDocument
+#   Telegram "Flood control exceeded ... retry after N" xatolari
+#   ketma-ket koʻp hujjat yuborilganda (batch saqlash) chiqadi va
+#   testlar saqlanmay qolishi mumkin. Bu yordamchi:
+#     • barcha SendDocument larni ketma-ket qiladi (lock)
+#     • har yuborish orasida minimal oraliq saqlaydi
+#     • flood xatosida retry_after ni kutib qayta urinadi (3 marta)
+# ══════════════════════════════════════════════════════════════
+_doc_lock = None
+_last_doc_ts = 0.0
+_DOC_MIN_GAP = 1.05   # soniya — bitta chatda xavfsiz oraliq
+
+
+def _get_doc_lock():
+    global _doc_lock
+    if _doc_lock is None:
+        _doc_lock = asyncio.Lock()
+    return _doc_lock
+
+
+def _parse_retry_after(err_text: str) -> int:
+    import re as _re
+    m = _re.search(r"retry after (\d+)", str(err_text))
+    return int(m.group(1)) if m else 0
+
+
+async def _send_doc_safe(**kwargs):
+    """_bot.send_document ning flood-safe oʻrami. Xato boʻlsa exception koʻtaradi."""
+    global _last_doc_ts
+    import time as _time
+    async with _get_doc_lock():
+        for attempt in range(4):
+            gap = _DOC_MIN_GAP - (_time.monotonic() - _last_doc_ts)
+            if gap > 0:
+                await asyncio.sleep(gap)
+            try:
+                msg = await _bot.send_document(**kwargs)  # noqa: haqiqiy chaqiruv
+                _last_doc_ts = _time.monotonic()
+                return msg
+            except Exception as e:
+                txt = str(e)
+                wait = _parse_retry_after(txt)
+                if ("Flood control" in txt or "Too Many Requests" in txt) and attempt < 3:
+                    wait = max(wait, 3) + 1
+                    log.warning(f"Flood control — {wait}s kutilmoqda (urinish {attempt+1}/3)")
+                    _last_doc_ts = _time.monotonic()
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+
+
+# ══════════════════════════════════════════════════════════════
 # INIT
 # ══════════════════════════════════════════════════════════════
 
@@ -441,7 +493,7 @@ async def _save_meta():
     old_msg_id = _meta.get("_last_meta_msg_id")
     try:
         # 1. AVVAL yangi xabar yuborish
-        msg = await _bot.send_document(
+        msg = await _send_doc_safe(
             _cid,
             document=_buf(_meta, "index_meta.json"),
             caption=f"INDEX_META | {ts}",
@@ -870,7 +922,7 @@ async def _save_index_chunks():
 
             try:
                 # 1. AVVAL yangi chunk yuborish
-                msg = await _bot.send_document(
+                msg = await _send_doc_safe(
                     _cid,
                     document=_buf(chunk_data, f"index_chunk_{i+1}.json"),
                     caption=f"INDEX_CHUNK_{i+1} | {len(group)} test | {ts}",
@@ -1033,7 +1085,7 @@ async def _flush_users_list():
             chunk_users = {uid: users[uid] for uid in group if uid in users}
             old_mid     = chunks[i]["msg_id"] if i < len(chunks) else None
             try:
-                msg = await _bot.send_document(
+                msg = await _send_doc_safe(
                     _cid,
                     document=_buf({"users": chunk_users, "count": len(chunk_users),
                                    "saved_at": ts}, f"users_list_{i+1}.json"),
@@ -1114,7 +1166,7 @@ async def flush_dirty_user_stats():
         old_mid = chunk.get("msg_id")
         try:
             # AVVAL yangi chunk
-            msg = await _bot.send_document(
+            msg = await _send_doc_safe(
                 _cid,
                 document=_buf({"stats": chunk_stats, "saved_at": ts},
                               f"user_stats_{i+1}.json"),
@@ -1260,7 +1312,7 @@ async def save_tests_stats():
     old_mid = _meta.get("tests_stats_msg_id")
     try:
         # AVVAL yangi fayl
-        msg = await _bot.send_document(
+        msg = await _send_doc_safe(
             _cid,
             document=_buf({"stats": stats, "saved_at": ts}, "tests_stats.json"),
             caption=f"TESTS_STATS | {len(stats)} test | {ts}",
@@ -1312,7 +1364,7 @@ async def save_leaderboard():
     ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
     old_mid = _meta.get("leaderboard_msg_id")
     try:
-        msg = await _bot.send_document(
+        msg = await _send_doc_safe(
             _cid,
             document=_buf({"top20": top20, "saved_at": ts}, "leaderboard.json"),
             caption=f"LEADERBOARD | top {len(top20)} | {ts}",
@@ -1338,7 +1390,7 @@ async def save_group_leaderboard():
     ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
     old_mid = _meta.get("group_lb_msg_id")
     try:
-        msg = await _bot.send_document(
+        msg = await _send_doc_safe(
             _cid,
             document=_buf({"top20": lb, "date": today, "saved_at": ts},
                           f"group_lb_{today}.json"),
@@ -1793,7 +1845,7 @@ async def save_test_full(test):
     tid = test.get("test_id", "")
     try:
         qc  = len(test.get("questions", []))
-        msg = await _bot.send_document(
+        msg = await _send_doc_safe(
             _cid,
             document=_buf(test, f"test_{tid}.json"),
             caption=f"TEST | {test.get('title','?')} | {qc} savol | {tid}",
@@ -1820,12 +1872,109 @@ async def save_test_full(test):
         log.error(f"save_test_full: {e}")
         return False
 
+async def replace_test_full(old_tid: str, new_test: dict,
+                            replaced_by: int = 0) -> dict:
+    """
+    ♻️ ESKI TESTNI ALMASHTIRISH — test KODI (old_tid) saqlanadi,
+    mazmuni (savollar, nom, sozlamalar) toʻliq yangisi bilan yoziladi.
+    Tarqatilgan havolalar/QR lar ishlashda davom etadi.
+
+    Xavfsizlik tartibi (eski test yoʻqolmasligi uchun):
+      1) Eski toʻliq testni oʻqib, DELETED_ zaxirasi sifatida kanalga saqlaymiz
+      2) Yangi hujjatni yuboramiz
+      3) Index/RAM ni yangilaymiz va saqlaymiz
+      4) Faqat shundan keyin eski xabarni oʻchiramiz
+    Qaytaradi: {"ok": bool, "error": str, "old_qc": int, "new_qc": int}
+    """
+    if not ready():
+        return {"ok": False, "error": "TG-DB tayyor emas"}
+    old_tid = str(old_tid).strip().upper()
+    old_msg_id = _index.get(f"test_{old_tid}")
+    old_meta = next((m for m in _index.get("tests_meta", [])
+                     if m.get("test_id") == old_tid), None)
+    if not old_msg_id and not old_meta:
+        return {"ok": False, "error": f"{old_tid} topilmadi"}
+
+    # 1) Eski toʻliq testni olish va zaxiralash
+    old_full = None
+    try:
+        old_full = await get_test_full(old_tid)
+    except Exception:
+        pass
+    if old_full and old_full.get("questions"):
+        try:
+            bak = dict(old_full)
+            bak["_replaced_by"] = replaced_by
+            bak["_replaced_at"] = datetime.now(UTC).isoformat()
+            await save_deleted_test_backup(bak)
+        except Exception as e:
+            log.warning(f"replace backup: {e}")
+
+    # 2) Yangi test hujjati — eski kod va yaratuvchi tarixini saqlab
+    test = dict(new_test)
+    test["test_id"] = old_tid
+    if old_meta:
+        test.setdefault("created_at", old_meta.get("created_at"))
+        test["solve_count"] = old_meta.get("solve_count", 0)
+        test["avg_score"]   = old_meta.get("avg_score", 0)
+        # Asl yaratuvchi maʼlumotini izi sifatida saqlaymiz
+        test.setdefault("orig_creator_id",   old_meta.get("creator_id"))
+        test.setdefault("orig_creator_name", old_meta.get("creator_name"))
+    test["replaced_at"] = datetime.now(UTC).isoformat()
+    if replaced_by:
+        test["replaced_by"] = replaced_by
+
+    qc = len(test.get("questions", []))
+    try:
+        msg = await _send_doc_safe(
+            chat_id=_cid,
+            document=_buf(test, f"test_{old_tid}.json"),
+            caption=f"TEST | {test.get('title','?')} | {qc} savol | {old_tid} ♻️",
+            protect_content=False,
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"Yuborish xatosi: {e}"}
+
+    # 3) Index/RAM yangilash
+    _index[f"test_{old_tid}"]       = msg.message_id
+    _index[f"fid_{msg.message_id}"] = msg.document.file_id
+    _tests_cache[old_tid] = test
+    meta = {k: v for k, v in test.items() if k != "questions"}
+    meta["question_count"] = qc
+    metas = [m for m in _index.get("tests_meta", []) if m.get("test_id") != old_tid]
+    metas.insert(0, meta)
+    _index["tests_meta"] = metas
+    try:
+        from utils import ram_cache as ram
+        ram.add_test_meta(meta)
+        ram.cache_questions(old_tid, test)
+    except Exception:
+        pass
+    try:
+        await _save_index()
+    except Exception as e:
+        log.warning(f"replace index save: {e}")
+
+    # 4) Eski xabarni oʻchirish (yangi saqlangach)
+    if old_msg_id and old_msg_id != msg.message_id:
+        try:
+            await _bot.delete_message(_cid, old_msg_id)
+        except Exception:
+            pass
+        _index.pop(f"fid_{old_msg_id}", None)
+
+    old_qc = len((old_full or {}).get("questions", [])) or \
+             (old_meta or {}).get("question_count", 0)
+    log.info(f"♻️ {old_tid} almashtirildi: {old_qc} → {qc} savol (by {replaced_by})")
+    return {"ok": True, "error": "", "old_qc": old_qc, "new_qc": qc}
+
+
 async def save_deleted_test_backup(test):
     if not ready(): return
     tid = test.get("test_id", "NOID")
     _tests_cache.pop(tid, None)
     try:
-        await _bot.send_document(
+        await _send_doc_safe(
             _cid,
             document=_buf(test, f"DELETED_test_{tid}.json"),
             caption=f"DELETED: {test.get('title','?')} | {tid}",
@@ -1895,7 +2044,7 @@ async def save_settings(settings_dict):
     ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
     old_mid = _meta.get("settings_msg_id")
     try:
-        msg = await _bot.send_document(
+        msg = await _send_doc_safe(
             _cid,
             document=_buf({"settings": settings_dict, "saved_at": ts}, "settings.json"),
             caption=f"SETTINGS | {ts}",
@@ -1939,7 +2088,7 @@ async def save_blocked_users(blocked_ids: set):
     ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
     old_mid = _meta.get("blocked_msg_id")
     try:
-        msg = await _bot.send_document(
+        msg = await _send_doc_safe(
             _cid,
             document=_buf(
                 {"blocked_ids": list(blocked_ids), "count": len(blocked_ids), "saved_at": ts},
@@ -1989,7 +2138,7 @@ async def save_known_groups():
     ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
     old_mid = _meta.get("known_groups_msg_id")
     try:
-        msg = await _bot.send_document(
+        msg = await _send_doc_safe(
             _cid,
             document=_buf({"groups": groups, "count": len(groups), "saved_at": ts},
                           "known_groups.json"),
@@ -2064,7 +2213,7 @@ async def upload_backup(daily_data, date_str):
     try:
         r_count = sum(len(v.get("by_test", {})) for v in daily_data.values())
         ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-        msg     = await _bot.send_document(
+        msg     = await _send_doc_safe(
             _cid,
             document=_buf({
                 "date": date_str, "saved_at": ts,

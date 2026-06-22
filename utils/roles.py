@@ -245,7 +245,20 @@ def process_referral(new_uid: int, referrer_uid: int, admin_ids: list) -> dict:
         "referral_today_date": r_date,
     }
 
-    msg_parts = [f"✅ Referal qabul qilindi! Jami: {total}"]
+    # 💰 Coin mukofoti: taklif qiluvchiga va yangi foydalanuvchiga
+    coin_msg = ""
+    try:
+        from utils.coins import add_coins, ref_rewards
+        rr, rn = ref_rewards()
+        if rr > 0:
+            new_bal = add_coins(referrer_uid, rr, f"ref {new_uid}")
+            coin_msg = f" | 💰 +{rr} coin (balans: {new_bal})"
+        if rn > 0:
+            add_coins(new_uid, rn, f"ref bonus from {referrer_uid}")
+    except Exception:
+        pass
+
+    msg_parts = [f"✅ Referal qabul qilindi! Jami: {total}{coin_msg}"]
 
     # 10 ta kunlik referal → 30 kun student
     if r_today >= 10:

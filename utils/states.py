@@ -15,7 +15,6 @@ class CreateTest(StatesGroup):
     waiting_polls  = State()
     set_poll_time  = State()
     upload_file    = State()
-    reupload_file  = State()
     set_subject    = State()
     set_title      = State()
     set_difficulty = State()
@@ -23,7 +22,7 @@ class CreateTest(StatesGroup):
     set_passing    = State()
     set_attempts   = State()
     set_visibility = State()
-    set_ref_count  = State()   # Referal soni
+    replace_code   = State()   # ♻️ admin: eski test kodi kutilmoqda
 
 class AdminPanel(StatesGroup):
     broadcast         = State()
