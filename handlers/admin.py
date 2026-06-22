@@ -420,6 +420,10 @@ async def adm_test_detail(callback: CallbackQuery):
             text="🌐 Tahrirlash (web)",
             url=f"{WEBAPP_URL}/edit.html?id={tid}"
         ))
+        b.row(InlineKeyboardButton(
+            text="🤖 AI bilan qayta yechish",
+            callback_data=f"aisolve_{tid}"
+        ))
         b.row(InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"del_test_{tid}"))
     cat = meta.get("category","")[:30]
     b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"adm_cat_{cat}_0"))

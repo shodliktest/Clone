@@ -38,6 +38,7 @@ class RoleAdmin(StatesGroup):
     confirm_role   = State()
     confirm_dur    = State()
     resetall_confirm = State()
+    waiting_coin   = State()   # 💰 coin miqdori kutilmoqda
 
 
 # ── Guard: faqat admin ━━━━━━━━━━━━━━━━━━━━━━━━
@@ -140,6 +141,7 @@ def _format_user_detail(uid: int, user: dict) -> str:
         f"{' | @'+user['username'] if user.get('username') else ''}\n"
         f"{'🚫 BLOKLANGAN\n' if blocked else ''}"
         f"\n📊 Daraja: <b>{label}</b>{exp_txt}\n"
+        f"💰 Coin: <b>{user.get('coins', 0)}</b>\n"
         f"\n📝 Testlar: {user.get('total_tests',0)}\n"
         f"⭐ O'rtacha: {user.get('avg_score',0)}%\n"
         f"\n👥 Referal: {ref['total']} jami / {ref['today']} bugun\n"
@@ -168,6 +170,10 @@ def _user_action_kb(uid: int, current_role: str):
     b.row(
         InlineKeyboardButton(text="🚫 Bloklash", callback_data=f"ra_block:{uid}:1"),
         InlineKeyboardButton(text="✅ Blokdan chiq", callback_data=f"ra_block:{uid}:0"),
+    )
+    b.row(
+        InlineKeyboardButton(text="💰 +Coin", callback_data=f"ra_coin:{uid}:add"),
+        InlineKeyboardButton(text="💸 −Coin", callback_data=f"ra_coin:{uid}:sub"),
     )
     b.row(InlineKeyboardButton(text="❌ Yopish", callback_data="ra_close"))
     return b.as_markup()
@@ -569,3 +575,75 @@ async def btn_settings(message: Message):
     if not _is_admin(message.from_user.id):
         return
     await message.answer(_settings_text(), reply_markup=_settings_kb())
+
+
+# ══════════════════════════════════════════════════════════════
+# 💰 ADMIN: COIN BOSHQARUVI (qo'shish / ayirish)
+# ══════════════════════════════════════════════════════════════
+@router.callback_query(F.data.startswith("ra_coin:"))
+async def cb_coin_adjust(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
+        return await callback.answer("🚫", show_alert=True)
+    try:
+        _, uid_s, op = callback.data.split(":")
+        target = int(uid_s)
+    except Exception:
+        return await callback.answer("❌", show_alert=True)
+    await callback.answer()
+    from utils.coins import get_balance
+    await state.set_state(RoleAdmin.waiting_coin)
+    await state.update_data(coin_target=target, coin_op=op)
+    sign = "qo'shiladigan" if op == "add" else "ayiriladigan"
+    await callback.message.answer(
+        f"💰 <b>Coin {('qo`shish' if op=='add' else 'ayirish')}</b>\n"
+        f"👤 User: <code>{target}</code>\n"
+        f"👛 Hozirgi balans: <b>{get_balance(target)}</b>\n\n"
+        f"{sign.capitalize()} miqdorni yuboring (butun son).\n"
+        f"❌ Bekor: /cancel"
+    )
+
+
+@router.message(RoleAdmin.waiting_coin)
+async def msg_coin_amount(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        return
+    txt = (message.text or "").strip()
+    if txt.lower() in ("/cancel", "bekor"):
+        await state.clear()
+        return await message.answer("❌ Bekor qilindi.")
+    try:
+        amount = int(txt)
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        return await message.answer("❌ Musbat butun son yuboring yoki /cancel")
+
+    d      = await state.get_data()
+    target = d.get("coin_target")
+    op     = d.get("coin_op", "add")
+    await state.clear()
+    if not target:
+        return await message.answer("❌ Maqsad topilmadi.")
+
+    from utils.coins import add_coins, get_balance
+    delta   = amount if op == "add" else -amount
+    new_bal = add_coins(target, delta, f"admin {message.from_user.id}")
+    await message.answer(
+        f"✅ <b>Bajarildi</b>\n"
+        f"👤 <code>{target}</code>\n"
+        f"💰 {'+' if delta>0 else ''}{delta} coin → yangi balans: <b>{new_bal}</b>"
+    )
+    # Foydalanuvchini xabardor qilish
+    try:
+        if delta > 0:
+            await message.bot.send_message(
+                target,
+                f"🎁 <b>Hisobingiz to'ldirildi!</b>\n"
+                f"💰 +{delta} coin | Balans: <b>{new_bal}</b>")
+        else:
+            await message.bot.send_message(
+                target,
+                f"ℹ️ Balansingiz o'zgartirildi: {delta} coin\n"
+                f"💰 Yangi balans: <b>{new_bal}</b>")
+    except Exception:
+        pass

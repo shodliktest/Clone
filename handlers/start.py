@@ -48,6 +48,21 @@ async def cmd_start(message: Message, state: FSMContext):
     # ━━━━━━━━━━━━━━━━━━━━━━━━
 
     user   = await get_or_create_user(uid, name, uname)
+
+    # 💰 Bir martalik start bonusi
+    try:
+        from utils.coins import ensure_signup_bonus
+        _bonus = ensure_signup_bonus(uid)
+        if _bonus > 0:
+            try:
+                await message.answer(
+                    f"🎁 <b>Xush kelibsiz bonusi:</b> +{_bonus} coin!\n"
+                    f"💰 Coin bilan test yaratish va AI xizmatlaridan foydalanasiz. "
+                    f"Batafsil: /balance")
+            except Exception:
+                pass
+    except Exception:
+        pass
     is_new = user.pop("_just_created", False)
 
     if user.get("is_blocked"):
@@ -137,6 +152,21 @@ async def cmd_start(message: Message, state: FSMContext):
                     InlineKeyboardButton(text=f"📊 Demo Poll ({demo_q} savol)",
                                          callback_data=f"start_demopoll_{tid}"),
                 )
+                # 🌐 Web demo — server tomonda ham {demo_q} ta savolga kesiladi
+                try:
+                    from handlers.webauth import WEBAPP_URL as _WU
+                    import urllib.parse as _ul
+                    _wp = _ul.urlencode({
+                        "id": tid, "demo": "1",
+                        "uid": uid,
+                        "name": message.from_user.full_name or f"User{uid}",
+                        "uname": message.from_user.username or "",
+                    })
+                    b.row(InlineKeyboardButton(
+                        text=f"🌐 Web Demo ({demo_q} savol)",
+                        url=f"{_WU}/web_test.html?{_wp}"))
+                except Exception:
+                    pass
                 b.row(InlineKeyboardButton(
                     text="📩 To'liq test olish",
                     url=f"https://t.me/{ADMIN_USERNAME}"

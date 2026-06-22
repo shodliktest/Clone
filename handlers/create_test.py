@@ -6,17 +6,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
 
-from utils.parser import parse_file, check_images_in_file
+from utils.parser import parse_file
 from utils.states import CreateTest
 from utils.db import create_test
 from keyboards.keyboards import subject_kb, difficulty_kb, visibility_kb, main_kb, test_created_kb
-from config import SUBJECTS  # ✅ FIXED: import
 
 def _get_user_subjects(uid):
-    """✅ FIXED: User maxsus fan nomlari + standart SUBJECTS"""
     from utils.ram_cache import get_user_custom_subjects
-    custom = get_user_custom_subjects(uid)
-    return custom + [s for s in SUBJECTS if s not in custom]
+    return get_user_custom_subjects(uid)
 
 log        = logging.getLogger(__name__)
 router     = Router()
@@ -265,16 +262,12 @@ async def cb_show_referral(callback: CallbackQuery):
 
 
 # ═══════════════════════════════════════════════════════════
-# BOSHQA HANDLER'LAR (QOLGAN 99% KOD SAQLANADI)
+# 2. MATN ORQALI YUKLASH
 # ═══════════════════════════════════════════════════════════
 
-# OG'ZINI FAYLLAR JAMI 2000+ QATORNI SAQLASH UCHUN,
-# QOLGAN BARCHA HANDLER'LAR VA FUNKSIYALAR XUDDI SHUNAQA QOLADI
-# FAQAT @router va async def larini TAHRIRLAMADIK
-
-# Matnli upload
 @router.callback_query(F.data == "method_text", CreateTest.choose_method)
 async def method_text(callback: CallbackQuery, state: FSMContext):
+    """Chat orqali matn — ko'p xabar bo'lsa ham hammasi yig'iladi"""
     await callback.answer()
     example = (
         "1. O'zbekiston poytaxti?\n"
@@ -300,6 +293,7 @@ async def method_text(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         reply_markup=b.as_markup()
     )
+    # Yo'riqnoma xabarini progress sifatida saqlash (birinchi matn kelganda o'chiriladi)
     uid = callback.from_user.id
     _text_progress[uid] = callback.message.message_id
     _text_count[uid] = 0
@@ -309,16 +303,23 @@ async def method_text(callback: CallbackQuery, state: FSMContext):
 
 @router.message(F.text, CreateTest.upload_file)
 async def upload_text(message: Message, state: FSMContext):
+    """Kelgan matn xabarlarini bufferga yig'ish"""
     text = message.text.strip()
     if len(text) < 3:
         return
+
     d = await state.get_data()
     buf     = d.get("text_buffer", [])
     msg_ids = d.get("text_msg_ids", [])
+
     buf.append(text)
     msg_ids.append(message.message_id)
     await state.update_data(text_buffer=buf, text_msg_ids=msg_ids)
+
+    # Foydalanuvchi xabarini o'chirish
     await _del(message.bot, message.chat.id, message.message_id)
+
+    # Debounce: 0.8s kutib, oxirgi sanoq bilan bitta progress xabar yuboradi
     uid = message.from_user.id
     _text_count[uid] = len(buf)
     old_task = _text_debounce.pop(uid, None)
@@ -330,27 +331,40 @@ async def upload_text(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "finish_text", CreateTest.upload_file)
 async def finish_text(callback: CallbackQuery, state: FSMContext):
+    """Buffer to'plangan matnlarni birga parse qilish"""
     await callback.answer()
     d   = await state.get_data()
     buf = d.get("text_buffer", [])
+
     if not buf:
         return await callback.answer("❌ Hali matn yuborilmadi!", show_alert=True)
+
+    # Hammasini birlashtirish
     full_text = "\n\n".join(buf)
+
     status = await callback.message.edit_text("⏳ Tahlil qilinmoqda...")
     try:
+        import tempfile, os
         with tempfile.NamedTemporaryFile(mode="w", delete=False,
                                          suffix=".txt", encoding="utf-8") as tmp:
             tmp.write(full_text)
             tmp_path = tmp.name
         questions = parse_file(tmp_path)
         os.remove(tmp_path)
+
         if not questions:
             return await status.edit_text(
                 "❌ <b>Savollar topilmadi!</b>\n\n"
                 "To'g'ri javob oldiga <b>===</b> qo'ying:\n"
                 "<code>===A) To'g'ri javob</code>"
             )
-        await state.update_data(questions=questions, text_buffer=[], text_msg_ids=[])
+
+        await state.update_data(
+            questions=questions,
+            text_buffer=[],
+            text_msg_ids=[],
+            upload_status_id=status.message_id
+        )
         b_pt = InlineKeyboardBuilder()
         for s in POLL_TIMES:
             b_pt.add(InlineKeyboardButton(text=f"⏱ {s}s", callback_data=f"ptime_{s}"))
@@ -369,10 +383,1034 @@ async def finish_text(callback: CallbackQuery, state: FSMContext):
         await status.edit_text("❌ Matnni o'qishda xatolik. Formatni tekshiring.")
 
 
+@router.callback_query(F.data == "method_file", CreateTest.choose_method)
+async def method_file(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    b = InlineKeyboardBuilder()
+    for key, (_, type_name, _) in SAMPLE_TYPES.items():
+        b.add(InlineKeyboardButton(text=type_name, callback_data=f"sample_{key}"))
+    b.adjust(2)
+    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_create"))
+    await callback.message.edit_text(
+        "<b>📁 TEST TURINI TANLANG</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Turni bosing → namuna ko'rasiz\n"
+        "Shu formatda fayl yuborasiz:\n\n"
+        "<i>💡 Yaratilgan test ▶️ Inline va 📊 Poll\n"
+        "ikki rejimda ishlaydi!</i>",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+    await state.set_state(CreateTest.upload_file)
+
+
+@router.callback_query(F.data.startswith("sample_"), CreateTest.upload_file)
+async def send_sample(callback: CallbackQuery):
+    await callback.answer()
+    key = callback.data[7:]
+    fname, type_name, mono_text = SAMPLE_TYPES.get(key, SAMPLE_TYPES["mcq"])
+    fpath = os.path.join(SAMPLES_DIR, fname)
+
+    if os.path.exists(fpath):
+        await callback.message.answer_document(
+            FSInputFile(fpath, filename=fname),
+            caption=f"📄 <b>{type_name}</b> — namuna fayli"
+        )
+
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Boshqa tur",  callback_data="method_file"))
+    b.row(InlineKeyboardButton(text="❌ Bekor",        callback_data="cancel_create"))
+    await callback.message.edit_text(
+        f"<b>📄 {type_name.upper()} FORMATI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Namuna:\n\n"
+        f"<code>{mono_text}</code>\n\n"
+        f"⏳ <b>Faylingizni yuboring...</b>",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.message(F.document, CreateTest.upload_file)
+async def upload_file(message: Message, state: FSMContext):
+    doc = message.document
+    if not doc.file_name.lower().endswith((".txt", ".pdf", ".docx", ".doc")):
+        return await message.answer("❌ Faqat TXT, PDF yoki DOCX fayllar qabul qilinadi!")
+
+    status = await message.answer("⏳ Fayl tahlil qilinmoqda...")
+    try:
+        file   = await message.bot.get_file(doc.file_id)
+        suffix = os.path.splitext(doc.file_name)[1].lower()
+
+        # Avval fayl yaratamiz, keyin yuklaymiz (lock muammosini oldini oladi)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = tmp.name
+        await message.bot.download_file(file.file_path, tmp_path)
+
+        questions = parse_file(tmp_path)
+        try: os.remove(tmp_path)
+        except Exception: pass
+        await _del(message.bot, message.chat.id, message.message_id)
+
+        if not questions:
+            return await status.edit_text(
+                "❌ <b>Savollar topilmadi!</b>\n\n"
+                "Quyidagi formatlar qo\'llab-quvvatlanadi:\n"
+                "• <b>Standart:</b> <code>===A) To\'g\'ri javob</code>\n"
+                "• <b>==== + #:</b> Savol → ==== → #To\'g\'ri → ====\n"
+                "• <b>Jadval:</b> Savol | To\'g\'ri | Muqobil...\n"
+                "• <b>PDF:</b> ? savol → =Javob\n\n"
+                "Namunani ko\'rish uchun turni qaytadan tanlang."
+            )
+
+        total    = len(questions)
+        unmarked = sum(1 for q in questions if not q.get("_marked"))
+
+        await state.update_data(questions=questions, _file_id=doc.file_id)
+        await state.set_state(CreateTest.upload_file)  # state saqlanadi
+
+        if unmarked > 0:
+            b = InlineKeyboardBuilder()
+            b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
+            b.button(text="🤖 AI bilan yechish",   callback_data="uj_ai")
+            b.button(text="📨 Adminga murojaat",   callback_data="uj_admin")
+            b.button(text="▶️ Shundayicha davom",  callback_data="uj_skip")
+            b.adjust(1)
+            await status.edit_text(
+                f"📋 <b>{total} TA SAVOL TOPILDI</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
+                f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n\n"
+                f"<i>To\'g\'ri javob aniqlanmagan. Nima qilamiz?</i>",
+                parse_mode="HTML",
+                reply_markup=b.as_markup()
+            )
+        else:
+            await _ask_poll_time(status, state, total)
+
+    except Exception as e:
+        log.error(f"upload_file xato: {e}", exc_info=True)
+        await status.edit_text("❌ Faylni o\'qishda xatolik. Boshqa fayl yoki formatni sinab ko\'ring.")
+
+
+async def _ask_poll_time(msg, state, q_count: int):
+    b = InlineKeyboardBuilder()
+    for s in POLL_TIMES:
+        b.add(InlineKeyboardButton(text=f"⏱ {s}s", callback_data=f"ptime_{s}"))
+    b.adjust(3)
+    b.row(InlineKeyboardButton(text="♾ Cheksiz", callback_data="ptime_0"))
+    await msg.edit_text(
+        f"<b>✅ {q_count} TA SAVOL TOPILDI!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏱ <b>Har bir savol uchun necha soniya?</b>",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+    await state.set_state(CreateTest.set_poll_time)
+
+
+# ═══════════════════════════════════════════════════════════
+# BELGILANMAGAN SAVOLLAR — Seryalik / AI / Admin
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "uj_serial", CreateTest.upload_file)
+async def uj_serial(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    b = InlineKeyboardBuilder()
+    for ltr in ["A", "B", "C", "D", "E"]:
+        b.button(text=f"✅ {ltr}", callback_data=f"serial_{ltr}")
+    b.button(text="⬅️ Orqaga", callback_data="uj_back")
+    b.adjust(5, 1)
+    await cb.message.edit_text(
+        "🔡 <b>SERYALIK JAVOB</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Barcha belgilanmagan savollarda\n"
+        "qaysi variant to\'g\'ri bo\'ladi?\n\n"
+        "<i>Masalan: barcha javoblar B bo\'lsa → B ni tanlang</i>",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("serial_"), CreateTest.upload_file)
+async def apply_serial(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    letter = cb.data.split("_")[1]
+    idx    = ord(letter.upper()) - ord("A")
+    d      = await state.get_data()
+    questions = d.get("questions", [])
+    changed = 0
+    for q in questions:
+        if q.get("_marked"):
+            continue
+        opts = q.get("options", [])
+        if opts and idx < len(opts):
+            q["correct"] = opts[idx]
+            changed += 1
+    await state.update_data(questions=questions)
+    await cb.message.edit_text(
+        f"✅ <b>{letter} seryalik qo\'llandi!</b>\n"
+        f"📝 {changed} ta savol yangilandi.\n\n"
+        f"<i>Davom etamiz...</i>"
+    )
+    await asyncio.sleep(0.8)
+    await _ask_poll_time(cb.message, state, len(questions))
+
+
+@router.callback_query(F.data == "uj_ai", CreateTest.upload_file)
+async def uj_ai(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    d = await state.get_data()
+    questions = d.get("questions", [])
+    unmarked  = [q for q in questions if not q.get("_marked")]
+
+    await cb.message.edit_text(
+        "🤖 <b>AI BILAN YECHISH</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 {len(unmarked)} ta savol AI ga yuborilmoqda...\n\n"
+        "<i>Bir necha soniya kutib turing</i>"
+    )
+    try:
+        questions = await _ai_solve(questions, cb.message)
+        await state.update_data(questions=questions)
+        solved = sum(1 for q in questions if q.get("_ai_solved"))
+        await cb.message.edit_text(
+            f"🤖 <b>AI tugatdi!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ {solved} ta savol yechildi\n\n"
+            f"<i>Davom etamiz...</i>"
+        )
+        await asyncio.sleep(1)
+        await _ask_poll_time(cb.message, state, len(questions))
+    except Exception as e:
+        log.error(f"AI solve xato: {e}", exc_info=True)
+        b = InlineKeyboardBuilder()
+        b.button(text="🔡 Seryalik javob",   callback_data="uj_serial")
+        b.button(text="📨 Adminga murojaat", callback_data="uj_admin")
+        b.button(text="▶️ Shundayicha davom", callback_data="uj_skip")
+        b.adjust(1)
+        await cb.message.edit_text(
+            f"❌ <b>AI xatolik berdi</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{str(e)[:200]}</code>\n\n"
+            f"Boshqa usulni tanlang:",
+            parse_mode="HTML",
+            reply_markup=b.as_markup()
+        )
+
+
+@router.callback_query(F.data == "uj_admin", CreateTest.upload_file)
+async def uj_admin(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    from config import ADMIN_IDS
+    d         = await state.get_data()
+    questions = d.get("questions", [])
+    unmarked  = sum(1 for q in questions if not q.get("_marked"))
+    uid       = cb.from_user.id
+    uname     = cb.from_user.full_name or str(uid)
+    for aid in ADMIN_IDS:
+        try:
+            await cb.bot.send_message(
+                aid,
+                f"📨 <b>Yordam so\'rovi</b>\n"
+                f"👤 {uname} (<code>{uid}</code>)\n"
+                f"📋 {len(questions)} savol, {unmarked} belgilanmagan"
+            )
+        except Exception:
+            pass
+    b = InlineKeyboardBuilder()
+    b.button(text="⬅️ Orqaga", callback_data="uj_back")
+    await cb.message.edit_text(
+        "📨 <b>Admin xabardor qilindi!</b>\n\n"
+        "Tez orada javob olasiz.",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.callback_query(F.data == "uj_skip", CreateTest.upload_file)
+async def uj_skip(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    d = await state.get_data()
+    await _ask_poll_time(cb.message, state, len(d.get("questions", [])))
+
+
+@router.callback_query(F.data == "uj_back", CreateTest.upload_file)
+async def uj_back(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    d         = await state.get_data()
+    questions = d.get("questions", [])
+    total     = len(questions)
+    unmarked  = sum(1 for q in questions if not q.get("_marked"))
+    b = InlineKeyboardBuilder()
+    b.button(text="🔡 Seryalik javob",   callback_data="uj_serial")
+    b.button(text="🤖 AI bilan yechish",  callback_data="uj_ai")
+    b.button(text="📨 Adminga murojaat", callback_data="uj_admin")
+    b.button(text="▶️ Shundayicha davom", callback_data="uj_skip")
+    b.adjust(1)
+    await cb.message.edit_text(
+        f"📋 <b>{total} TA SAVOL</b>\n"
+        f"✅ Belgilangan: <b>{total - unmarked}</b>\n"
+        f"❓ Belgilanmagan: <b>{unmarked}</b>\n\n"
+        f"<i>Qanday davom etamiz?</i>",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+
+
+# ═══════════════════════════════════════════════════════════
+# AI PROVIDER KONFIGURATSIYA
+# ═══════════════════════════════════════════════════════════
+# Secrets ga quyidagilardan BIRINI yoki BARCHASINI yozing:
+#
+# Groq (bepul, tez):
+#   GROQ_API_KEY = "gsk_xxx"
+#   GROQ_API_KEY1 = "gsk_yyy"   ← ko'p kalit rotatsiya uchun
+#
+# OpenAI:
+#   OPENAI_API_KEY = "sk-xxx"
+#
+# Together AI (bepul modellari bor):
+#   TOGETHER_API_KEY = "xxx"
+#
+# OpenRouter (100+ model, ko'plari bepul):
+#   OPENROUTER_API_KEY = "sk-or-xxx"
+#
+# Har qanday OpenAI-compatible API:
+#   CUSTOM_AI_API_KEY = "xxx"
+#   CUSTOM_AI_API_URL = "https://your-api.com/v1/chat/completions"
+#   CUSTOM_AI_MODEL   = "your-model-name"
+#
+# Bir vaqtda bir nechta provider yozilsa — hammasi ishlatiladi,
+# limit tugasa avtomatik keyingisiga o'tadi.
+# ═══════════════════════════════════════════════════════════
+
+_AI_PROVIDERS = [
+    {
+        "name":      "Groq",
+        "url":       "https://api.groq.com/openai/v1/chat/completions",
+        "model":     "llama-3.3-70b-versatile",
+        "key_names": ["GROQ_API_KEY"] + [f"GROQ_API_KEY{i}" for i in range(1, 21)],
+    },
+    {
+        "name":      "OpenAI",
+        "url":       "https://api.openai.com/v1/chat/completions",
+        "model":     "gpt-4o-mini",
+        "key_names": ["OPENAI_API_KEY"] + [f"OPENAI_API_KEY{i}" for i in range(1, 11)],
+    },
+    {
+        "name":      "Together AI",
+        "url":       "https://api.together.xyz/v1/chat/completions",
+        "model":     "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "key_names": ["TOGETHER_API_KEY"] + [f"TOGETHER_API_KEY{i}" for i in range(1, 11)],
+    },
+    {
+        "name":      "OpenRouter",
+        "url":       "https://openrouter.ai/api/v1/chat/completions",
+        "model":     "meta-llama/llama-3.3-70b-instruct:free",
+        "key_names": ["OPENROUTER_API_KEY"] + [f"OPENROUTER_API_KEY{i}" for i in range(1, 11)],
+    },
+]
+
+
+def _load_ai_clients():
+    """
+    Secrets dan barcha mavjud AI kalitlarini yuklaydi.
+    Qaytaradi: [(name, url, model, key), ...]
+    """
+    clients = []
+    try:
+        import streamlit as st
+        sec = st.secrets
+    except Exception:
+        class _E:
+            def get(self, k, d=""): return os.environ.get(k, d)
+        sec = _E()
+
+    # Custom provider
+    c_url   = sec.get("CUSTOM_AI_API_URL", "")
+    c_model = sec.get("CUSTOM_AI_MODEL", "gpt-3.5-turbo")
+    for name in ["CUSTOM_AI_API_KEY"] + [f"CUSTOM_AI_API_KEY{i}" for i in range(1, 11)]:
+        k = sec.get(name, "")
+        if k and c_url:
+            clients.append({"name": "Custom", "url": c_url, "model": c_model, "key": k})
+
+    # Standart providerlar
+    for p in _AI_PROVIDERS:
+        for name in p["key_names"]:
+            k = sec.get(name, "")
+            if k:
+                clients.append({"name": p["name"], "url": p["url"], "model": p["model"], "key": k})
+
+    return clients
+
+
+async def _ai_solve(questions: list, msg) -> list:
+    """
+    Universal AI yechish — Groq / OpenAI / Together / OpenRouter / Custom.
+    Limit tugasa avtomatik keyingi kalit yoki providerga o'tadi.
+    """
+    import aiohttp, json, time
+
+    clients = _load_ai_clients()
+    if not clients:
+        raise ValueError(
+            "AI API kaliti topilmadi!\n"
+            "Secrets ga qo'shing: GROQ_API_KEY = \"gsk_xxx\""
+        )
+
+    names = list(dict.fromkeys(c["name"] for c in clients))
+    log.info(f"AI: {len(clients)} kalit, {names}")
+    cli_idx = 0
+
+    async def _post(payload):
+        nonlocal cli_idx
+        for _ in range(len(clients)):
+            cli = clients[cli_idx % len(clients)]
+            p   = dict(payload)
+            p["model"] = cli["model"]
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(
+                        cli["url"],
+                        headers={"Authorization": f"Bearer {cli['key']}",
+                                 "Content-Type": "application/json"},
+                        json=p, timeout=aiohttp.ClientTimeout(total=90),
+                    ) as r:
+                        data = await r.json()
+                err = data.get("error", {})
+                if err:
+                    code = str(err.get("type","")) + str(err.get("code",""))
+                    if any(w in code for w in ["rate_limit","quota","tokens","capacity"]):
+                        log.warning(f"[{cli['name']}] kalit {cli_idx%len(clients)+1}/{len(clients)} limit")
+                        cli_idx += 1
+                        await asyncio.sleep(1)
+                        continue
+                    raise ValueError(f"[{cli['name']}] {err.get('message', str(err))}")
+                return data
+            except aiohttp.ClientError as e:
+                log.warning(f"[{cli['name']}] xato: {e}")
+                cli_idx += 1
+        # Bir toʻliq aylanishda hammasi limit boʻldi — kutib, yana 2 marta urinish
+        for retry_round, wait_s in enumerate((20, 45), 1):
+            log.warning(f"Barcha kalitlar limit — {wait_s}s kutib {retry_round}-qayta urinish")
+            await asyncio.sleep(wait_s)
+            for _ in range(len(clients)):
+                cli = clients[cli_idx % len(clients)]
+                p2  = dict(payload); p2["model"] = cli["model"]
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        async with s.post(
+                            cli["url"],
+                            headers={"Authorization": f"Bearer {cli['key']}",
+                                     "Content-Type": "application/json"},
+                            json=p2, timeout=aiohttp.ClientTimeout(total=90),
+                        ) as r:
+                            data = await r.json()
+                    if not data.get("error"):
+                        return data
+                    cli_idx += 1
+                except Exception:
+                    cli_idx += 1
+        raise ValueError(f"Barcha {len(clients)} ta kalit/provider ishlamadi! ({names})")
+
+    SYSTEM = (
+        "Siz akademik test yechuvchi ekspert mutaxasssissiz. "
+        "Sizga berilgan test savollarini academic darajada aniq va xatolarsiz yeching. "
+        "Har bir savol uchun to'g'ri javob indeksini 0 dan boshlab aniqlang. "
+        "Faqat JSON formatda javob bering, boshqa hech narsa yozmang."
+    )
+
+    def _bar(done, total, w=10):
+        f = int(w * done / max(total, 1))
+        return "█" * f + "░" * (w - f)
+
+    unmarked      = [(i, q) for i, q in enumerate(questions) if not q.get("_marked")]
+    total_q       = len(unmarked)
+    if not total_q:
+        return questions
+
+    batch_size    = 40
+    total_batches = (total_q + batch_size - 1) // batch_size
+    solved        = 0
+    t0            = time.time()
+
+    for bn, bs in enumerate(range(0, total_q, batch_size), 1):
+        batch  = unmarked[bs:bs+batch_size]
+        q_data = [
+            {"idx": oi, "q": q.get("question",""),
+             "opts": [re.sub(r"^[A-Ha-h]\s*[).]\s*","",o) for o in q.get("options",[])]}
+            for oi, q in batch
+        ]
+
+        done_q  = (bn-1) * batch_size
+        elapsed = time.time() - t0
+        eta_sec = int(elapsed / max(bn-1,1) * (total_batches-bn+1)) if bn > 1 else total_batches * 8
+        mins, secs = divmod(eta_sec, 60)
+        eta_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
+        cur_provider = clients[cli_idx % len(clients)]["name"]
+
+        if msg:
+            try:
+                await msg.edit_text(
+                    f"🤖 <b>AI yechmoqda...</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"[{_bar(bn-1, total_batches)}] {bn-1}/{total_batches} batch\n"
+                    f"📊 {done_q}/{total_q} savol\n"
+                    f"⏱ Qoldi: ~{eta_str}\n"
+                    f"🔑 {len(clients)} kalit | {cur_provider}",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+        USER = (
+            "Savollarni yeching va JSON qaytaring:\n"
+            "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"izoh\"}]\n\n"
+            f"Savollar:\n{json.dumps(q_data, ensure_ascii=False)}"
+        )
+        try:
+            data = await _post({
+                "messages":    [{"role":"system","content":SYSTEM},
+                                {"role":"user","content":USER}],
+                "max_tokens":  4000,
+                "temperature": 0.05,
+            })
+            txt = data["choices"][0]["message"]["content"].strip()
+            txt = re.sub(r"```json\s*|\s*```", "", txt).strip()
+            for item in json.loads(txt):
+                oi = item.get("idx", -1)
+                ci = item.get("correct_idx", 0)
+                ex = item.get("explanation", "")
+                if 0 <= oi < len(questions):
+                    opts = questions[oi].get("options", [])
+                    if 0 <= ci < len(opts):
+                        questions[oi]["correct"]    = opts[ci]
+                        questions[oi]["explanation"] = f"🤖 {ex}" if ex else ""
+                        questions[oi]["_ai_solved"]  = True
+                        solved += 1
+        except Exception as e:
+            log.error(f"Batch {bn} xato: {e}")
+
+    total_t = int(time.time() - t0)
+    m, s = divmod(total_t, 60)
+    if msg:
+        try:
+            await msg.edit_text(
+                f"✅ <b>AI tugatdi!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"[{_bar(total_batches, total_batches)}] {total_batches}/{total_batches}\n"
+                f"📊 {solved}/{total_q} savol yechildi\n"
+                f"⏱ {m}:{s:02d}",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+    return questions
+
+@router.callback_query(F.data == "method_poll", CreateTest.choose_method)
+async def method_poll(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(questions=[], poll_time=30)
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="✅ Tayyor", callback_data="finish_polls"))
+    b.row(InlineKeyboardButton(text="❌ Bekor",  callback_data="cancel_create"))
+    await callback.message.edit_text(
+        "<b>📊 QUIZBOT FORWARD</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "1️⃣ @QuizBot ga o'ting\n"
+        "2️⃣ Quiz savollarini bu yerga forward qiling\n"
+        "3️⃣ Hammasi yuborilgach — <b>✅ Tayyor</b> bosing\n\n"
+        "<i>💡 Faqat 'Viktorina' (Quiz) turi qabul qilinadi!</i>",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+    # Yo'riqnoma xabarini progress sifatida saqlash (birinchi poll kelganda o'chiriladi)
+    uid = callback.from_user.id
+    _poll_progress[uid] = callback.message.message_id
+    _poll_count[uid] = 0
+    await state.set_state(CreateTest.waiting_polls)
+
+
+@router.message(F.poll, CreateTest.waiting_polls)
+async def catch_poll(message: Message, state: FSMContext):
+    if message.poll.type != "quiz":
+        await _del(message.bot, message.chat.id, message.message_id)
+        return await message.answer("❌ Faqat <b>Viktorina (Quiz)</b> turi qabul qilinadi!")
+
+    import re as _re
+    p    = message.poll
+    lts  = ["A)", "B)", "C)", "D)", "E)", "F)"]
+    opts = [f"{lts[i]} {op.text}" for i, op in enumerate(p.options)]
+
+    # QuizBot [N/N] raqamlarini olib tashlash
+    clean_q = _re.sub(r"^\[\d+/\d+\]\s*", "", p.question).strip()
+
+    d  = await state.get_data()
+    qs = d.get("questions", [])
+    qs.append({
+        "type":        "multiple_choice",
+        "question":    clean_q,
+        "options":     opts,
+        "correct":     opts[p.correct_option_id],
+        "explanation": p.explanation or "",
+        "points":      1
+    })
+    await state.update_data(questions=qs)
+
+    # Poll xabarini o'chirish
+    await _del(message.bot, message.chat.id, message.message_id)
+
+    # Debounce: 0.8s kutib, oxirgi sanoq bilan bitta progress xabar yuboradi
+    uid = message.from_user.id
+    _poll_count[uid] = len(qs)
+    old_task = _poll_debounce.pop(uid, None)
+    if old_task:
+        old_task.cancel()
+    task = asyncio.create_task(_flush_polls(message.bot, message.chat.id, uid))
+    _poll_debounce[uid] = task
+
+
+@router.callback_query(F.data == "finish_polls", CreateTest.waiting_polls)
+async def finish_polls(callback: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    if not d.get("questions"):
+        return await callback.answer("❌ Hali savol yo'q!", show_alert=True)
+    await callback.answer()
+    b = InlineKeyboardBuilder()
+    for s in POLL_TIMES:
+        b.add(InlineKeyboardButton(text=f"⏱ {s}s", callback_data=f"ptime_{s}"))
+    b.adjust(3)
+    b.row(InlineKeyboardButton(text="♾ Vaqtsiz", callback_data="ptime_0"))
+    b.row(InlineKeyboardButton(text="❌ Bekor",   callback_data="cancel_create"))
+    await callback.message.edit_text(
+        f"<b>⏱ POLL VAQTI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ {len(d['questions'])} ta savol qabul qilindi!\n\n"
+        f"Har bir savol uchun necha soniya?",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+    await state.set_state(CreateTest.set_poll_time)
+
+
+@router.callback_query(F.data.startswith("ptime_"))
+async def set_pt(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    pt  = int(callback.data[6:])
+    await state.update_data(poll_time=pt)
+    ptt = f"{pt} soniya/savol" if pt else "Vaqtsiz"
+    await callback.message.edit_text(
+        f"⏱ <b>Savol vaqti: {ptt}</b>\n\n"
+        f"📁 Qaysi fanga tegishli?",
+        reply_markup=subject_kb(extra_subjects=_get_user_subjects(callback.from_user.id))
+    )
+    await state.set_state(CreateTest.set_subject)
+
+
+# ═══════════════════════════════════════════════════════════
+# 4. FAN, MAVZU, SOZLAMALAR
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("subj_"), CreateTest.set_subject)
+async def set_subj(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    s = callback.data[5:]
+    if s == "other":
+        return await callback.message.edit_text(
+            "✏️ <b>Fan nomini yozing:</b>\n"
+            "<i>Masalan: Fizika, Ona tili, Tarix...</i>"
+        )
+    await state.update_data(category=s)
+    await callback.message.edit_text(
+        f"📁 Fan: <b>{s}</b>\n\n"
+        f"<b>🏷 Test nomini yozing:</b>"
+    )
+    await state.set_state(CreateTest.set_title)
+
+
+@router.message(F.text, CreateTest.set_subject)
+async def subj_text(message: Message, state: FSMContext):
+    subj = message.text.strip()
+    await state.update_data(category=subj)
+    await _del(message.bot, message.chat.id, message.message_id)
+    # Maxsus fan nomini RAM ga saqlash
+    from utils.ram_cache import add_user_custom_subject
+    add_user_custom_subject(message.from_user.id, subj)
+    await message.answer("<b>🏷 Test nomini yozing:</b>")
+    await state.set_state(CreateTest.set_title)
+
+
+@router.message(F.text, CreateTest.set_title)
+async def set_title(message: Message, state: FSMContext):
+    await state.update_data(title=message.text.strip())
+    await _del(message.bot, message.chat.id, message.message_id)
+    await message.answer(
+        f"<b>📊 QIYINLIK DARAJASI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Mavzu: <b>{message.text.strip()}</b>",
+        reply_markup=difficulty_kb()
+    )
+    await state.set_state(CreateTest.set_difficulty)
+
+
+@router.callback_query(F.data.startswith("diff_"), CreateTest.set_difficulty)
+async def set_diff(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(difficulty=callback.data[5:])
+    b = InlineKeyboardBuilder()
+    for m in [15, 20, 30, 45, 60, 90, 120]:
+        b.add(InlineKeyboardButton(text=f"⏱ {m}daq", callback_data=f"tlim_{m}"))
+    b.adjust(3)
+    b.row(InlineKeyboardButton(text="♾ Cheksiz", callback_data="tlim_0"))
+    await callback.message.edit_text(
+        "<b>⏱ UMUMIY VAQT LIMITI</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Test uchun umumiy necha daqiqa?",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+    await state.set_state(CreateTest.set_time_limit)
+
+
+@router.callback_query(F.data.startswith("tlim_"), CreateTest.set_time_limit)
+async def set_tlim(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(time_limit=int(callback.data[5:]))
+    b = InlineKeyboardBuilder()
+    for p in [50, 60, 70, 80, 90, 100]:
+        b.add(InlineKeyboardButton(text=f"{p}%", callback_data=f"pass_{p}"))
+    b.adjust(3)
+    await callback.message.edit_text(
+        "<b>🎯 O'TISH FOIZI</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Testdan o'tish uchun minimum foiz?",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+    await state.set_state(CreateTest.set_passing)
+
+
+@router.callback_query(F.data.startswith("pass_"), CreateTest.set_passing)
+async def set_pass(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(passing_score=int(callback.data[5:]))
+    b = InlineKeyboardBuilder()
+    for a in [1, 2, 3, 5, 10]:
+        b.add(InlineKeyboardButton(text=f"🔄 {a}x", callback_data=f"att_{a}"))
+    b.adjust(3)
+    b.row(InlineKeyboardButton(text="♾ Cheksiz", callback_data="att_0"))
+    await callback.message.edit_text(
+        "<b>🔄 URINISHLAR SONI</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Har foydalanuvchi necha marta ishlashi mumkin?",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+    await state.set_state(CreateTest.set_attempts)
+
+
+@router.callback_query(F.data.startswith("att_"), CreateTest.set_attempts)
+async def set_att(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(max_attempts=int(callback.data[4:]))
+    from config import ADMIN_IDS as _AIDS
+    _is_adm = callback.from_user.id in _AIDS
+    await callback.message.edit_text(
+        "<b>🔒 TEST MAXFIYLIGI</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🌍 <b>Ommaviy</b> — hamma ko'ra oladi\n"
+        "🔗 <b>Ssilka</b> — faqat havola orqali\n"
+        "🔒 <b>Shaxsiy</b> — faqat siz"
+        + ("\n♻️ <b>Almashtirish</b> — eski test kodi saqlanadi, "
+           "mazmuni shu yangi test bilan to'liq yangilanadi" if _is_adm else ""),
+        reply_markup=visibility_kb(is_admin=_is_adm)
+    )
+    await state.set_state(CreateTest.set_visibility)
+
+
+# ═══════════════════════════════════════════════════════════
+# 5. SAQLASH
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("vis_") & (F.data != "vis_replace"), CreateTest.set_visibility)
+async def save_test(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("⏳")
+    uid = callback.from_user.id
+    # Double-click himoyasi: bir vaqtda faqat bitta saqlash
+    if uid in _save_in_progress:
+        return await callback.answer("⏳ Test saqlanmoqda...", show_alert=True)
+    _save_in_progress.add(uid)
+    try:
+        await _do_save_test(callback, state)
+    finally:
+        _save_in_progress.discard(uid)
+
+
+async def _do_save_test(callback: CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    chosen_vis = callback.data[4:]
+
+    # ── Ommaviy test faqat teacher/admin ━━━━━━━━━━━━━━━━━━━━━━━━
+    if chosen_vis == "public":
+        from config import ADMIN_IDS
+        from utils.roles import can_create_public_test
+        if not can_create_public_test(uid, ADMIN_IDS):
+            b = InlineKeyboardBuilder()
+            b.row(InlineKeyboardButton(text="🔗 Havola orqali", callback_data="vis_link"))
+            b.row(InlineKeyboardButton(text="🔒 Shaxsiy",       callback_data="vis_private"))
+            b.row(InlineKeyboardButton(text="❌ Bekor",         callback_data="cancel_create"))
+            await callback.message.edit_text(
+                "🔒 <b>Ommaviy test cheklangan</b>\n\n"
+                "❌ Ommaviy test yaratish faqat <b>Teacher</b> va <b>Admin</b> uchun.\n\n"
+                "✅ Student sifatida:\n"
+                "  🔗 <b>Havola orqali</b> — havola bilganlarga\n"
+                "  🔒 <b>Shaxsiy</b> — faqat siz\n\n"
+                "💡 Teacher bo'lish uchun adminga murojaat qiling.",
+                parse_mode="HTML",
+                reply_markup=b.as_markup()
+            )
+            return
+    # ━━━━━━━━━━━━━━━━━━━━━━━━
+    d = await state.get_data()
+
+    # ── 💰 COIN: yaratish narxini yechish (admin bepul, teacher chegirma) ──
+    from utils import coins as C
+    _qs_for_cost = d.get("questions", [])
+    cost = C.create_cost(uid, len(_qs_for_cost))
+    if cost > 0 and not C.spend_coins(uid, cost, f"create {len(_qs_for_cost)}q"):
+        bu0 = (await callback.bot.me()).username
+        _ref_link = f"https://t.me/{bu0}?start=ref{uid}"
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(
+            text="👥 Do'st chaqirish (+coin)",
+            switch_inline_query=f"\n👋 Men bilan testlar yeching! {_ref_link}"))
+        b.row(InlineKeyboardButton(
+            text="🔗 Referal havolamni olish",
+            callback_data="coins_my_ref"))
+        from config import ADMIN_USERNAME
+        b.row(InlineKeyboardButton(
+            text="💳 Hisob to'ldirish (admin)",
+            url=f"https://t.me/{ADMIN_USERNAME}"))
+        b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="cancel_create"))
+        await callback.message.edit_text(
+            C.insufficient_text(uid, cost, "Test yaratish"),
+            reply_markup=b.as_markup())
+        return
+
+    td = {
+        "title":         d.get("title", "Nomsiz"),
+        "category":      d.get("category", "Boshqa"),
+        "difficulty":    d.get("difficulty", "medium"),
+        "visibility":    chosen_vis,
+        "time_limit":    d.get("time_limit", 0),
+        "poll_time":     d.get("poll_time", 30),
+        "passing_score": d.get("passing_score", 60),
+        "max_attempts":  d.get("max_attempts", 0),
+        "questions":     d.get("questions", []),
+    }
+    tid  = await create_test(
+        callback.from_user.id, td,
+        creator_name=callback.from_user.full_name or "",
+        creator_username=callback.from_user.username or "",
+    )
+    bu   = (await callback.bot.me()).username
+    link = f"https://t.me/{bu}?start={tid}"
+    pt_t = f"{td['poll_time']}s/savol" if td.get("poll_time") else "Vaqtsiz"
+    tl_t = f"{td['time_limit']} daqiqa" if td.get("time_limit") else "Cheksiz"
+    diff_map = {
+        "easy": "🟢 Oson", "medium": "🟡 O'rtacha",
+        "hard": "🔴 Qiyin", "expert": "⚡ Ekspert"
+    }
+    diff = diff_map.get(td["difficulty"], "")
+    vis_map = {"public": "🌍 Ommaviy", "link": "🔗 Ssilka", "private": "🔒 Shaxsiy"}
+    vis  = vis_map.get(td["visibility"], "")
+
+    await state.clear()
+
+    # Kalit javoblar matni
+    qs   = td["questions"]
+    keys = (
+        f"🔑 <b>JAVOBLAR KALITI</b> — <code>{tid}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    for i, q in enumerate(qs, 1):
+        corr = q.get("correct", "?")
+        keys += f"<b>{i}.</b> {corr}\n"
+
+    # Test haqida to'liq ma'lumot + kalit + tugmalar
+    info_text = (
+        "🎉 <b>TEST MUVAFFAQIYATLI YARATILDI!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 Kod: <code>{tid}</code>\n"
+        f"🔗 Ssilka: <code>{link}</code>\n\n"
+        f"📝 Mavzu: <b>{td['title']}</b>\n"
+        f"📁 Fan: {td['category']}\n"
+        f"📊 Qiyinlik: {diff}\n"
+        f"🔒 Ko'rinish: {vis}\n"
+        f"📋 Savollar: <b>{len(qs)} ta</b>\n"
+        f"⏱ Umumiy vaqt: {tl_t}\n"
+        f"⏱ Poll vaqti: {pt_t}\n"
+        f"🎯 O'tish foizi: <b>{td['passing_score']}%</b>\n"
+        f"{f'💰 Sarflandi: <b>{cost} coin</b> | Qoldiq: <b>{C.get_balance(uid)}</b>' if cost > 0 else '💰 Bepul (admin)'}\n\n"
+        "👇 <b>Boshlash usulini tanlang:</b>"
+    )
+
+    try:
+        await callback.message.edit_text(info_text, reply_markup=test_created_kb(tid, bu))
+    except Exception:
+        await callback.message.answer(info_text, reply_markup=test_created_kb(tid, bu))
+
+    # Kalitni alohida xabar sifatida yuborish
+    if len(keys) <= 4000:
+        await callback.message.answer(keys)
+
+    # ── Baza guruhiga e'lon qilish ──
+    try:
+        from utils.baza_publisher import publish_to_baza
+        await publish_to_baza(
+            bot           = callback.bot,
+            tid           = tid,
+            title         = td["title"],
+            questions     = td["questions"],
+            creator_id    = uid,
+            creator_name  = callback.from_user.full_name or "",
+            bot_username  = bu,
+            category      = td.get("category", ""),
+            difficulty    = td.get("difficulty", "medium"),
+            passing_score = td.get("passing_score", 60),
+        )
+    except Exception as _bpe:
+        import logging
+        logging.getLogger(__name__).warning(f"Baza publish xato: {_bpe}")
+
+
 @router.callback_query(F.data == "cancel_create")
 async def cancel_create(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════
+# ♻️ ESKI TESTNI ALMASHTIRISH (faqat admin)
+#    Yangi test tayyor bo'lgach, eski test KODI kiritiladi —
+#    o'sha kod ostidagi test to'liq yangisi bilan yoziladi.
+#    Tarqatilgan havolalar o'zgarmaydi.
+# ═══════════════════════════════════════════════════════════
+@router.callback_query(F.data == "vis_replace", CreateTest.set_visibility)
+async def vis_replace_start(callback: CallbackQuery, state: FSMContext):
+    from config import ADMIN_IDS
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("🚫 Faqat admin", show_alert=True)
+    await callback.answer()
+    d = await state.get_data()
+    qc = len(d.get("questions", []))
+    await state.set_state(CreateTest.replace_code)
+    await callback.message.edit_text(
+        "♻️ <b>ESKI TESTNI ALMASHTIRISH</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 Yangi test: <b>{qc} ta savol</b> tayyor.\n\n"
+        "Qaysi testni almashtiramiz?\n"
+        "Eski test <b>KODI</b>ni yuboring (masalan: <code>AB12CD34</code>).\n\n"
+        "⚠️ Eski test mazmuni to'liq yangisi bilan yoziladi,\n"
+        "lekin kodi, havolasi va statistikasi saqlanadi.\n"
+        "🗄 Eski versiya zaxiraga olinadi (tiklash mumkin).\n\n"
+        "❌ Bekor qilish: /cancel",
+    )
+
+
+@router.message(CreateTest.replace_code)
+async def vis_replace_code(message: Message, state: FSMContext):
+    from config import ADMIN_IDS
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    code = (message.text or "").strip().upper()
+    if code in ("/CANCEL", "BEKOR"):
+        await state.clear()
+        return await message.answer("❌ Bekor qilindi.")
+    import re as _re
+    code = _re.sub(r"[^A-Z0-9_]", "", code)
+    if not code or len(code) < 4:
+        return await message.answer("❌ Noto'g'ri kod. Qayta yuboring yoki /cancel")
+
+    from utils.ram_cache import get_test_meta as _gtm
+    old_meta = _gtm(code)
+    if not old_meta:
+        return await message.answer(
+            f"❌ <code>{code}</code> topilmadi.\n"
+            "Kodni tekshirib qayta yuboring yoki /cancel")
+
+    d = await state.get_data()
+    await state.update_data(replace_tid=code)
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="✅ Ha, almashtirilsin",
+                               callback_data="replace_confirm"))
+    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_create"))
+    await message.answer(
+        "♻️ <b>TASDIQLASH</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 Kod: <code>{code}</code>\n"
+        f"📝 Eski: <b>{old_meta.get('title','?')}</b> "
+        f"({old_meta.get('question_count',0)} savol)\n"
+        f"📝 Yangi: <b>{d.get('title','Nomsiz')}</b> "
+        f"({len(d.get('questions',[]))} savol)\n\n"
+        "Eski test mazmuni butunlay almashtiriladi. Davom etamizmi?",
+        reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data == "replace_confirm", CreateTest.replace_code)
+async def vis_replace_confirm(callback: CallbackQuery, state: FSMContext):
+    from config import ADMIN_IDS
+    uid = callback.from_user.id
+    if uid not in ADMIN_IDS:
+        return await callback.answer("🚫", show_alert=True)
+    await callback.answer()
+    d   = await state.get_data()
+    tid = d.get("replace_tid", "")
+    old = None
+    try:
+        from utils.ram_cache import get_test_meta as _gtm
+        old = _gtm(tid)
+    except Exception:
+        pass
+    if not tid or not old:
+        await state.clear()
+        return await callback.message.edit_text("❌ Eski test topilmadi.")
+
+    td = {
+        "title":         d.get("title", old.get("title", "Nomsiz")),
+        "category":      d.get("category", old.get("category", "Boshqa")),
+        "difficulty":    d.get("difficulty", old.get("difficulty", "medium")),
+        "visibility":    old.get("visibility", "link"),   # ko'rinish saqlanadi
+        "time_limit":    d.get("time_limit", old.get("time_limit", 0)),
+        "poll_time":     d.get("poll_time", old.get("poll_time", 30)),
+        "passing_score": d.get("passing_score", old.get("passing_score", 60)),
+        "max_attempts":  d.get("max_attempts", old.get("max_attempts", 0)),
+        "questions":     d.get("questions", []),
+        "creator_id":        old.get("creator_id", uid),
+        "creator_name":      old.get("creator_name", ""),
+        "creator_username":  old.get("creator_username", ""),
+    }
+    await state.clear()
+    wait = await callback.message.edit_text("♻️ <b>Almashtirilmoqda...</b>")
+
+    from utils import tg_db
+    res = await tg_db.replace_test_full(tid, td, replaced_by=uid)
+    if not res.get("ok"):
+        return await wait.edit_text(f"❌ Xato: {res.get('error')}")
+
+    bu   = (await callback.bot.me()).username
+    link = f"https://t.me/{bu}?start={tid}"
+    await wait.edit_text(
+        "✅ <b>TEST ALMASHTIRILDI!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 Kod (o'zgarmadi): <code>{tid}</code>\n"
+        f"🔗 Ssilka: <code>{link}</code>\n"
+        f"📝 Yangi nom: <b>{td['title']}</b>\n"
+        f"📋 Savollar: {res['old_qc']} → <b>{res['new_qc']} ta</b>\n\n"
+        "🗄 Eski versiya zaxirada (O'chirilgan testlar bo'limida).\n"
+        "📢 Hammaga qayta tarqatish SHART EMAS — eski havola ishlaydi.",
+        reply_markup=test_created_kb(tid, bu))
     try:
         await callback.message.delete()
     except Exception:

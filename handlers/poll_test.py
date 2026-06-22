@@ -11,6 +11,7 @@ from utils.ram_cache import get_test_by_id, get_daily, is_test_paused, get_test_
 from utils.states import PollTest
 from utils.scoring import calculate_score, format_result
 from keyboards.keyboards import main_kb, result_kb, poll_pause_kb, poll_control_reply_kb, poll_pause_reply_kb
+from utils.poll_safe import sanitize_poll, sanitize_explanation
 
 log    = logging.getLogger(__name__)
 router = Router()
@@ -59,7 +60,7 @@ async def route_poll_answer(poll_answer: PollAnswer, state: FSMContext, bot=None
     if not poll_answer.option_ids:
         return
     qi  = pmap[pid]
-    q   = d["qs"][qi] if qi < len(d["qs"]) else {}
+    q   = (d.get("qs") or [{}]*(qi+1))[qi] if qi < len(d.get("qs",[])) else {}
     ans = d.get("ans", {})
     ch  = LT[poll_answer.option_ids[0]] if poll_answer.option_ids[0] < len(LT) else str(poll_answer.option_ids[0])
     if q.get("type") == "true_false":
@@ -232,8 +233,10 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
         all_qs = all_qs[:demo_count]
 
     # Variantlarni aralashtirish + savol matni variantdan olib tashlash
-    LABELS = ["A","B","C","D","E","F","G","H"]
-    def _strip(o): return _re.sub(r"^[A-Ha-h]\s*[).:]\s*", "", str(o)).strip()
+    # LABELS Telegram limiti (10) bilan mos — aks holda IndexError bo'ladi
+    LABELS = ["A","B","C","D","E","F","G","H","I","J"]
+    MAX_OPT = len(LABELS)
+    def _strip(o): return _re.sub(r"^[A-Ja-j]\s*[).:]\s*", "", str(o)).strip()
     for q in all_qs:
         if q.get("type") not in ("multiple_choice", "multiple", "multi_select"):
             continue
@@ -250,9 +253,12 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
             else _strip(corr) if isinstance(corr, str) else None
         )
         random.shuffle(pure)
-        # Telegram poll max 10 variant qabul qiladi
-        # LABELS 8 ta — 8 dan ortiq bo'lsa kesib olamiz
-        pure = pure[:len(LABELS)]
+        # Telegram poll max 10 variant — to'g'ri javobni saqlab kesamiz
+        if len(pure) > MAX_OPT:
+            if corr_text is not None and corr_text in pure and pure.index(corr_text) >= MAX_OPT:
+                pure = pure[:MAX_OPT-1] + [corr_text]
+            else:
+                pure = pure[:MAX_OPT]
         q["options"] = [f"{LABELS[i]}) {t}" for i, t in enumerate(pure)]
         if corr_text is not None:
             # corr_text pure ichida bo'lmasligi mumkin (kesib tashlangan)
@@ -316,36 +322,33 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
 
 async def _send_poll(bot, cid, state):
     d   = await state.get_data()
-    qs  = d["qs"]
-    idx = d["idx"]
+    qs  = d.get("qs") or []
+    idx = d.get("idx", 0)
+    if not qs:
+        log.warning(f"_send_poll: state'da qs yo'q (cid={cid}) — sessiya yakunlanadi")
+        _cancel_timer(cid)
+        await state.clear()
+        return
     if idx >= len(qs):
         await _finish_poll(bot, cid, state, d)
         return
     q  = qs[idx]
     pt = d.get("pt", 30)
+    is_tf = q.get("type") == "true_false"
 
     opts = []
     for opt in q.get("options", []):
         ot = str(opt).split(")", 1)[-1].strip() if ")" in str(opt) else str(opt)
-        opts.append(ot[:95] + "..." if len(ot) > 95 else ot)
-    if q.get("type") == "true_false" or not opts:
-        opts = ["Ha", "Yo'q"]
+        opts.append(ot)
 
     corr = q.get("correct","")
-    if q.get("type") == "true_false":
+    if is_tf:
         ci = 0 if "ha" in str(corr).lower() else 1
     elif isinstance(corr, int):
         ci = corr
     else:
         m  = re.match(r"^([A-Za-z])", str(corr).strip())
         ci = (ord(m.group(1).upper()) - ord("A")) if m else 0
-    ci = max(0, min(ci, len(opts) - 1))
-
-    expl = q.get("explanation","") or None
-    if expl and expl in ("Izoh kiritilmagan.","Izoh yo'q","Izoh kiritilmagan"):
-        expl = None
-    if expl and len(expl) > 195:
-        expl = expl[:195] + "..."
 
     qtxt = q.get("question", q.get("text","Savol"))
     qtxt = re.sub(r'^\[\d+/\d+\]\s*', '', qtxt).strip()
@@ -364,13 +367,16 @@ async def _send_poll(bot, cid, state):
             log.error(f"Poll rasm xato: {e}")
 
     hdr  = f"[{idx+1}/{len(qs)}] "
-    if len(hdr + qtxt) > 295:
-        qtxt = qtxt[:295 - len(hdr)] + "..."
+
+    # ── Telegram cheklovlariga moslab xavfsizlantirish ──
+    # (bo'sh matn / "<" belgisi / 10+ variant muammolarini bartaraf etadi)
+    question, opts, ci = sanitize_poll(hdr + qtxt, opts, ci, true_false=is_tf)
+    expl = sanitize_explanation(q.get("explanation"))
 
     await state.update_data(answered_this=False)
     try:
         pm = await bot.send_poll(
-            chat_id=cid, question=hdr+qtxt, options=opts,
+            chat_id=cid, question=question, options=opts,
             type="quiz", correct_option_id=ci, explanation=expl,
             is_anonymous=False, open_period=pt if pt > 0 else None
         )
@@ -546,7 +552,7 @@ async def force_start_poll(callback: CallbackQuery, state: FSMContext):
 
 async def _finish_poll(bot, cid, state, d):
     test     = d["test"]
-    qs       = d["qs"]
+    qs       = d.get("qs") or []
     ans      = d.get("ans", {})
     elapsed  = int(time.time() - d.get("t0", time.time()))
     uid      = d.get("uid", cid)
