@@ -1,5 +1,5 @@
 """⌨️ BARCHA KLAVIATURALAR"""
-from aiogram.types import (InlineKeyboardMarkup, InlineKeyboardButton, SwitchInlineQueryChosenChat,
+from aiogram.types import (InlineKeyboardMarkup, InlineKeyboardButton,
                             ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import SUBJECTS
@@ -87,7 +87,7 @@ def main_kb(uid=None, chat_type="private"):
         [KeyboardButton(text="📊 Natijalarim"),       KeyboardButton(text="🏆 Reyting")],
         [KeyboardButton(text="🗂 Mening testlarim"),  KeyboardButton(text="👥 Referallarim")],
         [KeyboardButton(text="👤 Profil"),            KeyboardButton(text="ℹ️ Yordam")],
-        [KeyboardButton(text="🌐 Saytga kirish")],
+        [KeyboardButton(text="🌐 Saytga kirish"),    KeyboardButton(text="💰 Balansim")],
     ]
     if uid:
         from config import ADMIN_IDS
@@ -153,19 +153,7 @@ def test_created_kb(tid, bot_username=""):
         InlineKeyboardButton(text="🌐 Web test",  url=_web),
         InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
     )
-    b.row(
-        InlineKeyboardButton(
-            text="📨 Testni ulashish",
-            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                query=f"test_{tid}",
-                allow_user_chats=True,
-                allow_bot_chats=False,
-                allow_group_chats=True,
-                allow_channel_chats=True,
-            )
-        ),
-    )
-    b.row(InlineKeyboardButton(text="📤 Inline ulashish", switch_inline_query=f"test_{tid}"))
+    b.row(InlineKeyboardButton(text="📤 Ulashish", switch_inline_query=f"test_{tid}"))
     b.row(InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="main_menu"))
     return b.as_markup()
 
@@ -179,19 +167,7 @@ def result_kb(tid, rid):
         InlineKeyboardButton(text="🌐 Web test",  url=_web),
         InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
     )
-    b.row(
-        InlineKeyboardButton(
-            text="📨 Testni ulashish",
-            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                query=f"test_{tid}",
-                allow_user_chats=True,
-                allow_bot_chats=False,
-                allow_group_chats=True,
-                allow_channel_chats=True,
-            )
-        ),
-    )
-    b.row(InlineKeyboardButton(text="📤 Inline ulashish", switch_inline_query=f"test_{tid}"))
+    b.row(InlineKeyboardButton(text="📤 Ulashish",    switch_inline_query=f"test_{tid}"))
     b.row(InlineKeyboardButton(text="🏠 Bosh sahifa", callback_data="main_menu"))
     return b.as_markup()
 
@@ -349,11 +325,14 @@ def difficulty_kb():
     b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_create"))
     return b.as_markup()
 
-def visibility_kb():
+def visibility_kb(is_admin: bool = False):
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="🌍 Ommaviy",       callback_data="vis_public"))
     b.row(InlineKeyboardButton(text="🔗 Ssilka orqali", callback_data="vis_link"))
     b.row(InlineKeyboardButton(text="🔒 Shaxsiy",       callback_data="vis_private"))
+    if is_admin:
+        b.row(InlineKeyboardButton(text="♻️ Eski testni almashtirish",
+                                   callback_data="vis_replace"))
     b.row(InlineKeyboardButton(text="❌ Bekor",          callback_data="cancel_create"))
     return b.as_markup()
 
@@ -369,25 +348,15 @@ def mytest_settings_kb(tid, is_paused=False, is_admin=False):
         url=edit_url
     ))
     b.row(
-        InlineKeyboardButton(
-            text="📨 Testni ulashish",
-            switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                query=f"test_{tid}",
-                allow_user_chats=True,
-                allow_bot_chats=False,
-                allow_group_chats=True,
-                allow_channel_chats=True,
-            )
-        ),
-    )
-    b.row(
-        InlineKeyboardButton(text="📤 Inline ulashish",    switch_inline_query=f"test_{tid}"),
+        InlineKeyboardButton(text="📤 Ulashish",           switch_inline_query=f"test_{tid}"),
         InlineKeyboardButton(text="🔍 Demo ulashish",      switch_inline_query=f"demo_{tid}"),
     )
     b.row(
         InlineKeyboardButton(text="📊 Kim yechgan",        callback_data=f"test_solvers_{tid}_0"),
         InlineKeyboardButton(text="✂️ Bo'lish",           callback_data=f"mytest_txt_{tid}"),
     )
+    b.row(InlineKeyboardButton(text="🤖 AI bilan qayta yechish",
+                               callback_data=f"aisolve_{tid}"))
     if is_admin:
         b.row(
             InlineKeyboardButton(text="📨 Quiz Poll export",
@@ -401,12 +370,6 @@ def mytest_settings_kb(tid, is_paused=False, is_admin=False):
     )
     b.row(
         InlineKeyboardButton(text="✏️ Nomini o'zgartirish", callback_data=f"edit_title_{tid}"),
-    )
-    b.row(
-        InlineKeyboardButton(text="🤖 AI bilan qayta yechish", callback_data=f"reai_{tid}"),
-    )
-    b.row(
-        InlineKeyboardButton(text="📄 Yangi fayl yuklash",     callback_data=f"reupload_{tid}"),
     )
     b.row(
         InlineKeyboardButton(text="🔄 Urinishlar soni", callback_data=f"edit_att_{tid}"),
