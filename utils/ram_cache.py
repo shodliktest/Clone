@@ -5,15 +5,15 @@ FAYLLAR (TG kanalda):
   index.json              ← pinned, barcha meta
   users_list_N.json       ← 10MB gacha, uid+ism+role (lazy load emas, startup da)
   user_stats_N.json       ← 50 userdan stats (1 soatda o'zgarganlar)
-  user_analysis_{uid}.json← max 30 test tahlil (lazy, 2 soat TTL RAMda)
+  user_analysis_{uid}.json← max 30 test tahlil (lazy, 24 soat TTL RAMda)
   leaderboard.json        ← global top 20 (1 soatda)
   group_lb_{date}.json    ← guruh top 20, kunlik (1 soatda)
   tests_stats.json        ← test meta stats (2 daqiqada)
 
 RAM QOIDALARI:
   - Users ro'yxati: doim RAM (kichik)
-  - User stats: lazy (kimdir kirsa yuklanadi, 2 soat TTL)
-  - User tahlil: lazy (test yechilsa, 2 soat TTL)
+  - User stats: lazy (kimdir kirsa yuklanadi, 24 soat TTL) ← FIXED: 2h → 24h
+  - User tahlil: lazy (test yechilsa, 24 soat TTL) ← FIXED: 2h → 24h
   - Guruh natijalari: e'lon qilingach darhol o'chadi
   - Test savollari: 48 soat TTL
   - Global leaderboard: startup da yuklanadi
@@ -27,8 +27,8 @@ _lck = threading.Lock()
 _RAM: dict = {}
 
 RAM_LIMIT       = 450 * 1024 * 1024
-ANALYSIS_TTL_H  = 2    # 2 soat
-STATS_TTL_H     = 2    # 2 soat (user stats RAMda)
+ANALYSIS_TTL_H  = 24   # ✅ 2h → 24h — user analysis
+STATS_TTL_H     = 24   # ✅ 2h → 24h — user stats RAMda
 CACHE_TTL_HOURS = 48   # test savollari
 
 DEFAULT_SETTINGS = "uz_1_1"
@@ -113,7 +113,7 @@ def is_protect_content() -> bool:
 # ══ TEST META ══════════════════════════════════════════════════
 
 def get_tests_meta():
-    return [t for t in _get("tests_meta", []) if t.get("is_active", True)]
+    return [t for t in _get("tests_meta", []) if t.get("is_active", True) and not t.get("is_paused", False)]
 
 def get_all_tests_meta():
     return _get("tests_meta", [])
@@ -122,11 +122,12 @@ def set_tests_meta(m):
     _set("tests_meta", m)
 
 def get_test_meta(tid):
-    """Faqat aktiv testlarni qaytaradi (foydalanuvchilar uchun)"""
+    """Faqat aktiv, pauzalangan bo'lmagan testlarni qaytaradi (foydalanuvchilar uchun)"""
     return next((t for t in _get("tests_meta", [])
                  if t.get("test_id") == tid
                  and t.get("is_active", True)
-                 and not t.get("is_deleted", False)), {})
+                 and not t.get("is_deleted", False)
+                 and not t.get("is_paused", False)), {})
 
 def get_test_meta_any(tid):
     """Har qanday holatdagi testni qaytaradi (admin uchun)"""
@@ -168,7 +169,7 @@ def pause_test(tid, paused: bool):
     update_test_meta(tid, {"is_paused": paused})
 
 def is_test_paused(tid):
-    return get_test_meta(tid).get("is_paused", False)
+    return get_test_meta_any(tid).get("is_paused", False)
 
 def get_tests():       return get_tests_meta()
 def get_test_by_id(tid):
@@ -186,7 +187,8 @@ def set_tests(tests):
         meta = {k: v for k, v in t.items() if k != "questions"}
         meta["question_count"] = len(t.get("questions", []))
         metas.append(meta)
-        if t.get("is_active", True) and t.get("questions"):
+        # ✅ FIXED: BARCHA testlarni cache qil (pauzalangan ham)
+        if t.get("questions"):
             cache_questions(t["test_id"], t)
     _set("tests_meta", metas)
 
@@ -194,6 +196,7 @@ def add_test(test):
     meta = {k: v for k, v in test.items() if k != "questions"}
     meta["question_count"] = len(test.get("questions", []))
     add_test_meta(meta)
+    # ✅ FIXED: Test savollarini cache qil
     if test.get("questions"):
         cache_questions(test["test_id"], test)
 
@@ -311,7 +314,7 @@ def mark_users_dirty():  _set("users_dirty", True)
 def clear_users_dirty(): _set("users_dirty", False)
 
 
-# ══ USER STATS (lazy, 2 soat TTL) ══════════════════════════════
+# ══ USER STATS (lazy, 24 soat TTL) ═════════════════════════════
 #
 # stats_{uid} = {
 #   "data": {tid: {attempts, all_pcts, best_score, avg_score, last_at, passed}},
@@ -362,7 +365,7 @@ def clear_stats_dirty(uid):
         _set(_stats_key(str(uid)), e)
 
 def clear_expired_stats():
-    """2 soat ishlatilmagan user stats larni RAMdan o'chirish"""
+    """✅ 24 soat ishlatilmagan user stats larni RAMdan o'chirish (2h → 24h)"""
     now      = datetime.now(UTC)
     deadline = now - timedelta(hours=STATS_TTL_H)
     removed  = 0
@@ -375,7 +378,7 @@ def clear_expired_stats():
             del _RAM[k]
             removed += 1
     if removed:
-        log.info(f"RAM: {removed} user stats o'chirildi (2 soat TTL)")
+        log.info(f"RAM: {removed} user stats o'chirildi (24 soat TTL)")
     return removed
 
 
@@ -385,7 +388,7 @@ def save_result_to_ram(user_id, test_id, result, via_link=False):
     """
     Natijani RAMga saqlash.
     - Stats (foiz, attempts): doim RAM, TG ga 1 soatda
-    - Tahlil: 2 soat TTL, max 30 test
+    - Tahlil: 24 soat TTL, max 30 test ✅ FIXED: 2h → 24h
     """
     uid_str = str(user_id)
     rid     = f"{uid_str}_{test_id}"
@@ -418,7 +421,7 @@ def save_result_to_ram(user_id, test_id, result, via_link=False):
     }
     set_user_stats_cache(uid_str, stats, dirty=True)
 
-    # ── Tahlil (2 soat TTL, max 30) ──
+    # ── Tahlil (24 soat TTL, max 30) ✅ FIXED ──
     ana_key  = f"analysis_{uid_str}"
     analyses = _get(ana_key, {})
 
@@ -489,7 +492,7 @@ def get_test_stats_for_user(uid, tid):
     return get_test_entry(uid, tid)
 
 def clear_expired_analysis():
-    """2 soat ishlatilmagan tahlillarni RAMdan o'chirish"""
+    """✅ 24 soat ishlatilmagan tahlillarni RAMdan o'chirish (2h → 24h)"""
     now      = datetime.now(UTC)
     deadline = now - timedelta(hours=ANALYSIS_TTL_H)
     removed  = 0
@@ -503,7 +506,7 @@ def clear_expired_analysis():
                 _RAM.pop(f"analysis_{uid_str}", None)
                 removed += 1
     if removed:
-        log.info(f"RAM: {removed} user tahlili o'chirildi (2 soat TTL)")
+        log.info(f"RAM: {removed} user tahlili o'chirildi (24 soat TTL)")
     return removed
 
 def get_all_solvers_for_test(tid):
@@ -604,9 +607,10 @@ def update_group_leaderboard(uid_str, name, score, correct, total):
     _set("group_lb_dirty", True)
 
 def clear_group_leaderboard():
-    """Kun o'zgarganda tozalanadi"""
+    """Kun o'zgarganda tozalanadi — ✅ FIXED: Logic qo'shildi"""
     _set("group_leaderboard", [])
     _set("group_lb_dirty", False)
+    _set("group_lb_last_clear_date", str(datetime.now(UTC).date()))
 
 def is_group_lb_dirty():
     return _get("group_lb_dirty", False)
@@ -614,8 +618,18 @@ def is_group_lb_dirty():
 def clear_group_lb_dirty():
     _set("group_lb_dirty", False)
 
+def check_daily_group_lb_clear():
+    """✅ FIXED: Kunni almashtirish tekshiruvi — kunlik o'chirish"""
+    import datetime as dt
+    today = str(dt.datetime.now(UTC).date())
+    last_clear = _get("group_lb_last_clear_date", "")
+    if last_clear != today:
+        clear_group_leaderboard()
+        return True
+    return False
 
-# ══ MOSLIK — eski daily_results formati ═══════════════════════
+
+# ══ MOSLIK — eski daily_results formati ═══════════════════════════
 
 def get_daily():
     """Moslik uchun — stats cache dan daily format"""
