@@ -243,6 +243,8 @@ async def main():
     from handlers.referral        import router as r_referral
     from handlers.group_scheduler import router as r_scheduler
     from handlers.photo_upload    import router as r_photo
+    from handlers.coins_menu      import router as r_coins
+    from handlers.ai_resolve      import router as r_aisolve
 
     # Xavfsizlik sozlamasi (dinamik)
     from utils.ram_cache import is_protect_content
@@ -276,6 +278,8 @@ async def main():
     dp.include_router(r_referral)
     dp.include_router(r_scheduler)
     dp.include_router(r_photo)
+    dp.include_router(r_coins)
+    dp.include_router(r_aisolve)
     dp.include_router(webauth.router)
     dp.include_router(web_cmd.router)
     # TG DB boshlash
@@ -521,6 +525,8 @@ async def _main_no_signals():
     from handlers.referral        import router as r_referral
     from handlers.group_scheduler import router as r_scheduler
     from handlers.photo_upload    import router as r_photo
+    from handlers.coins_menu      import router as r_coins
+    from handlers.ai_resolve      import router as r_aisolve
 
     # Xavfsizlik sozlamasi
     from utils.ram_cache import is_protect_content
@@ -555,6 +561,8 @@ async def _main_no_signals():
     dp.include_router(r_referral)
     dp.include_router(r_scheduler)
     dp.include_router(r_photo)
+    dp.include_router(r_coins)
+    dp.include_router(r_aisolve)
     dp.include_router(webauth.router)
     dp.include_router(web_cmd.router)
 
