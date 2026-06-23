@@ -420,10 +420,6 @@ async def adm_test_detail(callback: CallbackQuery):
             text="🌐 Tahrirlash (web)",
             url=f"{WEBAPP_URL}/edit.html?id={tid}"
         ))
-        b.row(InlineKeyboardButton(
-            text="🤖 AI bilan qayta yechish",
-            callback_data=f"aisolve_{tid}"
-        ))
         b.row(InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"del_test_{tid}"))
     cat = meta.get("category","")[:30]
     b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"adm_cat_{cat}_0"))
@@ -688,47 +684,79 @@ async def broadcast_send(message: Message, state: FSMContext):
 
 # ══ GURUH E'LON ════════════════════════════════════════════════
 
-@router.callback_query(F.data == "admin_group_broadcast")
-async def group_broadcast_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    if not is_admin(callback.from_user.id): return
+GROUPS_PER_PAGE = 10
 
+async def _show_groups_page(msg, state: FSMContext, page: int = 0, edit: bool = True):
     groups = ram.get_known_groups()
-    active = {cid: g for cid, g in groups.items() if g.get("active", True)}
+    active_items = [(cid, g) for cid, g in groups.items() if g.get("active", True)]
 
-    if not active:
+    if not active_items:
         b = InlineKeyboardBuilder()
         b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+        text = (
+            "📣 <b>Guruh E'lon</b>\n\n"
+            "⚠️ Hali hech qaysi guruh yo'q.\n"
+            "Bot biror guruhga qo'shilganda bu ro'yxat to'ladi."
+        )
         try:
-            await callback.message.edit_text(
-                "📣 <b>Guruh E'lon</b>\n\n"
-                "⚠️ Hali hech qaysi guruh yo'q.\n"
-                "Bot biror guruhga qo'shilganda bu ro'yxat to'ladi.",
-                reply_markup=b.as_markup()
-            )
-        except TelegramBadRequest: pass
+            if edit:
+                await msg.edit_text(text, reply_markup=b.as_markup())
+            else:
+                await msg.answer(text, reply_markup=b.as_markup())
+        except TelegramBadRequest:
+            pass
         return
 
+    total_pages = (len(active_items) + GROUPS_PER_PAGE - 1) // GROUPS_PER_PAGE
+    page = max(0, min(page, total_pages - 1))
+    chunk = active_items[page * GROUPS_PER_PAGE:(page + 1) * GROUPS_PER_PAGE]
+    offset = page * GROUPS_PER_PAGE
+
     lines = [f"📣 <b>GURUH E'LON</b>\n"]
-    lines.append(f"Bot admin bo'lgan guruhlar: <b>{len(active)} ta</b>\n")
-    for i, (cid, g) in enumerate(active.items(), 1):
-        title    = g.get("title", "?")
-        members  = g.get("member_count", "?")
+    lines.append(f"Bot admin bo'lgan guruhlar: <b>{len(active_items)} ta</b>  |  Sahifa {page+1}/{total_pages}\n")
+    for i, (cid, g) in enumerate(chunk, offset + 1):
+        title   = g.get("title", "?")
+        members = g.get("member_count", "?")
         lines.append(f"{i}. <b>{title}</b> — {members} a'zo  <code>{cid}</code>")
 
     lines.append("\n✍️ Xabar yozing (matn, rasm, video — hammasi qo'llab-quvvatlanadi):")
 
     b = InlineKeyboardBuilder()
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm_grp_p{page-1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm_grp_p{page+1}"))
+    if nav:
+        b.row(*nav)
     b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="admin_panel"))
-    try:
-        await callback.message.edit_text(
-            "\n".join(lines),
-            reply_markup=b.as_markup()
-        )
-    except TelegramBadRequest:
-        await callback.message.answer("\n".join(lines), reply_markup=b.as_markup())
 
-    await state.set_state(AdminPanel.group_broadcast)
+    text = "\n".join(lines)
+    try:
+        if edit:
+            await msg.edit_text(text, reply_markup=b.as_markup())
+        else:
+            await msg.answer(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=b.as_markup())
+
+    if state:
+        await state.set_state(AdminPanel.group_broadcast)
+
+
+@router.callback_query(F.data == "admin_group_broadcast")
+async def group_broadcast_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await _show_groups_page(callback.message, state, page=0, edit=True)
+
+
+@router.callback_query(F.data.startswith("adm_grp_p"))
+async def group_broadcast_page(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    page = int(callback.data[9:])
+    await _show_groups_page(callback.message, state, page=page, edit=True)
 
 
 @router.message(AdminPanel.group_broadcast)
@@ -1556,3 +1584,150 @@ async def sec_protect_off(callback: CallbackQuery):
 
     await callback.answer("🔓 Himoya o'chirildi!", show_alert=True)
     await admin_security(callback)
+
+
+# ══ LOOP MONITOR ══════════════════════════════════════════════
+@router.callback_query(F.data == "adm_loops")
+async def adm_loops_cb(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await _show_loops(callback, edit=True)
+
+
+@router.callback_query(F.data == "adm_loops_refresh")
+async def adm_loops_refresh_cb(callback: CallbackQuery):
+    await callback.answer("🔄")
+    if not is_admin(callback.from_user.id): return
+    await _show_loops(callback, edit=True)
+
+
+@router.callback_query(F.data.startswith("adm_loop_restart_"))
+async def adm_loop_restart_cb(callback: CallbackQuery):
+    await callback.answer("♻️ Qayta boshlanmoqda...")
+    if not is_admin(callback.from_user.id): return
+    loop_name = callback.data[18:]
+
+    try:
+        import bot as _bot_mod
+        import asyncio
+
+        # Topilgan loop taskni bekor qilish
+        for task in asyncio.all_tasks():
+            if task.get_name() == loop_name and not task.done():
+                task.cancel()
+                try: await asyncio.wait_for(asyncio.shield(task), timeout=3)
+                except: pass
+                break
+
+        # web_sync_watchdog restart qilish (o'zi ichidan web_sync ni qaytadan boshlaydi)
+        if loop_name == "web_sync_watchdog":
+            asyncio.create_task(_bot_mod._web_sync_watchdog(), name="web_sync_watchdog")
+        elif loop_name == "auto_flush":
+            from utils import tg_db
+            asyncio.create_task(tg_db.auto_flush_loop(), name="auto_flush")
+        elif loop_name == "midnight_flush":
+            asyncio.create_task(_bot_mod._midnight_flush_loop(callback.bot), name="midnight_flush")
+        elif loop_name == "cache_cleanup":
+            asyncio.create_task(_bot_mod._cache_cleanup_loop(), name="cache_cleanup")
+
+        if hasattr(_bot_mod, "_beat"):
+            _bot_mod._beat(loop_name.replace("_watchdog", "").replace("web_sync_", "web_sync"), "restarted")
+
+    except Exception as e:
+        await callback.message.answer(f"❌ Restart xatosi: {e}")
+        return
+
+    await _show_loops(callback, edit=True)
+
+
+async def _show_loops(ev, edit=False):
+    import time as _t
+    try:
+        import bot as _bot_mod
+        health = _bot_mod.get_loop_health() if hasattr(_bot_mod, "get_loop_health") else {}
+    except Exception:
+        health = {}
+
+    now = _t.time()
+
+    STATUS_ICON = {
+        "ok":         "🟢",
+        "running":    "🔵",
+        "warn":       "🟡",
+        "error":      "🔴",
+        "timeout":    "🔴",
+        "cancelled":  "⚫",
+        "restarting": "🟡",
+        "restarted":  "🟢",
+        "starting":   "🔵",
+    }
+
+    LOOP_LABELS = {
+        "web_sync":     "🔄 Web Sync",
+        "auto_flush":   "💾 Auto Flush",
+        "midnight_flush": "🌙 Midnight Flush",
+        "cache_cleanup":  "🧹 Cache Cleanup",
+    }
+
+    lines = ["🔁 <b>LOOP MONITOR</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n"]
+    b = InlineKeyboardBuilder()
+
+    # Barcha looplar
+    loop_keys = ["web_sync", "auto_flush", "midnight_flush", "cache_cleanup"]
+    for key in loop_keys:
+        h     = health.get(key, {})
+        label = LOOP_LABELS.get(key, key)
+        if not h:
+            icon   = "⚫"
+            ago    = "ma'lumot yo'q"
+            errors = 0
+            status = "unknown"
+        else:
+            status  = h.get("status", "?")
+            icon    = STATUS_ICON.get(status, "⚪")
+            last_b  = h.get("last_beat", 0)
+            elapsed = int(now - last_b)
+            if elapsed < 120:     ago = f"{elapsed}s oldin"
+            elif elapsed < 3600:  ago = f"{elapsed//60}m oldin"
+            else:                 ago = f"{elapsed//3600}h {(elapsed%3600)//60}m oldin"
+            errors = h.get("errors", 0)
+            err_tx = h.get("error", "")
+
+        err_line = f"\n   ⚠️ <i>{err_tx[:60]}</i>" if h.get("error") else ""
+        lines.append(
+            f"{icon} <b>{label}</b>\n"
+            f"   Holat: <code>{status}</code> | Xatolar: {errors}\n"
+            f"   Oxirgi signal: {ago}{err_line}\n"
+        )
+        # Qayta boshlash tugmasi faqat muammoli looplarda
+        if status in ("error", "timeout", "cancelled", "unknown"):
+            watchdog_key = "web_sync_watchdog" if key == "web_sync" else key
+            b.row(InlineKeyboardButton(
+                text=f"♻️ {label} restart",
+                callback_data=f"adm_loop_restart_{watchdog_key}"
+            ))
+
+    # asyncio task holati
+    import asyncio
+    tasks = asyncio.all_tasks()
+    task_names = {t.get_name() for t in tasks if not t.done()}
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"⚙️ Aktiv tasklar: <b>{len(tasks)}</b>")
+    for expected in ["web_sync_watchdog", "auto_flush", "midnight_flush", "cache_cleanup"]:
+        exists = expected in task_names
+        lines.append(f"  {'✅' if exists else '❌'} {expected}")
+
+    b.row(
+        InlineKeyboardButton(text="🔄 Yangilash",  callback_data="adm_loops_refresh"),
+        InlineKeyboardButton(text="⬅️ Admin",      callback_data="admin_panel"),
+    )
+
+    text = "\n".join(lines)
+    msg = ev.message if hasattr(ev, "message") else ev
+    try:
+        if edit:
+            await msg.edit_text(text, reply_markup=b.as_markup())
+        else:
+            await msg.answer(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=b.as_markup())
