@@ -1,12 +1,12 @@
 """➕ TEST YARATISH — Fayl yoki QuizBot forward"""
-import os, re, logging, tempfile, asyncio
+import os, re, html, logging, tempfile, asyncio
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
 
-from utils.parser import parse_file
+from utils.parser import parse_file, check_images_in_file
 from utils.states import CreateTest
 from utils.db import create_test
 from keyboards.keyboards import subject_kb, difficulty_kb, visibility_kb, main_kb, test_created_kb
@@ -431,10 +431,72 @@ async def send_sample(callback: CallbackQuery):
     )
 
 
+async def _upload_images_to_channel(bot, questions: list) -> list:
+    """
+    Rasmli savollarning rasmlarini STORAGE_CHANNEL_ID kanalga yuklaydi.
+    Har rasm uchun file_id olinadi va test JSON ga qo'shiladi.
+
+    q["_img_bytes"] → kanal → file_id → q["photo"] = file_id
+
+    Rasm yechish SHART EMAS — faqat testga ulanadi.
+    web_test.html bu file_id ni /api/proxy orqali ko'rsatadi.
+    """
+    from config import STORAGE_CHANNEL_ID
+    from aiogram.types import BufferedInputFile
+
+    if not STORAGE_CHANNEL_ID:
+        log.warning("STORAGE_CHANNEL_ID yo'q — rasmlar yuklanmadi")
+        return questions
+
+    uploaded = 0
+    failed   = 0
+
+    for idx, q in enumerate(questions):
+        img_bytes = q.get("_img_bytes")
+        if not img_bytes:
+            continue
+
+        img_ext = q.get("_img_ext", ".png").lstrip(".")
+        fname   = f"q{idx+1}.{img_ext}"
+
+        # Bir necha marta urinish (network xato uchun)
+        for attempt in range(3):
+            try:
+                photo = BufferedInputFile(img_bytes, filename=fname)
+                msg = await bot.send_photo(
+                    STORAGE_CHANNEL_ID,
+                    photo,
+                    caption=f"📷 Savol #{idx+1}",
+                    disable_notification=True,
+                )
+                # Eng katta o'lchamli rasmning file_id si
+                if msg.photo:
+                    q["photo"] = msg.photo[-1].file_id
+                    uploaded += 1
+                # Bytes ni JSON ga saqlamaymiz (juda katta bo'ladi)
+                q.pop("_img_bytes", None)
+                q.pop("_img_ext", None)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                else:
+                    log.warning(f"Rasm #{idx+1} yuklanmadi: {e}")
+                    failed += 1
+                    q.pop("_img_bytes", None)
+                    q.pop("_img_ext", None)
+
+        # Telegram rate limit — har rasmdan keyin kichik pauza
+        await asyncio.sleep(0.3)
+
+    log.info(f"Rasmlar: {uploaded} yuklandi, {failed} xato")
+    return questions
+
+
 @router.message(F.document, CreateTest.upload_file)
 async def upload_file(message: Message, state: FSMContext):
     doc = message.document
-    if not doc.file_name.lower().endswith((".txt", ".pdf", ".docx", ".doc")):
+    if not doc.file_name.lower().endswith((".txt", ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".xlsm")):
         return await message.answer("❌ Faqat TXT, PDF yoki DOCX fayllar qabul qilinadi!")
 
     status = await message.answer("⏳ Fayl tahlil qilinmoqda...")
@@ -448,40 +510,112 @@ async def upload_file(message: Message, state: FSMContext):
         await message.bot.download_file(file.file_path, tmp_path)
 
         questions = parse_file(tmp_path)
-        try: os.remove(tmp_path)
-        except Exception: pass
+
+        # Fayl hajmini ANIQLASH-DAN OLDIN o'lchaymiz (tmp_path keyinroq
+        # o'chirilishi mumkin) — "savol kam topildi" heuristikasi uchun.
+        try:
+            with open(tmp_path, "rb") as _f:
+                _file_size = len(_f.read())
+        except Exception:
+            _file_size = 0
+
+        total_preview = len(questions)
+        # Heuristika: fayl katta, lekin savol kam topilgan bo'lsa —
+        # bu format TO'LIQ tanilmagan bo'lishi mumkin (parser faqat
+        # qisman/tasodifiy mos kelgan). Bunday holda ham AI-aniqlash
+        # imkonini taklif qilamiz, lekin foydalanuvchi topilgan
+        # savollardan ham foydalanishi mumkin.
+        suspiciously_few = _file_size > 8000 and total_preview <= 5
+
+        # Rasmli savollar uchun tmp_path ni state da saqlaymiz.
+        # Savol UMUMAN topilmagan holatda HAM, "shubhali kam" holatda
+        # HAM faylni saqlaymiz — AI-format-aniqlash funksiyasi xom
+        # matnga keyinroq kirishi kerak bo'ladi.
+        has_img_qs = any(q.get("_has_image") for q in questions)
+        if has_img_qs or not questions or suspiciously_few:
+            await state.update_data(
+                _tmp_path=tmp_path,
+                _file_name=doc.file_name,  # Fayl nomi — test nomiga taklif
+            )
+        else:
+            await state.update_data(_file_name=doc.file_name)
+            try: os.remove(tmp_path)
+            except Exception: pass
         await _del(message.bot, message.chat.id, message.message_id)
 
         if not questions:
+            b = InlineKeyboardBuilder()
+            b.button(text="🤖 AI bilan formatni aniqlash", callback_data="fmt_ai_detect")
+            b.adjust(1)
             return await status.edit_text(
                 "❌ <b>Savollar topilmadi!</b>\n\n"
-                "Quyidagi formatlar qo\'llab-quvvatlanadi:\n"
+                "Bu fayl formati botga tanish emas. Quyidagi formatlar "
+                "qo\'llab-quvvatlanadi:\n"
                 "• <b>Standart:</b> <code>===A) To\'g\'ri javob</code>\n"
                 "• <b>==== + #:</b> Savol → ==== → #To\'g\'ri → ====\n"
                 "• <b>Jadval:</b> Savol | To\'g\'ri | Muqobil...\n"
                 "• <b>PDF:</b> ? savol → =Javob\n\n"
-                "Namunani ko\'rish uchun turni qaytadan tanlang."
+                "AI yordamida bu faylning formatini avtomatik aniqlab "
+                "ko\'rishni xohlaysizmi?",
+                parse_mode="HTML",
+                reply_markup=b.as_markup()
             )
 
         total    = len(questions)
         unmarked = sum(1 for q in questions if not q.get("_marked"))
 
+        # Rasmli savollar bo'lsa — rasmlarni TG kanalga yuklab file_id olamiz
+        img_count = sum(1 for q in questions if q.get("_img_bytes"))
+        # Faylda umuman rasm bormi (parse qilolmagan bo'lsa ham)
+        img_in_file = 0
+        try:
+            if os.path.exists(tmp_path):
+                _ii = check_images_in_file(tmp_path)
+                img_in_file = _ii.get("count", 0)
+        except Exception:
+            img_in_file = img_count
+
+        if img_count > 0:
+            await status.edit_text(
+                f"🖼 <b>{img_count} ta rasm test bilan ulanmoqda...</b>\n"
+                f"<i>Iltimos kuting</i>",
+                parse_mode="HTML"
+            )
+            questions = await _upload_images_to_channel(message.bot, questions)
+        elif img_in_file > 0:
+            log.info(f"Faylda {img_in_file} rasm bor, savolga bog'lanmadi")
+
         await state.update_data(questions=questions, _file_id=doc.file_id)
         await state.set_state(CreateTest.upload_file)  # state saqlanadi
 
-        if unmarked > 0:
+        if unmarked > 0 or suspiciously_few:
             b = InlineKeyboardBuilder()
+            if suspiciously_few:
+                b.button(text="🤖 AI bilan formatni qayta aniqlash", callback_data="fmt_ai_detect")
             b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
             b.button(text="🤖 AI bilan yechish",   callback_data="uj_ai")
             b.button(text="📨 Adminga murojaat",   callback_data="uj_admin")
             b.button(text="▶️ Shundayicha davom",  callback_data="uj_skip")
             b.adjust(1)
+            img_line = ""
+            if img_count > 0:
+                img_line = f"🖼 Rasmli: <b>{img_count}</b> ta (test bilan ulandi)\n"
+            elif img_in_file > 0:
+                img_line = f"⚠️ Faylda {img_in_file} rasm bor, lekin bog\'lanmadi\n"
+            warn_line = ""
+            if suspiciously_few:
+                warn_line = (
+                    "\n⚠️ <b>Diqqat:</b> Fayl hajmi katta, lekin atigi shu "
+                    "qadar savol topildi — format TO\'LIQ tanilmagan bo\'lishi "
+                    "mumkin!\n"
+                )
             await status.edit_text(
                 f"📋 <b>{total} TA SAVOL TOPILDI</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
-                f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n\n"
-                f"<i>To\'g\'ri javob aniqlanmagan. Nima qilamiz?</i>",
+                f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n"
+                + img_line + warn_line +
+                f"\n<i>Nima qilamiz?</i>",
                 parse_mode="HTML",
                 reply_markup=b.as_markup()
             )
@@ -499,13 +633,23 @@ async def _ask_poll_time(msg, state, q_count: int):
         b.add(InlineKeyboardButton(text=f"⏱ {s}s", callback_data=f"ptime_{s}"))
     b.adjust(3)
     b.row(InlineKeyboardButton(text="♾ Cheksiz", callback_data="ptime_0"))
-    await msg.edit_text(
+    txt = (
         f"<b>✅ {q_count} TA SAVOL TOPILDI!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⏱ <b>Har bir savol uchun necha soniya?</b>",
-        parse_mode="HTML",
-        reply_markup=b.as_markup()
+        f"⏱ <b>Har bir savol uchun necha soniya?</b>"
     )
+    # Eski xabarni edit qilishga urinamiz, fail bo'lsa yangi yuboramiz
+    try:
+        await msg.edit_text(txt, parse_mode="HTML", reply_markup=b.as_markup())
+    except Exception:
+        try:
+            await msg.answer(txt, parse_mode="HTML", reply_markup=b.as_markup())
+        except Exception:
+            try:
+                await msg.bot.send_message(msg.chat.id, txt,
+                                           parse_mode="HTML", reply_markup=b.as_markup())
+            except Exception:
+                pass
     await state.set_state(CreateTest.set_poll_time)
 
 
@@ -559,42 +703,116 @@ async def apply_serial(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "uj_ai", CreateTest.upload_file)
 async def uj_ai(cb: CallbackQuery, state: FSMContext):
+    """1-bosqich: izoh turini so'raydi"""
     await cb.answer()
-    d = await state.get_data()
-    questions = d.get("questions", [])
-    unmarked  = [q for q in questions if not q.get("_marked")]
-
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📖 To'liq izoh (asoslab)", callback_data="aimode_full"))
+    b.row(InlineKeyboardButton(text="✂️ Qisqa izoh",            callback_data="aimode_short"))
+    b.row(InlineKeyboardButton(text="🚫 Izohsiz (faqat javob)", callback_data="aimode_none"))
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga",                callback_data="uj_back"))
     await cb.message.edit_text(
         "🤖 <b>AI BILAN YECHISH</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 {len(unmarked)} ta savol AI ga yuborilmoqda...\n\n"
-        "<i>Bir necha soniya kutib turing</i>"
+        "<b>Izoh qanday bo'lsin?</b>\n\n"
+        "📖 <b>To'liq</b> — har javob asoslab tushuntiriladi (2-4 jumla)\n"
+        "✂️ <b>Qisqa</b> — bir jumlalik izoh\n"
+        "🚫 <b>Izohsiz</b> — faqat to'g'ri javob belgilanadi",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("aimode_"))
+async def do_ai_solve(cb: CallbackQuery, state: FSMContext):
+    """2-bosqich: tanlangan izoh turi bilan yechadi"""
+    await cb.answer()
+    explain_mode = cb.data[len("aimode_"):]  # full / short / none
+    await state.update_data(_explain_mode=explain_mode)
+
+    d         = await state.get_data()
+    questions = d.get("questions", [])
+    file_id   = d.get("_file_id", "")
+    docx_path = d.get("_tmp_path", "")
+    unmarked  = [q for q in questions if not q.get("_marked")]
+    img_qs    = [q for q in unmarked if q.get("_has_image")]
+    txt_qs    = [q for q in unmarked if not q.get("_has_image")]
+    has_images = len(img_qs) > 0
+    has_texts  = len(txt_qs) > 0
+
+    mode_label = {"full": "To'liq izoh", "short": "Qisqa izoh", "none": "Izohsiz"}.get(explain_mode, "")
+    await cb.message.edit_text(
+        "🤖 <b>AI BILAN YECHISH</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 Belgilanmagan: {len(unmarked)} ta\n"
+        f"💬 Rejim: {mode_label}\n"
+        + (f"🖼️ Rasmli: {len(img_qs)} ta (Gemini Vision)\n" if has_images else "")
+        + (f"📝 Matnli: {len(txt_qs)} ta (Groq/OpenAI)\n" if has_texts else "")
+        + "\n<i>AI ishlamoqda...</i>",
+        parse_mode="HTML"
     )
     try:
-        questions = await _ai_solve(questions, cb.message)
+        # Matnli savollar — oddiy AI
+        if has_texts:
+            questions = await _ai_solve(questions,
+                                        cb.message if not has_images else None,
+                                        explain_mode)
+
+        # Rasmli savollar — Gemini Vision
+        if has_images:
+            path = docx_path
+            if not path or not os.path.exists(path):
+                if file_id:
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+                        path = tmp.name
+                    fi = await cb.message.bot.get_file(file_id)
+                    await cb.message.bot.download_file(fi.file_path, path)
+            if path and os.path.exists(path):
+                questions = await _solve_image_questions(questions, path, cb.message, explain_mode)
+
         await state.update_data(questions=questions)
-        solved = sum(1 for q in questions if q.get("_ai_solved"))
-        await cb.message.edit_text(
-            f"🤖 <b>AI tugatdi!</b>\n"
+        await state.update_data(questions=questions)
+        solved     = sum(1 for q in questions if q.get("_ai_solved"))
+        img_solved = sum(1 for q in questions if q.get("_ai_solved") and q.get("_has_image"))
+        img_total  = sum(1 for q in questions if q.get("_has_image"))
+        txt_solved = solved - img_solved
+        total_q    = len(questions)
+        not_solved = len(unmarked) - solved
+
+        stat_text = (
+            f"✅ <b>AI tugatdi!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ {solved} ta savol yechildi\n\n"
-            f"<i>Davom etamiz...</i>"
+            f"📊 Jami: <b>{total_q}</b> ta savol\n"
+            + (f"📝 Matnli: <b>{txt_solved}</b> ta yechildi\n" if has_texts else "")
+            + (f"🖼️ Rasmli: <b>{img_solved}/{img_total}</b> ta yechildi\n" if has_images else "")
+            + f"✅ Yechildi: <b>{solved}/{len(unmarked)}</b> ta\n"
+            + (f"⚠️ Yechilmadi: <b>{not_solved}</b> ta\n" if not_solved > 0 else "")
         )
+        # Avval edit qilamiz — progress xabarini yangilaymiz
+        try:
+            await cb.message.edit_text(stat_text + "\n<i>Davom etamiz...</i>",
+                                        parse_mode="HTML")
+        except Exception:
+            pass
+        # Keyin YANGI xabar — saqlanib qolsin
+        try:
+            await cb.bot.send_message(cb.from_user.id, stat_text, parse_mode="HTML")
+        except Exception:
+            pass
         await asyncio.sleep(1)
         await _ask_poll_time(cb.message, state, len(questions))
     except Exception as e:
         log.error(f"AI solve xato: {e}", exc_info=True)
         b = InlineKeyboardBuilder()
-        b.button(text="🔡 Seryalik javob",   callback_data="uj_serial")
-        b.button(text="📨 Adminga murojaat", callback_data="uj_admin")
+        b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
+        b.button(text="📨 Adminga murojaat",  callback_data="uj_admin")
         b.button(text="▶️ Shundayicha davom", callback_data="uj_skip")
         b.adjust(1)
         await cb.message.edit_text(
             f"❌ <b>AI xatolik berdi</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"<code>{str(e)[:200]}</code>\n\n"
-            f"Boshqa usulni tanlang:",
-            parse_mode="HTML",
+            "Boshqa usulni tanlang:",
             reply_markup=b.as_markup()
         )
 
@@ -659,6 +877,245 @@ async def uj_back(cb: CallbackQuery, state: FSMContext):
 
 
 # ═══════════════════════════════════════════════════════════
+# AI BILAN FORMAT ANIQLASH — noma'lum/xato-tanilgan fayllar uchun
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "fmt_ai_detect", CreateTest.upload_file)
+async def fmt_ai_detect(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    d        = await state.get_data()
+    tmp_path = d.get("_tmp_path")
+    fname    = d.get("_file_name", "noma'lum")
+    uid      = cb.from_user.id
+    uname    = cb.from_user.full_name or str(uid)
+
+    if not tmp_path or not os.path.exists(tmp_path):
+        return await cb.message.edit_text(
+            "❌ Fayl topilmadi. Iltimos, faylni qaytadan yuboring."
+        )
+
+    await cb.message.edit_text(
+        "🤖 <b>AI format namunani tahlil qilmoqda...</b>\n"
+        "<i>Bu 10-20 soniya vaqt olishi mumkin</i>",
+        parse_mode="HTML"
+    )
+
+    from utils.parser import extract_raw_text, parse_file
+
+    sample = extract_raw_text(tmp_path, max_chars=4000)
+    if not sample.strip():
+        return await cb.message.edit_text(
+            "❌ Fayldan matn chiqarib bo'lmadi (bo'sh yoki rasm-asoslangan "
+            "PDF bo'lishi mumkin). Adminga murojaat qiling."
+        )
+
+    detected_pattern = None
+    detect_error = None
+    try:
+        detected_pattern = await _detect_format_with_ai(sample)
+    except Exception as e:
+        detect_error = str(e)
+        log.error(f"fmt_ai_detect: AI tahlil xato: {e}")
+
+    new_questions = []
+    applied_ok = False
+    if detected_pattern and detected_pattern.get("detected"):
+        try:
+            full_text = extract_raw_text(tmp_path, max_chars=200_000)
+            lines = [l for l in full_text.split("\n") if l.strip()]
+            new_questions = _apply_detected_pattern(lines, detected_pattern)
+            # Mantiqiy tekshiruv: variantlar soni barqarorligi va
+            # savol matni uzunligi me'yorida bo'lishi kerak — aks holda
+            # bu "muvaffaqiyat" ishonchsiz hisoblanadi.
+            if new_questions:
+                avg_opts = sum(len(q["options"]) for q in new_questions) / len(new_questions)
+                reasonable = 2 <= avg_opts <= 8
+                too_few_q = len(new_questions) < 2
+                applied_ok = reasonable and not too_few_q
+        except Exception as e:
+            log.error(f"fmt_ai_detect: pattern qo'llashda xato: {e}")
+            detect_error = (detect_error or "") + f" | apply_error: {e}"
+
+    # ── FALLBACK: qoida ishlamadi → AI to'g'ridan-to'g'ri o'qiydi ──
+    fallback_used = False
+    if not applied_ok:
+        try:
+            full_sample = extract_raw_text(tmp_path, max_chars=4000)
+            direct = await _ai_extract_questions_direct(full_sample)
+            if direct and len(direct) >= 2:
+                new_questions = direct
+                applied_ok = True
+                fallback_used = True
+        except Exception as e:
+            log.error(f"fmt_ai_detect: to'g'ridan-to'g'ri chiqarish xato: {e}")
+            detect_error = (detect_error or "") + f" | direct_error: {e}"
+
+    # ── ADMINGA TO'LIQ TEXNIK HISOBOT ──────────────────────────
+    from config import ADMIN_IDS
+    report_lines = [
+        "🆕 <b>YANGI FORMAT ANIQLANDI (yoki aniqlanmadi)</b>",
+        f"👤 {html.escape(uname)} (<code>{uid}</code>)",
+        f"📄 Fayl: <code>{html.escape(fname)}</code>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    if detected_pattern:
+        report_lines += [
+            f"📐 <b>Format nomi:</b> {html.escape(str(detected_pattern.get('format_name', '—')))}",
+            f"📝 <b>Tavsif:</b> {html.escape(str(detected_pattern.get('description', '—')))}",
+            f"❓ <b>Savol tugashi:</b> {html.escape(str(detected_pattern.get('question_ends_with', '—')))}",
+            f"🔘 <b>Variant prefiksi:</b> {html.escape(str(detected_pattern.get('option_prefix_pattern', '—')))}",
+            f"✅ <b>To'g'ri javob belgisi:</b> {html.escape(str(detected_pattern.get('correct_marker', '—')))}",
+            f"➗ <b>Ajratuvchi:</b> {html.escape(str(detected_pattern.get('separator', '—')))}",
+            f"📊 <b>AI ishonchi:</b> {html.escape(str(detected_pattern.get('confidence', '—')))}",
+        ]
+    else:
+        report_lines.append("⚠️ AI format aniqlay olmadi.")
+    fallback_label = "Ha" if fallback_used else "Yo'q"
+    report_lines += [
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🔧 <b>Qoida orqali natija:</b> {len(new_questions) if applied_ok and not fallback_used else 0} savol",
+        f"🤖 <b>To'g'ridan-to'g'ri AI fallback ishlatildi:</b> {fallback_label}",
+        f"📦 <b>Yakuniy natija:</b> {len(new_questions)} savol topildi",
+    ]
+    if detect_error:
+        report_lines.append(f"❗ <b>Xatolar:</b> <code>{html.escape(str(detect_error)[:300])}</code>")
+    report_lines += [
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "📋 <b>XOM MATN NAMUNASI (qo'lda parser.py ga qo'shish uchun):</b>",
+        f"<pre>{html.escape(sample[:1200])}</pre>",
+    ]
+    report_text = "\n".join(report_lines)
+
+    for aid in ADMIN_IDS:
+        try:
+            await cb.bot.send_message(aid, report_text[:4000], parse_mode="HTML")
+        except Exception:
+            try:
+                # HTML render muvaffaqiyatsiz bo'lsa, teglarni olib tashlab,
+                # oddiy (plain) matn sifatida yuboramiz — escape qilingan
+                # &lt;/&gt;/&amp; ham qaytarib ochiladi, chunki bu safar
+                # parse_mode ishlatilmaydi.
+                plain = re.sub(r"<[^>]+>", "", report_text)
+                plain = html.unescape(plain)
+                await cb.bot.send_message(aid, plain[:4000])
+            except Exception:
+                pass
+        # Fayl namunasini ham alohida hujjat sifatida yuboramiz —
+        # to'liq matn (qisqartirilmagan) parser.py ga format qo'shish uchun
+        try:
+            if os.path.exists(tmp_path):
+                await cb.bot.send_document(
+                    aid, FSInputFile(tmp_path, filename=f"format_namuna_{fname}"),
+                    caption=f"📎 To'liq fayl namunasi — {fname} (yangi format)"
+                )
+        except Exception:
+            pass
+
+    # ── FOYDALANUVCHIGA NATIJA ──────────────────────────────────
+    if applied_ok and new_questions:
+        await state.update_data(questions=new_questions)
+        total    = len(new_questions)
+        unmarked = sum(1 for q in new_questions if not q.get("_marked"))
+        method_line = (
+            "🤖 To'g'ridan-to'g'ri AI orqali" if fallback_used
+            else "🔧 AI aniqlagan qoida orqali"
+        )
+        b = InlineKeyboardBuilder()
+        b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
+        b.button(text="🤖 AI bilan yechish",   callback_data="uj_ai")
+        b.button(text="📨 Adminga murojaat",   callback_data="uj_admin")
+        b.button(text="▶️ Shundayicha davom",  callback_data="uj_skip")
+        b.adjust(1)
+        await cb.message.edit_text(
+            f"✅ <b>Format aniqlandi!</b> ({method_line})\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📋 Jami: <b>{total}</b> ta savol\n"
+            f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
+            f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n\n"
+            f"<i>Bu format adminga yuborildi — kelajakda avtomatik "
+            f"tanilishi uchun parserga qo'shiladi. Davom etamizmi?</i>",
+            parse_mode="HTML",
+            reply_markup=b.as_markup()
+        )
+    else:
+        b = InlineKeyboardBuilder()
+        b.button(text="📨 Adminga murojaat", callback_data="uj_admin")
+        b.adjust(1)
+        await cb.message.edit_text(
+            "❌ <b>AI ham formatni aniqlay olmadi.</b>\n\n"
+            "Fayl namunasi va tafsilotlar adminga yuborildi — tez orada "
+            "bu format qo'llab-quvvatlanadigan formatlar ro'yxatiga "
+            "qo'shiladi.\n\n"
+            "Hozircha boshqa formatdagi fayl bilan urinib ko'ring, yoki "
+            "adminga to'g'ridan-to'g'ri murojaat qiling.",
+            parse_mode="HTML",
+            reply_markup=b.as_markup()
+        )
+
+
+async def _ai_extract_questions_direct(sample_text: str) -> list:
+    """
+    FALLBACK: qoida-asoslangan ajratish ishlamasa, AI to'g'ridan-to'g'ri
+    xom matndan savol+variant+(agar bor bo'lsa)to'g'ri-javobni JSON
+    qilib chiqaradi. AI savollar/variantlarning MANTIQAN to'g'ri va
+    yaxlit ekanligiga e'tibor berishi so'raladi (yarim qolgan jumlalar,
+    aralashib qolgan variantlar bo'lmasligi kerak).
+    """
+    SYSTEM = (
+        "Siz test-fayllarni JSON formatga o'tkazuvchi ekspertsiz. Berilgan "
+        "xom matn ichidan FAQAT chiroyli, MANTIQAN TO'LIQ savol va "
+        "variantlarni chiqarib oling. Agar biror savol yoki variant matni "
+        "kesilgan, tugallanmagan, yoki boshqa savol bilan aralashib qolgan "
+        "bo'lsa — UNI O'TKAZIB YUBORING (chiqarmang), chunki yarim-noto'g'ri "
+        "ma'lumot hech narsadan ko'ra yomonroq. Faqat JSON qaytaring."
+    )
+    USER = (
+        "Quyidagi matndan test savollarini chiqaring. Har bir savol uchun:\n"
+        "[\n"
+        "  {\n"
+        '    "question": "to\'liq savol matni",\n'
+        '    "options": ["variant1", "variant2", ...],\n'
+        '    "correct_idx": <agar to\'g\'ri javob ANIQ ko\'rinsa index, '
+        'aks holda -1>\n'
+        "  }\n"
+        "]\n\n"
+        "FAQAT to'liq, mantiqan tugal savollarni qaytaring. Shubhali "
+        "(kesilgan/aralashgan) savollarni o'tkazib yuboring.\n\n"
+        f"MATN:\n{sample_text[:4000]}"
+    )
+    result = await _ai_call_json({
+        "messages": [{"role": "system", "content": SYSTEM},
+                     {"role": "user", "content": USER}],
+        "max_tokens": 3000,
+        "temperature": 0.0,
+    })
+    if not isinstance(result, list):
+        return []
+
+    LBL = ["A", "B", "C", "D", "E", "F", "G", "H"]
+    questions = []
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        q_text = (item.get("question") or "").strip()
+        opts_raw = item.get("options") or []
+        if not q_text or len(opts_raw) < 2:
+            continue
+        opts = [f"{LBL[k] if k < len(LBL) else k+1}) {str(o).strip()}"
+                for k, o in enumerate(opts_raw)]
+        ci = item.get("correct_idx", -1)
+        has_mark = isinstance(ci, int) and 0 <= ci < len(opts)
+        questions.append({
+            "type": "multiple_choice", "question": q_text,
+            "options": opts,
+            "correct": opts[ci] if has_mark else "",
+            "explanation": "", "accepted_answers": [], "points": 1,
+            "_marked": has_mark,
+        })
+    return questions
+
+
+# ═══════════════════════════════════════════════════════════
 # AI PROVIDER KONFIGURATSIYA
 # ═══════════════════════════════════════════════════════════
 # Secrets ga quyidagilardan BIRINI yoki BARCHASINI yozing:
@@ -685,30 +1142,50 @@ async def uj_back(cb: CallbackQuery, state: FSMContext):
 # limit tugasa avtomatik keyingisiga o'tadi.
 # ═══════════════════════════════════════════════════════════
 
+# Har provayder uchun batch'lar orasida kutish (soniya) — free-tier RPM ga mos
+_PROVIDER_PAUSE = {
+    "Groq":        6.0,
+    "Gemini":      10.0,
+    "OpenRouter":  6.0,
+    "Together AI": 6.0,
+    "OpenAI":      6.0,
+}
+
 _AI_PROVIDERS = [
+    # 1. Groq — tez, bepul (birinchi)
     {
         "name":      "Groq",
         "url":       "https://api.groq.com/openai/v1/chat/completions",
         "model":     "llama-3.3-70b-versatile",
         "key_names": ["GROQ_API_KEY"] + [f"GROQ_API_KEY{i}" for i in range(1, 21)],
     },
+    # 2. Gemini — ko'p limit, aniq (ikkinchi)
     {
-        "name":      "OpenAI",
-        "url":       "https://api.openai.com/v1/chat/completions",
-        "model":     "gpt-4o-mini",
-        "key_names": ["OPENAI_API_KEY"] + [f"OPENAI_API_KEY{i}" for i in range(1, 11)],
+        "name":      "Gemini",
+        "url":       "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "model":     "gemini-2.0-flash",
+        "key_names": ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY{i}" for i in range(1, 11)],
     },
+    # 3. Together AI
     {
         "name":      "Together AI",
         "url":       "https://api.together.xyz/v1/chat/completions",
         "model":     "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         "key_names": ["TOGETHER_API_KEY"] + [f"TOGETHER_API_KEY{i}" for i in range(1, 11)],
     },
+    # 4. OpenRouter
     {
         "name":      "OpenRouter",
         "url":       "https://openrouter.ai/api/v1/chat/completions",
         "model":     "meta-llama/llama-3.3-70b-instruct:free",
         "key_names": ["OPENROUTER_API_KEY"] + [f"OPENROUTER_API_KEY{i}" for i in range(1, 11)],
+    },
+    # 5. OpenAI
+    {
+        "name":      "OpenAI",
+        "url":       "https://api.openai.com/v1/chat/completions",
+        "model":     "gpt-4o-mini",
+        "key_names": ["OPENAI_API_KEY"] + [f"OPENAI_API_KEY{i}" for i in range(1, 11)],
     },
 ]
 
@@ -739,13 +1216,546 @@ def _load_ai_clients():
     for p in _AI_PROVIDERS:
         for name in p["key_names"]:
             k = sec.get(name, "")
-            if k:
-                clients.append({"name": p["name"], "url": p["url"], "model": p["model"], "key": k})
+            if k and len(str(k).strip()) > 10:  # Bo'sh yoki noto'g'ri kalitni o'tkazamiz
+                clients.append({"name": p["name"], "url": p["url"],
+                                "model": p["model"], "key": str(k).strip()})
+
+    # Diagnostika — qaysi providerlar yuklandi
+    if clients:
+        prov_count = {}
+        for c in clients:
+            prov_count[c["name"]] = prov_count.get(c["name"], 0) + 1
+        log.info(f"AI klientlar yuklandi: {prov_count}")
+    else:
+        log.warning("HECH QANDAY AI kalit topilmadi! Secrets ni tekshiring.")
 
     return clients
 
 
-async def _ai_solve(questions: list, msg) -> list:
+
+# ═══════════════════════════════════════════════════════════════
+# GEMINI VISION — Rasmli savollar (daqiqada max 15 ta)
+# ═══════════════════════════════════════════════════════════════
+
+def _get_gemini_keys() -> list:
+    keys = []
+    try:
+        import streamlit as st
+        for n in ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY{i}" for i in range(1, 11)]:
+            k = st.secrets.get(n, "")
+            if k: keys.append(k)
+    except Exception:
+        pass
+    if not keys:
+        for n in ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY{i}" for i in range(1, 11)]:
+            k = os.environ.get(n, "")
+            if k: keys.append(k)
+    return keys
+
+
+async def _solve_image_questions(questions: list, docx_path: str, msg, explain_mode: str = "full") -> list:
+    """
+    Rasmli savollarni Gemini Vision bilan yechadi.
+    Qoidalar:
+      - Faqat Gemini API (boshqa API lar yo'q)
+      - Daqiqada max 15 ta * kalit_soni
+      - Har so'rov orasida 6 soniya
+      - 429 kelsa: kutib qayta urinish
+    """
+    import aiohttp, json, base64, zipfile, time
+
+    gemini_keys = _get_gemini_keys()
+    if not gemini_keys:
+        log.warning("GEMINI_API_KEY topilmadi - rasmli savollar o'tkazib yuborildi")
+        return questions
+
+    img_unmarked = [
+        (i, q) for i, q in enumerate(questions)
+        if q.get("_has_image") and not q.get("_marked")
+    ]
+    if not img_unmarked:
+        return questions
+
+    log.info(f"Gemini Vision: {len(img_unmarked)} savol, {len(gemini_keys)} kalit")
+
+    # DOCX ZIP dan rasmlarni olish
+    img_cache = {}
+    try:
+        with zipfile.ZipFile(docx_path) as z:
+            for name in z.namelist():
+                if "word/media/" in name:
+                    fname = os.path.basename(name)
+                    img_cache[fname] = base64.b64encode(z.read(name)).decode()
+    except Exception as e:
+        log.error(f"Rasm ajratish: {e}")
+        return questions
+
+    key_idx = 0
+    req_in_minute = 0
+    minute_start = time.time()
+    max_per_minute = 15 * len(gemini_keys)
+
+    _vexp = {
+        "full":  "to'liq o'zbek izoh: nega to'g'ri ekanligini asoslab tushuntiring (2-4 jumla)",
+        "short": "qisqa o'zbek izoh, bir jumla",
+        "none":  "bo'sh qoldiring",
+    }.get(explain_mode, "qisqa o'zbek izoh")
+    PROMPT = (
+        "Siz akademik test ekspertisiz. Rasmli test savolini MAKSIMAL ANIQLIK bilan yeching.\n"
+        "QOIDALAR:\n"
+        "1. AVVAL \"reasoning\" maydonida rasm va har bir variantni tahlil qiling, "
+        "qaysi variant to'g'ri ekanini mantiqiy asoslang. FAQAT shundan keyin "
+        "\"correct_idx\" ni tanlang — u reasoning xulosasi bilan 100% mos bo'lishi shart.\n"
+        "2. Ikkilanmang, lekin asossiz taxmin ham qilmang — faqat rasmda ko'ringan "
+        "aniq dalillarga va mantiqqa tayaning.\n"
+        "3. Gallyutsinatsiya qilmang — rasmda yo'q narsani to'qib chiqarmang.\n"
+        "Faqat JSON qaytaring (boshqa matn yozmang): "
+        "{\"reasoning\": \"tahlil\", \"correct_idx\": N, \"explanation\": \"" + _vexp + "\"}"
+    )
+
+    def _bar(d, t, w=8):
+        f = int(w * d / max(t, 1))
+        return "█" * f + "░" * (w - f)
+
+    solved = 0
+    t0 = time.time()
+
+    for n, (orig_idx, q) in enumerate(img_unmarked, 1):
+        img_b64 = img_cache.get(q.get("_img_file", ""), "")
+        if not img_b64:
+            continue
+
+        # Daqiqada limit nazorat
+        now = time.time()
+        if now - minute_start >= 60:
+            req_in_minute = 0
+            minute_start = now
+
+        if req_in_minute >= max_per_minute:
+            wait = 62 - (now - minute_start)
+            if wait > 0:
+                log.info(f"Gemini limit: {wait:.0f}s kutamiz")
+                if msg:
+                    try:
+                        await msg.edit_text(
+                            f"🖼️ <b>Gemini Vision...</b>\n"
+                            f"[{_bar(n-1, len(img_unmarked))}] {n-1}/{len(img_unmarked)}\n"
+                            f"⏳ Limit: {wait:.0f}s kutilmoqda...",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+                await asyncio.sleep(wait)
+                req_in_minute = 0
+                minute_start = time.time()
+
+        # Progress
+        elapsed = time.time() - t0
+        eta = int(elapsed / max(n-1,1) * (len(img_unmarked)-n+1)) if n>1 else len(img_unmarked)*7
+        m2, s2 = divmod(eta, 60)
+        if msg:
+            try:
+                await msg.edit_text(
+                    f"🖼️ <b>Gemini Vision rasmlarni tahlil qilmoqda...</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"[{_bar(n-1, len(img_unmarked))}] {n-1}/{len(img_unmarked)} rasm\n"
+                    f"📊 {solved} ta yechildi\n"
+                    f"⏱ Qoldi: ~{m2}:{s2:02d}\n"
+                    f"🔑 Gemini kalit {key_idx%len(gemini_keys)+1}/{len(gemini_keys)}",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+        opts_clean = [re.sub(r"^[A-Ha-h]\s*[).]\s*", "", o) for o in q.get("options", [])]
+        question_text = (
+            f"{PROMPT}\n\n"
+            f"Question: {q.get('question', '')}\n"
+            f"Options:\n" + "\n".join(f"{j}. {o}" for j, o in enumerate(opts_clean))
+        )
+
+        answered = False
+        for attempt in range(len(gemini_keys) * 2):
+            key = gemini_keys[key_idx % len(gemini_keys)]
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/"
+                f"models/gemini-2.0-flash:generateContent?key={key}"
+            )
+            payload = {
+                "contents": [{
+                    "parts": [
+                        {"inline_data": {"mime_type": "image/png", "data": img_b64}},
+                        {"text": question_text}
+                    ]
+                }],
+                "generationConfig": {"temperature": 0.0, "maxOutputTokens": 500}
+            }
+
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.post(
+                        url, json=payload,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as resp:
+                        rdata = await resp.json()
+
+                if resp.status == 429:
+                    key_idx += 1
+                    wait_t = 62 if attempt >= len(gemini_keys)-1 else 10
+                    log.warning(f"Gemini 429 ({wait_t}s kutamiz)")
+                    await asyncio.sleep(wait_t)
+                    if attempt >= len(gemini_keys)-1:
+                        req_in_minute = 0
+                        minute_start = time.time()
+                    continue
+
+                if resp.status != 200:
+                    key_idx += 1
+                    await asyncio.sleep(3)
+                    continue
+
+                raw = (
+                    rdata.get("candidates", [{}])[0]
+                    .get("content", {})
+                    .get("parts", [{}])[0]
+                    .get("text", "").strip()
+                )
+                raw = re.sub(r"```json\s*|\s*```", "", raw).strip()
+                result = json.loads(raw)
+                ci = int(result.get("correct_idx", 0))
+                ex = result.get("explanation", "")
+                opts = q.get("options", [])
+                if 0 <= ci < len(opts):
+                    questions[orig_idx]["correct"]    = opts[ci]
+                    questions[orig_idx]["explanation"] = ex if ex else ""
+                    questions[orig_idx]["_ai_solved"]  = True
+                    questions[orig_idx]["_marked"]     = True
+                    solved += 1
+                req_in_minute += 1
+                answered = True
+                break
+
+            except aiohttp.ClientError as e:
+                log.warning(f"Gemini network: {e}")
+                key_idx += 1
+                await asyncio.sleep(3)
+            except Exception as e:
+                log.warning(f"Gemini parse: {e}")
+                answered = True
+                break
+
+        if answered:
+            await asyncio.sleep(6)  # Har so'rov orasida 6 soniya
+
+    total_t = int(time.time() - t0)
+    m3, s3 = divmod(total_t, 60)
+    log.info(f"Gemini Vision: {solved}/{len(img_unmarked)} yechildi, {m3}:{s3:02d}")
+    if msg:
+        try:
+            await msg.edit_text(
+                f"✅ <b>Gemini Vision tugatdi!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🖼️ {solved}/{len(img_unmarked)} rasm yechildi\n"
+                f"⏱ {m3}:{s3:02d}",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+    return questions
+
+
+async def _ai_call_json(payload: dict, clients: list = None, max_attempts: int = None) -> dict:
+    """
+    Universal AI chaqiruv — har qanday JSON natija (list YOKI dict)
+    qaytaradigan so'rovlar uchun. _ai_solve ichidagi klient-aylanish
+    va xato-boshqarish mantig'ining MUSTAQIL, qayta ishlatiladigan
+    versiyasi (format-aniqlash funksiyasi shuni ishlatadi).
+
+    _ai_solve ning ichki _post/_parse_ai_response funksiyalariga
+    HECH QANDAY o'zgartirish kiritilmagan — bu butunlay yangi,
+    alohida funksiya.
+    """
+    import aiohttp
+
+    if clients is None:
+        clients = _load_ai_clients()
+    if not clients:
+        raise ValueError("AI API kaliti topilmadi!")
+
+    attempts = max_attempts or len(clients)
+    cli_idx = 0
+    last_err = None
+
+    for attempt in range(attempts):
+        cli = clients[cli_idx % len(clients)]
+        p = dict(payload)
+        p["model"] = cli["model"]
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    cli["url"],
+                    headers={"Authorization": f"Bearer {cli['key']}",
+                             "Content-Type": "application/json"},
+                    json=p, timeout=aiohttp.ClientTimeout(total=60),
+                ) as r:
+                    status = r.status
+                    data = await r.json(content_type=None)
+
+            is_rate = status == 429
+            if not is_rate and isinstance(data, dict):
+                err = data.get("error", {}) or {}
+                code = str(err.get("type", "")) + str(err.get("code", "")) + str(err.get("message", ""))
+                if any(w in code.lower() for w in
+                       ["rate_limit", "quota", "tokens_per", "capacity", "too_many", "overloaded"]):
+                    is_rate = True
+
+            if is_rate:
+                cli_idx += 1
+                last_err = ValueError(f"[{cli['name']}] rate limit")
+                await asyncio.sleep(2)
+                continue
+
+            txt = _extract_ai_text(data)
+            result = _extract_json_object(txt)
+            return result
+
+        except Exception as e:
+            last_err = e
+            cli_idx += 1
+            await asyncio.sleep(1)
+            continue
+
+    raise last_err or ValueError("AI chaqiruv muvaffaqiyatsiz")
+
+
+def _extract_ai_text(data: dict) -> str:
+    """AI javobidan matnni chiqaradi (OpenAI/Groq/Gemini formatlari)."""
+    if isinstance(data, dict):
+        err = data.get("error")
+        if err:
+            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            raise ValueError(f"API xato: {msg}")
+
+    txt = ""
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if choices and isinstance(choices, list) and choices:
+        c = choices[0]
+        if isinstance(c, dict):
+            msg = c.get("message") or c.get("delta") or {}
+            txt = msg.get("content", "") if isinstance(msg, dict) else (msg if isinstance(msg, str) else "")
+
+    if not txt:
+        candidates = data.get("candidates") if isinstance(data, dict) else None
+        if candidates and isinstance(candidates, list) and candidates:
+            c = candidates[0]
+            if isinstance(c, dict):
+                content = c.get("content", {})
+                if isinstance(content, dict):
+                    parts = content.get("parts", [])
+                    if parts and isinstance(parts, list):
+                        txt = parts[0].get("text", "") if isinstance(parts[0], dict) else ""
+
+    if not txt:
+        raise ValueError(f"AI javobida matn topilmadi: {str(data)[:150]}")
+    return txt
+
+
+def _extract_json_object(txt: str):
+    """
+    Matndan birinchi to'liq JSON obyekt YOKI massivni chiqaradi.
+    _ai_solve dagi list-qaytaruvchi mantiqdan farqli — bu DICT ham
+    qaytarishi mumkin (format-aniqlash natijasi {"pattern": ...} kabi).
+    """
+    import json
+    t = txt.strip()
+    t = re.sub(r"```json\s*", "", t)
+    t = re.sub(r"```\s*", "", t)
+    t = t.strip()
+
+    # Birinchi { yoki [ dan boshlab, mos yopilishini topamiz
+    start_obj = t.find("{")
+    start_arr = t.find("[")
+    candidates = [s for s in (start_obj, start_arr) if s != -1]
+    if not candidates:
+        raise ValueError("JSON topilmadi")
+    start = min(candidates)
+    open_ch = t[start]
+    close_ch = "}" if open_ch == "{" else "]"
+
+    depth, in_str, esc, end = 0, False, False, -1
+    for i in range(start, len(t)):
+        ch = t[i]
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if not in_str:
+            if ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+    if end == -1:
+        # To'liq yopilish topilmadi — oxirigacha kesib sinab ko'ramiz
+        return json.loads(t[start:])
+    return json.loads(t[start:end + 1])
+
+
+async def _detect_format_with_ai(sample_text: str) -> dict:
+    """
+    Noma'lum/parser tanimagan format namunasini AI'ga yuboradi va undan
+    STRUKTURAVIY tavsif (regex emas!) so'raydi. AI'ga regex yozishni
+    ishonib topshirish xavfli (noto'g'ri regex butun faylni buzishi
+    mumkin) — shuning uchun AI faqat quyidagi "savollar"ga javob beradi,
+    va Python kodi shu javoblar asosida MAVJUD, sinalgan heuristikalar
+    bilan ishlaydi (parser.py dagi _looks_like_* funksiyalariga o'xshash
+    mantiq, lekin moslashuvchan parametrlar bilan).
+
+    Qaytaradi:
+    {
+        "detected": bool,
+        "format_name": str,           # qisqa, inson o'qiy oladigan nom
+        "question_ends_with": [..],   # masalan ["?", ":"]
+        "option_prefix_pattern": str, # masalan "A)", "-", "raqamlanmagan"
+        "options_per_question": int,  # taxminiy variant soni (3-6)
+        "correct_marker": str,        # masalan "*", "+", "yo'q (belgisiz)"
+        "separator": str,             # savollar orasidagi ajratuvchi (bo'sh qator, "====" va h.k.)
+        "description": str,           # AI ning o'z so'zi bilan format tavsifi (o'zbek tilida)
+        "confidence": float,          # 0-1 oralig'ida, AI o'z aniqligiga ishonchi
+    }
+    """
+    SYSTEM = (
+        "Siz test-fayl formatlarini tahlil qiluvchi ekspertsiz. Sizga test "
+        "savollari bo'lgan xom matn namunasi beriladi. Vazifangiz — bu matn "
+        "qanday STRUKTURAGA ega ekanini aniqlash (regex YOZMANG, faqat "
+        "tavsiflang). Faqat JSON qaytaring, boshqa hech narsa yozmang."
+    )
+    USER = (
+        "Quyidagi matn test savollari va variantlaridan iborat bo'lishi "
+        "kerak, lekin formati noma'lum. Tahlil qilib, JSON qaytaring:\n\n"
+        "{\n"
+        '  "detected": true/false (agar bu umuman test savollari bo\'lmasa false),\n'
+        '  "format_name": "qisqa nom, masalan \'raqamsiz ketma-ket variantlar\'",\n'
+        '  "question_ends_with": ["?", ":" va h.k. ro\'yxat],\n'
+        '  "option_prefix_pattern": "variantlar qanday boshlanadi: \'A)\' yoki \'-\' yoki \'raqamlanmagan\'",\n'
+        '  "options_per_question": <eng ko\'p uchraydigan variant soni, butun son>,\n'
+        '  "correct_marker": "to\'g\'ri javobni bildiruvchi belgi (masalan \'*\', \'+\', \'#\') yoki \'yo\'q\' agar belgi bo\'lmasa",\n'
+        '  "separator": "savollar orasida nima bor: \'bo\'sh qator\', \'====\', \'raqam\' va h.k.",\n'
+        '  "description": "formatni o\'z so\'zingiz bilan o\'zbek tilida 1-2 jumlada tavsiflang",\n'
+        '  "confidence": <0.0 dan 1.0 gacha, aniqligingizga ishonchingiz>\n'
+        "}\n\n"
+        f"MATN NAMUNASI:\n{sample_text[:4000]}"
+    )
+
+    result = await _ai_call_json({
+        "messages": [{"role": "system", "content": SYSTEM},
+                     {"role": "user", "content": USER}],
+        "max_tokens": 800,
+        "temperature": 0.0,
+    })
+    if not isinstance(result, dict):
+        raise ValueError("AI format-aniqlash natijasi dict emas")
+    return result
+
+
+def _apply_detected_pattern(lines: list, pattern: dict) -> list:
+    """
+    AI aniqlagan STRUKTURAVIY tavsif asosida, mavjud sinalgan
+    heuristikalardan foydalanib savollarni ajratadi. AI hech qanday
+    kod/regex ishlatmaydi — faqat parametrlarni beradi, ajratish
+    logikasi to'liq Python tomonidan, oldindan sinalgan qoidalar
+    bilan bajariladi (xavfsizlik uchun).
+    """
+    q_endings = pattern.get("question_ends_with") or ["?", ":"]
+    marker = (pattern.get("correct_marker") or "").strip()
+    has_marker = marker and marker.lower() not in ("yo'q", "yoq", "none", "-", "")
+
+    def is_question(line: str) -> bool:
+        s = line.strip().rstrip()
+        if not s:
+            return False
+        for end in q_endings:
+            if end and s.endswith(end):
+                return True
+        if '___' in s or '......' in s:
+            return True
+        return False
+
+    def clean_option(line: str):
+        o = line.strip()
+        is_correct = False
+        if has_marker and o.startswith(marker):
+            is_correct = True
+            o = o[len(marker):].strip()
+        m = re.match(r"^[A-Ha-h]\s*[).]\s*(.*)$", o)
+        if m:
+            o = m.group(1).strip()
+        elif o.startswith(('-', '•', '*')) and not (has_marker and marker in ('-', '•', '*')):
+            o = o.lstrip('-•* ').strip()
+        return o, is_correct
+
+    # Sahifa-raqami qatorlarini olib tashlaymiz (PDF artefaktlari)
+    items = [l for l in lines if not re.match(r'^\d{1,3}$', l.strip())]
+    items = [l for l in items if l.strip()]
+
+    tags = ['Q' if is_question(l) else 'O' for l in items]
+
+    # Ketma-ket Q qatorlarni birlashtiramiz (qator-wrap holati)
+    merged, mtags = [], []
+    i, n = 0, len(items)
+    while i < n:
+        if tags[i] == 'Q':
+            text = items[i]
+            j = i + 1
+            while j < n and tags[j] == 'Q':
+                text += ' ' + items[j]
+                j += 1
+            merged.append(text); mtags.append('Q')
+            i = j
+        else:
+            merged.append(items[i]); mtags.append('O')
+            i += 1
+
+    questions = []
+    n2 = len(merged)
+    i = 0
+    while i < n2:
+        if mtags[i] != 'Q':
+            i += 1
+            continue
+        q_text = merged[i].strip()
+        j = i + 1
+        variants, correct_idx = [], -1
+        while j < n2 and mtags[j] == 'O':
+            opt_text, is_c = clean_option(merged[j])
+            if opt_text:
+                if is_c and correct_idx == -1:
+                    correct_idx = len(variants)
+                variants.append(opt_text)
+            j += 1
+        if q_text and len(variants) >= 2:
+            LBL = ["A","B","C","D","E","F","G","H"]
+            opts = [f"{LBL[k] if k < len(LBL) else k+1}) {v}" for k, v in enumerate(variants)]
+            questions.append({
+                "type": "multiple_choice", "question": q_text,
+                "options": opts,
+                "correct": opts[correct_idx] if correct_idx >= 0 else "",
+                "explanation": "", "accepted_answers": [], "points": 1,
+                "_marked": correct_idx >= 0,
+            })
+        i = j if j > i else i + 1
+
+    return questions
+
+
+async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
     """
     Universal AI yechish — Groq / OpenAI / Together / OpenRouter / Custom.
     Limit tugasa avtomatik keyingi kalit yoki providerga o'tadi.
@@ -763,9 +1773,107 @@ async def _ai_solve(questions: list, msg) -> list:
     log.info(f"AI: {len(clients)} kalit, {names}")
     cli_idx = 0
 
+    def _parse_ai_response(data: dict) -> list:
+        """
+        AI javobidan JSON ro'yxatini chiqaradi.
+        Barcha formatlarni qo'llab-quvvatlaydi:
+        - OpenAI/Groq: {"choices":[{"message":{"content":"..."}}]}
+        - Gemini:      {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
+        - Xato:        {"error": {...}}
+        """
+        # Xato tekshirish
+        if isinstance(data, dict):
+            err = data.get("error")
+            if err:
+                if isinstance(err, dict):
+                    msg = err.get("message", str(err))
+                    code = str(err.get("type","")) + str(err.get("code",""))
+                else:
+                    msg = str(err)
+                    code = str(err)
+                raise ValueError(f"API xato: {msg} (code={code})")
+
+        # Matnni topamiz
+        txt = ""
+
+        # 1. OpenAI/Groq/Together/OpenRouter format
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if choices and isinstance(choices, list) and choices:
+            c = choices[0]
+            if isinstance(c, dict):
+                msg = c.get("message") or c.get("delta") or {}
+                if isinstance(msg, dict):
+                    txt = msg.get("content", "") or ""
+                elif isinstance(msg, str):
+                    txt = msg
+
+        # 2. Gemini format
+        if not txt:
+            candidates = data.get("candidates") if isinstance(data, dict) else None
+            if candidates and isinstance(candidates, list) and candidates:
+                c = candidates[0]
+                if isinstance(c, dict):
+                    content = c.get("content", {})
+                    if isinstance(content, dict):
+                        parts = content.get("parts", [])
+                        if parts and isinstance(parts, list):
+                            txt = parts[0].get("text", "") if isinstance(parts[0], dict) else ""
+
+        if not txt:
+            raise ValueError(f"AI javobida matn topilmadi: {str(data)[:100]}")
+
+        # JSON tozalash — markdown, ikki JSON, exstra matn
+        txt = txt.strip()
+        # ```json ... ``` ni olib tashlaymiz
+        txt = re.sub(r"```json\s*", "", txt)
+        txt = re.sub(r"```\s*", "", txt)
+        txt = txt.strip()
+
+        # [ ... ] qismini topamiz (faqat birinchi to'liq JSON array)
+        bracket_start = txt.find("[")
+        bracket_end   = txt.rfind("]")
+        if bracket_start != -1 and bracket_end > bracket_start:
+            txt = txt[bracket_start:bracket_end+1]
+
+        # JSON parse
+        try:
+            result = json.loads(txt)
+        except json.JSONDecodeError:
+            # Exstra data bo'lsa — birinchi to'liq JSON ni olamiz
+            depth = 0
+            in_str = False
+            esc    = False
+            end    = 0
+            for i, ch in enumerate(txt):
+                if esc:
+                    esc = False
+                    continue
+                if ch == "\\":
+                    esc = True
+                    continue
+                if ch == "\"" and not esc:
+                    in_str = not in_str
+                    continue
+                if not in_str:
+                    if ch == "[":
+                        depth += 1
+                    elif ch == "]":
+                        depth -= 1
+                        if depth == 0:
+                            end = i
+                            break
+            if end:
+                result = json.loads(txt[:end+1])
+            else:
+                raise
+
+        if not isinstance(result, list):
+            raise ValueError(f"JSON list emas: {type(result)}")
+        return result
+
     async def _post(payload):
         nonlocal cli_idx
-        for _ in range(len(clients)):
+        for attempt in range(len(clients)):
             cli = clients[cli_idx % len(clients)]
             p   = dict(payload)
             p["model"] = cli["model"]
@@ -777,48 +1885,109 @@ async def _ai_solve(questions: list, msg) -> list:
                                  "Content-Type": "application/json"},
                         json=p, timeout=aiohttp.ClientTimeout(total=90),
                     ) as r:
-                        data = await r.json()
-                err = data.get("error", {})
-                if err:
-                    code = str(err.get("type","")) + str(err.get("code",""))
-                    if any(w in code for w in ["rate_limit","quota","tokens","capacity"]):
-                        log.warning(f"[{cli['name']}] kalit {cli_idx%len(clients)+1}/{len(clients)} limit")
-                        cli_idx += 1
-                        await asyncio.sleep(1)
-                        continue
-                    raise ValueError(f"[{cli['name']}] {err.get('message', str(err))}")
-                return data
-            except aiohttp.ClientError as e:
-                log.warning(f"[{cli['name']}] xato: {e}")
-                cli_idx += 1
-        # Bir toʻliq aylanishda hammasi limit boʻldi — kutib, yana 2 marta urinish
-        for retry_round, wait_s in enumerate((20, 45), 1):
-            log.warning(f"Barcha kalitlar limit — {wait_s}s kutib {retry_round}-qayta urinish")
-            await asyncio.sleep(wait_s)
-            for _ in range(len(clients)):
-                cli = clients[cli_idx % len(clients)]
-                p2  = dict(payload); p2["model"] = cli["model"]
+                        # HTTP status tekshirish
+                        status = r.status
+                        # Retry-After header — server qancha kutishni aytadi
+                        retry_after = r.headers.get("Retry-After", "")
+                        data   = await r.json(content_type=None)
+
+                # Rate limit — HTTP 429 yoki error kodida
+                is_rate = False
+                if status == 429:
+                    is_rate = True
+                    # 429 ning ANIQ sababini log qilamiz (kvota/limit/kalit)
+                    try:
+                        _emsg = ""
+                        if isinstance(data, dict):
+                            _e = data.get("error", {})
+                            _emsg = _e.get("message", str(_e)) if isinstance(_e, dict) else str(_e)
+                        log.warning(f"[{cli['name']}] 429 SABABI: {_emsg[:250]}")
+                    except Exception:
+                        pass
+                elif isinstance(data, dict):
+                    err  = data.get("error", {}) or {}
+                    code = str(err.get("type","")) + str(err.get("code","")) + str(err.get("message",""))
+                    if any(w in code.lower() for w in
+                           ["rate_limit","quota","tokens_per","capacity","too_many","overloaded"]):
+                        is_rate = True
+
+                if is_rate:
+                    cli_idx += 1
+                    tried = attempt + 1
+                    log.warning(
+                        f"[{cli['name']}] {status} limit "
+                        f"({tried}/{len(clients)} sinab ko'rildi)"
+                    )
+                    if tried >= len(clients):
+                        # Server aytgan vaqt bor bo'lsa — shuni ishlatamiz, yo'q bo'lsa 62s
+                        wait_s = 62
+                        try:
+                            if retry_after and retry_after.isdigit():
+                                wait_s = min(int(retry_after) + 2, 120)
+                        except Exception:
+                            pass
+                        log.warning(f"Barcha {len(clients)} kalit limitda. {wait_s}s kutamiz...")
+                        await asyncio.sleep(wait_s)
+                        cli_idx = 0
+                    else:
+                        await asyncio.sleep(3)
+                    continue
+
+                # Javobni shu yerda parse qilamiz — xato bo'lsa keyingi providerga
                 try:
-                    async with aiohttp.ClientSession() as s:
-                        async with s.post(
-                            cli["url"],
-                            headers={"Authorization": f"Bearer {cli['key']}",
-                                     "Content-Type": "application/json"},
-                            json=p2, timeout=aiohttp.ClientTimeout(total=90),
-                        ) as r:
-                            data = await r.json()
-                    if not data.get("error"):
-                        return data
+                    parsed = _parse_ai_response(data)
+                    return parsed
+                except Exception as pe:
+                    log.warning(f"[{cli['name']}] parse xato, keyingisiga: {pe}")
                     cli_idx += 1
-                except Exception:
-                    cli_idx += 1
-        raise ValueError(f"Barcha {len(clients)} ta kalit/provider ishlamadi! ({names})")
+                    await asyncio.sleep(1)
+                    continue
+
+            except aiohttp.ClientError as e:
+                log.warning(f"[{cli['name']}] network xato: {e}")
+                cli_idx += 1
+            except Exception as e:
+                log.warning(f"[{cli['name']}] kutilmagan xato: {e}")
+                cli_idx += 1
+
+        raise ValueError(f"Barcha {len(clients)} provider ishlamadi! ({names})")
+
+    # Izoh turi bo'yicha ko'rsatma (foydalanuvchiga ko'rinadigan "explanation" uchun)
+    _exp_instr = {
+        "full":  "\"explanation\" maydonini O'ZBEK TILIDA, 2-4 jumlada, \"reasoning\" mazmuniga TO'LIQ MOS holda yozing — nega bu javob to'g'ri va qolganlari nega noto'g'ri ekanini asoslang.",
+        "short": "\"explanation\" maydonini O'ZBEK TILIDA bir qisqa jumlada, \"reasoning\" xulosasiga mos yozing.",
+        "none":  "\"explanation\" maydonini bo'sh satr (\"\") qilib qoldiring — lekin \"reasoning\" maydonini baribir to'liq yozing, chunki javobni shu orqali aniqlaysiz.",
+    }.get(explain_mode, "\"explanation\" maydonini O'ZBEK TILIDA qisqa yozing.")
 
     SYSTEM = (
-        "Siz akademik test yechuvchi ekspert mutaxasssissiz. "
-        "Sizga berilgan test savollarini academic darajada aniq va xatolarsiz yeching. "
-        "Har bir savol uchun to'g'ri javob indeksini 0 dan boshlab aniqlang. "
-        "Faqat JSON formatda javob bering, boshqa hech narsa yozmang."
+        "Siz yuqori malakali, ko'p sohali (IT, matematika, fizika, tarix, til, tibbiyot, "
+        "huquq va boshqa) AKADEMIK TEST EKSPERTISIZ. Vazifangiz — har bir test savolini "
+        "MAKSIMAL ANIQLIK bilan, akademik darajada, xatosiz yechish.\n\n"
+        "QATTIQ QOIDALAR (har biriga so'zsiz amal qiling):\n"
+        "1. Har bir savol uchun AVVAL \"reasoning\" maydonida qisqa, lekin to'liq mantiqiy "
+        "zanjir bilan ISHLANG: berilgan barcha variantlarni birma-bir ko'rib chiqing, har "
+        "birining nega to'g'ri yoki noto'g'ri ekanini aniqlang, FAQAT shundan keyin "
+        "\"correct_idx\" ni tanlang. \"correct_idx\" sizning \"reasoning\"da chiqargan "
+        "xulosangiz bilan 100% MOS bo'lishi SHART — bu ikkisi orasida hech qachon "
+        "ZIDDIYAT bo'lmasligi kerak.\n"
+        "2. IKKILANMANG. Agar savol noaniq yoki ma'lumot etarli bo'lmasa ham, mavjud "
+        "kontekst, umumiy bilim va eng katta ehtimollik asosida ENG MANTIQIY variantni "
+        "tanlang — \"bilmadim\" yoki taxminiy javob bermang, lekin asossiz taxmin ham "
+        "qilmang: faqat aniq bilim va mantiqqa tayanib qaror qiling.\n"
+        "3. GALLYUTSINATSIYA QILMANG: mavjud bo'lmagan faktlarni to'qib chiqarmang. "
+        "Agar biror atama, sana, formula yoki qoidani aniq bilmasangiz, eng yaqin va "
+        "ishonchli bilimingizga asoslanib qaror qiling, lekin uni reasoning'da noaniq "
+        "deb belgilang.\n"
+        "4. Matematik/texnik hisob-kitoblar bo'lsa — reasoning ichida QADAM-BAQADAM "
+        "hisoblang (masalan: \"=(A1+B1+C1)/D1\" kabi formulalar uchun har bir sonni "
+        "qo'yib chiqib, natijani aniq hisoblang), keyin natijani variantlar bilan "
+        "solishtiring.\n"
+        "5. Bir nechta variant to'g'riga o'xshab ko'rinsa — ENG TO'LIQ va ENG ANIQ "
+        "variantni tanlang (qisman to'g'ri yoki umumiy variantlarni emas).\n"
+        "6. \"correct_idx\" — variantlar ro'yxatidagi 0-based index (birinchi variant = 0).\n"
+        "7. Faqat va faqat JSON massiv qaytaring. JSON dan tashqari birorta ham so'z, "
+        "izoh, markdown belgisi (```), preambula yoki postambula yozmang.\n\n"
+        + _exp_instr
     )
 
     def _bar(done, total, w=10):
@@ -830,10 +1999,15 @@ async def _ai_solve(questions: list, msg) -> list:
     if not total_q:
         return questions
 
-    batch_size    = 40
+    # Kichikroq batch = model har bir savolga ko'proq "e'tibor" beradi.
+    # 40 ta savol bir vaqtda yuborilganda aniqlik pasayadi (reasoning va
+    # tanlangan javob orasida nomuvofiqlik kuzatilgan) — shuning uchun
+    # batch hajmi kamaytirildi.
+    batch_size    = 10
     total_batches = (total_q + batch_size - 1) // batch_size
     solved        = 0
     t0            = time.time()
+    failed_batches = []  # Xato bo'lgan batchlar
 
     for bn, bs in enumerate(range(0, total_q, batch_size), 1):
         batch  = unmarked[bs:bs+batch_size]
@@ -865,20 +2039,31 @@ async def _ai_solve(questions: list, msg) -> list:
                 pass
 
         USER = (
-            "Savollarni yeching va JSON qaytaring:\n"
-            "[{\"idx\": N, \"correct_idx\": 0, \"explanation\": \"izoh\"}]\n\n"
+            "Quyidagi savollarni AKADEMIK ANIQLIK bilan yeching.\n\n"
+            "Har bir savol uchun MAJBURIY JSON tartibi (\"reasoning\" har doim "
+            "\"correct_idx\"dan OLDIN yozilishi shart — avval fikrlang, keyin tanlang):\n"
+            "[\n"
+            "  {\n"
+            "    \"idx\": N,\n"
+            "    \"reasoning\": \"variantlarni birma-bir tahlil qiling, qaysi to'g'ri "
+            "ekanini mantiqiy asoslang (o'zbek yoki ingliz tilida, qisqa lekin to'liq)\",\n"
+            "    \"correct_idx\": <reasoning xulosasiga 100% mos index>,\n"
+            "    \"explanation\": \"foydalanuvchi uchun izoh\"\n"
+            "  }\n"
+            "]\n\n"
+            "ESLATMA: \"correct_idx\" va \"reasoning\" xulosasi ZIDDIYATLI bo'lishi "
+            "MUTLAQO TAQIQLANADI — agar reasoning'da bir variant to'g'ri deb topilsa, "
+            "correct_idx aynan SHU variant indeksini ko'rsatishi kerak.\n\n"
             f"Savollar:\n{json.dumps(q_data, ensure_ascii=False)}"
         )
         try:
-            data = await _post({
+            parsed_items = await _post({
                 "messages":    [{"role":"system","content":SYSTEM},
                                 {"role":"user","content":USER}],
-                "max_tokens":  4000,
-                "temperature": 0.05,
+                "max_tokens":  8000,
+                "temperature": 0.0,
             })
-            txt = data["choices"][0]["message"]["content"].strip()
-            txt = re.sub(r"```json\s*|\s*```", "", txt).strip()
-            for item in json.loads(txt):
+            for item in parsed_items:
                 oi = item.get("idx", -1)
                 ci = item.get("correct_idx", 0)
                 ex = item.get("explanation", "")
@@ -886,20 +2071,99 @@ async def _ai_solve(questions: list, msg) -> list:
                     opts = questions[oi].get("options", [])
                     if 0 <= ci < len(opts):
                         questions[oi]["correct"]    = opts[ci]
-                        questions[oi]["explanation"] = f"🤖 {ex}" if ex else ""
+                        questions[oi]["explanation"] = ex if ex else ""
                         questions[oi]["_ai_solved"]  = True
                         solved += 1
         except Exception as e:
             log.error(f"Batch {bn} xato: {e}")
+            failed_batches.append((bn, bs))
+        else:
+            log.info(f"AI batch {bn}/{total_batches}: {solved} ta yechildi")
+
+        # ── So'rovlar orasida pauza (RPM limitiga urilmaslik) ──
+        # Har provayder o'z free-tier RPM limitiga ega:
+        #   Groq:       30 RPM → 2.5s
+        #   Gemini:     15 RPM → 4.5s
+        #   OpenRouter: 20 RPM → 3.5s
+        #   Together:   ~60 RPM → 1.5s
+        #   OpenAI:     ~3 RPM (free) → 5s
+        if bn < total_batches:
+            cur = clients[cli_idx % len(clients)]["name"] if clients else ""
+            pause = _PROVIDER_PAUSE.get(cur, 6.0)
+            await asyncio.sleep(pause)
+
+    # Xato bo'lgan batchlarni qayta urinib ko'ramiz (1 marta)
+    if failed_batches:
+        log.info(f"Xato batchlar ({len(failed_batches)} ta) qayta urinilmoqda...")
+        if msg:
+            try:
+                await msg.edit_text(
+                    f"🔄 <b>Qayta urinilmoqda...</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"⏳ {len(failed_batches)} ta batch qayta yuborilmoqda",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        await asyncio.sleep(65)  # Rate limit uchun kutamiz
+        for bn, bs in failed_batches:
+            batch  = unmarked[bs:bs+batch_size]
+            q_data = [
+                {"idx": oi, "q": q.get("question",""),
+                 "opts": [re.sub(r"^[A-Ha-h]\s*[).]\s*","",o)
+                          for o in q.get("options",[])]}
+                for oi, q in batch
+            ]
+            USER = (
+                "Quyidagi savollarni AKADEMIK ANIQLIK bilan yeching.\n\n"
+                "Har bir savol uchun MAJBURIY JSON tartibi (\"reasoning\" har doim "
+                "\"correct_idx\"dan OLDIN yozilishi shart — avval fikrlang, keyin tanlang):\n"
+                "[\n"
+                "  {\n"
+                "    \"idx\": N,\n"
+                "    \"reasoning\": \"variantlarni birma-bir tahlil qiling, qaysi to'g'ri "
+                "ekanini mantiqiy asoslang (o'zbek yoki ingliz tilida, qisqa lekin to'liq)\",\n"
+                "    \"correct_idx\": <reasoning xulosasiga 100% mos index>,\n"
+                "    \"explanation\": \"foydalanuvchi uchun izoh\"\n"
+                "  }\n"
+                "]\n\n"
+                "ESLATMA: \"correct_idx\" va \"reasoning\" xulosasi ZIDDIYATLI bo'lishi "
+                "MUTLAQO TAQIQLANADI — agar reasoning'da bir variant to'g'ri deb topilsa, "
+                "correct_idx aynan SHU variant indeksini ko'rsatishi kerak.\n\n"
+                f"Savollar:\n{json.dumps(q_data, ensure_ascii=False)}"
+            )
+            try:
+                parsed_items = await _post({
+                    "messages": [{"role":"system","content":SYSTEM},
+                                 {"role":"user","content":USER}],
+                    "max_tokens": 8000, "temperature": 0.0,
+                })
+                for item in parsed_items:
+                    oi = item.get("idx", -1)
+                    ci = item.get("correct_idx", 0)
+                    ex = item.get("explanation", "")
+                    if 0 <= oi < len(questions):
+                        opts = questions[oi].get("options", [])
+                        if 0 <= ci < len(opts):
+                            questions[oi]["correct"]    = opts[ci]
+                            questions[oi]["explanation"] = ex if ex else ""
+                            questions[oi]["_ai_solved"]  = True
+                            solved += 1
+                log.info(f"Retry batch {bn}: muvaffaqiyatli")
+            except Exception as e:
+                log.error(f"Retry batch {bn} ham xato: {e}")
+            # Retry'da ham provayderga mos pauza
+            _cur = clients[cli_idx % len(clients)]["name"] if clients else ""
+            await asyncio.sleep(_PROVIDER_PAUSE.get(_cur, 6.0))
 
     total_t = int(time.time() - t0)
     m, s = divmod(total_t, 60)
+    log.info(f"AI yakunlandi: {solved}/{total_q} savol yechildi, {m}:{s:02d}")
     if msg:
         try:
             await msg.edit_text(
-                f"✅ <b>AI tugatdi!</b>\n"
+                f"✅ <b>AI (matn) tugatdi!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"[{_bar(total_batches, total_batches)}] {total_batches}/{total_batches}\n"
                 f"📊 {solved}/{total_q} savol yechildi\n"
                 f"⏱ {m}:{s:02d}",
                 parse_mode="HTML"
@@ -1012,6 +2276,73 @@ async def set_pt(callback: CallbackQuery, state: FSMContext):
 # 4. FAN, MAVZU, SOZLAMALAR
 # ═══════════════════════════════════════════════════════════
 
+async def _ask_title(msg, state: FSMContext, category: str, file_name: str = ""):
+    """Test nomini so'rash — qo'lda yoki fayl nomidan"""
+    b = InlineKeyboardBuilder()
+    if file_name:
+        # Fayl nomidan tozalangan nom
+        clean = file_name
+        # Kengaytmani olib tashlaymiz
+        for ext in ('.docx','.doc','.pdf','.txt','.xlsx','.xls'):
+            clean = clean.replace(ext, '').replace(ext.upper(), '')
+        # Maxsus belgilar va pastki chiziqlarni bo'sh joyga
+        import re as _re
+        clean = _re.sub(r'[_\-]+', ' ', clean).strip()
+        clean = _re.sub(r'\s+', ' ', clean).strip()
+        if clean:
+            b.row(InlineKeyboardButton(
+                text=f"📄 {clean[:40]}",
+                callback_data="title_from_file"
+            ))
+    await state.update_data(category=category, _title_suggestion=file_name)
+    await state.set_state(CreateTest.set_title)
+
+    if hasattr(msg, 'edit_text'):
+        await msg.edit_text(
+            f"📁 Fan: <b>{category}</b>\n\n"
+            f"<b>🏷 Test nomini yozing:</b>\n"
+            f"<i>Yoki pastdagi tugma bilan fayl nomidan oling</i>",
+            parse_mode="HTML",
+            reply_markup=b.as_markup() if file_name else None
+        )
+    else:
+        await msg.answer(
+            f"<b>🏷 Test nomini yozing:</b>\n"
+            f"<i>Yoki pastdagi tugma bilan fayl nomidan oling</i>",
+            parse_mode="HTML",
+            reply_markup=b.as_markup() if file_name else None
+        )
+
+
+@router.callback_query(F.data == "title_from_file", CreateTest.set_title)
+async def title_from_file(callback: CallbackQuery, state: FSMContext):
+    """Fayl nomidan test nomini olish"""
+    await callback.answer()
+    d = await state.get_data()
+    file_name = d.get("_file_name", "")
+
+    import re as _re
+    clean = file_name
+    for ext in ('.docx','.doc','.pdf','.txt','.xlsx','.xls'):
+        clean = clean.replace(ext, '').replace(ext.upper(), '')
+    clean = _re.sub(r'[_\-]+', ' ', clean).strip()
+    clean = _re.sub(r'\s+', ' ', clean).strip()
+
+    if not clean:
+        return await callback.answer("Fayl nomi topilmadi", show_alert=True)
+
+    await state.update_data(title=clean)
+    await callback.message.edit_text(
+        f"<b>📊 QIYINLIK DARAJASI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Mavzu: <b>{clean}</b>",
+        parse_mode="HTML",
+        reply_markup=difficulty_kb()
+    )
+    await state.set_state(CreateTest.set_difficulty)
+
+
+
 @router.callback_query(F.data.startswith("subj_"), CreateTest.set_subject)
 async def set_subj(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -1022,11 +2353,9 @@ async def set_subj(callback: CallbackQuery, state: FSMContext):
             "<i>Masalan: Fizika, Ona tili, Tarix...</i>"
         )
     await state.update_data(category=s)
-    await callback.message.edit_text(
-        f"📁 Fan: <b>{s}</b>\n\n"
-        f"<b>🏷 Test nomini yozing:</b>"
-    )
-    await state.set_state(CreateTest.set_title)
+    d = await state.get_data()
+    file_name = d.get("_file_name", "")
+    await _ask_title(callback.message, state, s, file_name)
 
 
 @router.message(F.text, CreateTest.set_subject)
@@ -1037,8 +2366,9 @@ async def subj_text(message: Message, state: FSMContext):
     # Maxsus fan nomini RAM ga saqlash
     from utils.ram_cache import add_user_custom_subject
     add_user_custom_subject(message.from_user.id, subj)
-    await message.answer("<b>🏷 Test nomini yozing:</b>")
-    await state.set_state(CreateTest.set_title)
+    d = await state.get_data()
+    file_name = d.get("_file_name", "")
+    await _ask_title(message, state, subj, file_name)
 
 
 @router.message(F.text, CreateTest.set_title)
@@ -1114,17 +2444,13 @@ async def set_pass(callback: CallbackQuery, state: FSMContext):
 async def set_att(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.update_data(max_attempts=int(callback.data[4:]))
-    from config import ADMIN_IDS as _AIDS
-    _is_adm = callback.from_user.id in _AIDS
     await callback.message.edit_text(
         "<b>🔒 TEST MAXFIYLIGI</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🌍 <b>Ommaviy</b> — hamma ko'ra oladi\n"
         "🔗 <b>Ssilka</b> — faqat havola orqali\n"
-        "🔒 <b>Shaxsiy</b> — faqat siz"
-        + ("\n♻️ <b>Almashtirish</b> — eski test kodi saqlanadi, "
-           "mazmuni shu yangi test bilan to'liq yangilanadi" if _is_adm else ""),
-        reply_markup=visibility_kb(is_admin=_is_adm)
+        "🔒 <b>Shaxsiy</b> — faqat siz",
+        reply_markup=visibility_kb()
     )
     await state.set_state(CreateTest.set_visibility)
 
@@ -1133,7 +2459,7 @@ async def set_att(callback: CallbackQuery, state: FSMContext):
 # 5. SAQLASH
 # ═══════════════════════════════════════════════════════════
 
-@router.callback_query(F.data.startswith("vis_") & (F.data != "vis_replace"), CreateTest.set_visibility)
+@router.callback_query(F.data.startswith("vis_"), CreateTest.set_visibility)
 async def save_test(callback: CallbackQuery, state: FSMContext):
     await callback.answer("⏳")
     uid = callback.from_user.id
@@ -1173,31 +2499,13 @@ async def _do_save_test(callback: CallbackQuery, state: FSMContext):
             return
     # ━━━━━━━━━━━━━━━━━━━━━━━━
     d = await state.get_data()
-
-    # ── 💰 COIN: yaratish narxini yechish (admin bepul, teacher chegirma) ──
-    from utils import coins as C
-    _qs_for_cost = d.get("questions", [])
-    cost = C.create_cost(uid, len(_qs_for_cost))
-    if cost > 0 and not C.spend_coins(uid, cost, f"create {len(_qs_for_cost)}q"):
-        bu0 = (await callback.bot.me()).username
-        _ref_link = f"https://t.me/{bu0}?start=ref{uid}"
-        b = InlineKeyboardBuilder()
-        b.row(InlineKeyboardButton(
-            text="👥 Do'st chaqirish (+coin)",
-            switch_inline_query=f"\n👋 Men bilan testlar yeching! {_ref_link}"))
-        b.row(InlineKeyboardButton(
-            text="🔗 Referal havolamni olish",
-            callback_data="coins_my_ref"))
-        from config import ADMIN_USERNAME
-        b.row(InlineKeyboardButton(
-            text="💳 Hisob to'ldirish (admin)",
-            url=f"https://t.me/{ADMIN_USERNAME}"))
-        b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="cancel_create"))
-        await callback.message.edit_text(
-            C.insufficient_text(uid, cost, "Test yaratish"),
-            reply_markup=b.as_markup())
-        return
-
+    # Savollardan vaqtinchalik (_ bilan boshlanuvchi) maydonlarni tozalaymiz
+    # Lekin "photo" va "image" qoladi (web_test rasmni ko'rsatishi uchun)
+    raw_qs = d.get("questions", [])
+    clean_qs = []
+    for q in raw_qs:
+        cq = {k: v for k, v in q.items() if not k.startswith("_")}
+        clean_qs.append(cq)
     td = {
         "title":         d.get("title", "Nomsiz"),
         "category":      d.get("category", "Boshqa"),
@@ -1207,7 +2515,7 @@ async def _do_save_test(callback: CallbackQuery, state: FSMContext):
         "poll_time":     d.get("poll_time", 30),
         "passing_score": d.get("passing_score", 60),
         "max_attempts":  d.get("max_attempts", 0),
-        "questions":     d.get("questions", []),
+        "questions":     clean_qs,
     }
     tid  = await create_test(
         callback.from_user.id, td,
@@ -1251,8 +2559,7 @@ async def _do_save_test(callback: CallbackQuery, state: FSMContext):
         f"📋 Savollar: <b>{len(qs)} ta</b>\n"
         f"⏱ Umumiy vaqt: {tl_t}\n"
         f"⏱ Poll vaqti: {pt_t}\n"
-        f"🎯 O'tish foizi: <b>{td['passing_score']}%</b>\n"
-        f"{f'💰 Sarflandi: <b>{cost} coin</b> | Qoldiq: <b>{C.get_balance(uid)}</b>' if cost > 0 else '💰 Bepul (admin)'}\n\n"
+        f"🎯 O'tish foizi: <b>{td['passing_score']}%</b>\n\n"
         "👇 <b>Boshlash usulini tanlang:</b>"
     )
 
@@ -1289,128 +2596,6 @@ async def _do_save_test(callback: CallbackQuery, state: FSMContext):
 async def cancel_create(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
-
-
-# ═══════════════════════════════════════════════════════════
-# ♻️ ESKI TESTNI ALMASHTIRISH (faqat admin)
-#    Yangi test tayyor bo'lgach, eski test KODI kiritiladi —
-#    o'sha kod ostidagi test to'liq yangisi bilan yoziladi.
-#    Tarqatilgan havolalar o'zgarmaydi.
-# ═══════════════════════════════════════════════════════════
-@router.callback_query(F.data == "vis_replace", CreateTest.set_visibility)
-async def vis_replace_start(callback: CallbackQuery, state: FSMContext):
-    from config import ADMIN_IDS
-    if callback.from_user.id not in ADMIN_IDS:
-        return await callback.answer("🚫 Faqat admin", show_alert=True)
-    await callback.answer()
-    d = await state.get_data()
-    qc = len(d.get("questions", []))
-    await state.set_state(CreateTest.replace_code)
-    await callback.message.edit_text(
-        "♻️ <b>ESKI TESTNI ALMASHTIRISH</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📋 Yangi test: <b>{qc} ta savol</b> tayyor.\n\n"
-        "Qaysi testni almashtiramiz?\n"
-        "Eski test <b>KODI</b>ni yuboring (masalan: <code>AB12CD34</code>).\n\n"
-        "⚠️ Eski test mazmuni to'liq yangisi bilan yoziladi,\n"
-        "lekin kodi, havolasi va statistikasi saqlanadi.\n"
-        "🗄 Eski versiya zaxiraga olinadi (tiklash mumkin).\n\n"
-        "❌ Bekor qilish: /cancel",
-    )
-
-
-@router.message(CreateTest.replace_code)
-async def vis_replace_code(message: Message, state: FSMContext):
-    from config import ADMIN_IDS
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    code = (message.text or "").strip().upper()
-    if code in ("/CANCEL", "BEKOR"):
-        await state.clear()
-        return await message.answer("❌ Bekor qilindi.")
-    import re as _re
-    code = _re.sub(r"[^A-Z0-9_]", "", code)
-    if not code or len(code) < 4:
-        return await message.answer("❌ Noto'g'ri kod. Qayta yuboring yoki /cancel")
-
-    from utils.ram_cache import get_test_meta as _gtm
-    old_meta = _gtm(code)
-    if not old_meta:
-        return await message.answer(
-            f"❌ <code>{code}</code> topilmadi.\n"
-            "Kodni tekshirib qayta yuboring yoki /cancel")
-
-    d = await state.get_data()
-    await state.update_data(replace_tid=code)
-    b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="✅ Ha, almashtirilsin",
-                               callback_data="replace_confirm"))
-    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_create"))
-    await message.answer(
-        "♻️ <b>TASDIQLASH</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 Kod: <code>{code}</code>\n"
-        f"📝 Eski: <b>{old_meta.get('title','?')}</b> "
-        f"({old_meta.get('question_count',0)} savol)\n"
-        f"📝 Yangi: <b>{d.get('title','Nomsiz')}</b> "
-        f"({len(d.get('questions',[]))} savol)\n\n"
-        "Eski test mazmuni butunlay almashtiriladi. Davom etamizmi?",
-        reply_markup=b.as_markup())
-
-
-@router.callback_query(F.data == "replace_confirm", CreateTest.replace_code)
-async def vis_replace_confirm(callback: CallbackQuery, state: FSMContext):
-    from config import ADMIN_IDS
-    uid = callback.from_user.id
-    if uid not in ADMIN_IDS:
-        return await callback.answer("🚫", show_alert=True)
-    await callback.answer()
-    d   = await state.get_data()
-    tid = d.get("replace_tid", "")
-    old = None
-    try:
-        from utils.ram_cache import get_test_meta as _gtm
-        old = _gtm(tid)
-    except Exception:
-        pass
-    if not tid or not old:
-        await state.clear()
-        return await callback.message.edit_text("❌ Eski test topilmadi.")
-
-    td = {
-        "title":         d.get("title", old.get("title", "Nomsiz")),
-        "category":      d.get("category", old.get("category", "Boshqa")),
-        "difficulty":    d.get("difficulty", old.get("difficulty", "medium")),
-        "visibility":    old.get("visibility", "link"),   # ko'rinish saqlanadi
-        "time_limit":    d.get("time_limit", old.get("time_limit", 0)),
-        "poll_time":     d.get("poll_time", old.get("poll_time", 30)),
-        "passing_score": d.get("passing_score", old.get("passing_score", 60)),
-        "max_attempts":  d.get("max_attempts", old.get("max_attempts", 0)),
-        "questions":     d.get("questions", []),
-        "creator_id":        old.get("creator_id", uid),
-        "creator_name":      old.get("creator_name", ""),
-        "creator_username":  old.get("creator_username", ""),
-    }
-    await state.clear()
-    wait = await callback.message.edit_text("♻️ <b>Almashtirilmoqda...</b>")
-
-    from utils import tg_db
-    res = await tg_db.replace_test_full(tid, td, replaced_by=uid)
-    if not res.get("ok"):
-        return await wait.edit_text(f"❌ Xato: {res.get('error')}")
-
-    bu   = (await callback.bot.me()).username
-    link = f"https://t.me/{bu}?start={tid}"
-    await wait.edit_text(
-        "✅ <b>TEST ALMASHTIRILDI!</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 Kod (o'zgarmadi): <code>{tid}</code>\n"
-        f"🔗 Ssilka: <code>{link}</code>\n"
-        f"📝 Yangi nom: <b>{td['title']}</b>\n"
-        f"📋 Savollar: {res['old_qc']} → <b>{res['new_qc']} ta</b>\n\n"
-        "🗄 Eski versiya zaxirada (O'chirilgan testlar bo'limida).\n"
-        "📢 Hammaga qayta tarqatish SHART EMAS — eski havola ishlaydi.",
-        reply_markup=test_created_kb(tid, bu))
     try:
         await callback.message.delete()
     except Exception:
@@ -1420,3 +2605,170 @@ async def vis_replace_confirm(callback: CallbackQuery, state: FSMContext):
         "❌ Bekor qilindi.",
         reply_markup=main_kb(callback.from_user.id, "private")
     )
+
+
+# ═══════════════════════════════════════════════════════════
+# AI BILAN QAYTA YECHISH (mavjud test uchun)
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("reai_"))
+async def reai_solve(cb: CallbackQuery, state: FSMContext):
+    """Mavjud testning savollarini AI bilan qayta yechadi"""
+    from utils.tg_db import get_test_full, save_test_full
+
+    tid = cb.data[len("reai_"):]
+    await cb.answer()
+
+    test = await get_test_full(tid)
+    if not test or not test.get("questions"):
+        return await cb.message.answer("❌ Test topilmadi yoki bo'sh.")
+
+    questions = test["questions"]
+    total = len(questions)
+
+    # Barcha savollarni AI ga beramiz (belgilangan-belgilanmaganidan qat'i nazar)
+    msg = await cb.message.answer(
+        f"🤖 <b>AI qayta yechmoqda...</b>\n"
+        f"📊 Jami: {total} ta savol\n"
+        f"<i>Iltimos kuting</i>",
+        parse_mode="HTML"
+    )
+
+    # Rasmli va matnli ajratamiz
+    img_qs = [q for q in questions if q.get("_has_image") or q.get("photo")]
+    txt_qs = [q for q in questions if not (q.get("_has_image") or q.get("photo"))]
+
+    solved = 0
+    try:
+        # Matnli savollar — Groq/Gemini/...
+        if txt_qs:
+            txt_qs = await _ai_solve(txt_qs, msg)
+            solved += sum(1 for q in txt_qs if q.get("_ai_solved"))
+        # Rasmli savollar — Gemini Vision (photo file_id orqali)
+        # Eslatma: qayta yechishda rasm bytes yo'q, faqat file_id bor
+        # Shuning uchun rasmli savollar o'tkazib yuboriladi (web edit orqali)
+    except Exception as e:
+        log.error(f"reai_solve xato: {e}")
+
+    # Vaqtinchalik flaglarni tozalaymiz
+    clean_qs = []
+    for q in questions:
+        cq = {k: v for k, v in q.items() if not k.startswith("_")}
+        clean_qs.append(cq)
+    test["questions"] = clean_qs
+
+    # Saqlaymiz
+    try:
+        await save_test_full(test)
+    except Exception as e:
+        log.error(f"reai save xato: {e}")
+        return await msg.edit_text("❌ Saqlashda xato yuz berdi.")
+
+    try:
+        await msg.edit_text(
+            f"✅ <b>AI qayta yechdi!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Jami: <b>{total}</b> ta savol\n"
+            f"✅ Yechildi: <b>{solved}</b> ta\n"
+            + (f"🖼 Rasmli {len(img_qs)} ta — web orqali tahrirlang\n" if img_qs else "")
+            + f"\n<i>Test yangilandi.</i>",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+
+# ═══════════════════════════════════════════════════════════
+# YANGI FAYL YUKLASH (eski test o'rniga)
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("reupload_"))
+async def reupload_start(cb: CallbackQuery, state: FSMContext):
+    """Eski test savollarini yangi fayl bilan almashtirish"""
+    tid = cb.data[len("reupload_"):]
+    await cb.answer()
+
+    await state.update_data(_reupload_tid=tid)
+    await state.set_state(CreateTest.reupload_file)
+    await cb.message.answer(
+        f"📄 <b>Yangi fayl yuboring</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Eski savollar <b>o'chiriladi</b>, yangi fayldagi savollar yuklanadi.\n"
+        f"Test nomi va sozlamalari <b>o'zgarmaydi</b>.\n\n"
+        f"<i>Bekor qilish uchun /start</i>",
+        parse_mode="HTML"
+    )
+
+
+@router.message(F.document, CreateTest.reupload_file)
+async def reupload_file(message: Message, state: FSMContext):
+    """Yangi fayl — eski test savollarini almashtiradi"""
+    import tempfile, os
+    from utils.tg_db import get_test_full, save_test_full
+
+    d   = await state.get_data()
+    tid = d.get("_reupload_tid", "")
+    if not tid:
+        await state.clear()
+        return await message.answer("❌ Test ID topilmadi. /start bilan qayta urinib ko'ring.")
+
+    doc = message.document
+    status = await message.answer("⏳ Fayl yuklanmoqda...")
+
+    try:
+        file = await message.bot.get_file(doc.file_id)
+        ext  = os.path.splitext(doc.file_name or "")[1].lower() or ".docx"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp_path = tmp.name
+        await message.bot.download_file(file.file_path, tmp_path)
+
+        questions = parse_file(tmp_path)
+
+        # Rasmlarni TG kanalga yuklaymiz
+        img_count = sum(1 for q in questions if q.get("_img_bytes"))
+        if img_count > 0:
+            await status.edit_text(f"🖼 {img_count} ta rasm yuklanmoqda...")
+            questions = await _upload_images_to_channel(message.bot, questions)
+
+        try: os.remove(tmp_path)
+        except Exception: pass
+
+        if not questions:
+            await state.clear()
+            return await status.edit_text("❌ Faylda savol topilmadi.")
+
+        # Eski testni olamiz, savollarni almashtiramiz
+        test = await get_test_full(tid)
+        if not test:
+            await state.clear()
+            return await status.edit_text("❌ Eski test topilmadi.")
+
+        # Vaqtinchalik flaglarni tozalaymiz (photo qoladi)
+        clean_qs = []
+        for q in questions:
+            cq = {k: v for k, v in q.items() if not k.startswith("_")}
+            clean_qs.append(cq)
+
+        test["questions"] = clean_qs
+        await save_test_full(test)
+        await state.clear()
+
+        total  = len(clean_qs)
+        marked = sum(1 for q in questions if q.get("_marked"))
+        await status.edit_text(
+            f"✅ <b>Test yangilandi!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Yangi savollar: <b>{total}</b> ta\n"
+            f"✅ Belgilangan: <b>{marked}</b> ta\n"
+            + (f"🖼 Rasmli: <b>{img_count}</b> ta\n" if img_count else "")
+            + f"\n<i>Test nomi va sozlamalari saqlanди.</i>",
+            parse_mode="HTML"
+        )
+
+    except Exception as e:
+        log.error(f"reupload_file xato: {e}")
+        await state.clear()
+        try:
+            await status.edit_text(f"❌ Xato: {str(e)[:100]}")
+        except Exception:
+            pass
