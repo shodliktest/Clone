@@ -493,12 +493,31 @@ async def start_inline_test(callback: CallbackQuery, state: FSMContext):
         return await callback.answer("⛔ Urinishlar tugadi!", show_alert=True)
     cid = callback.message.chat.id if callback.message else uid
 
-    # Avvalgi testni to'xtatish
+    # Faol test borligini tekshirish — ogohlantirish chiqaramiz
     cur = await state.get_state()
     if cur in (TestSolving.answering.state, TestSolving.text_answer.state,
                TestSolving.paused.state):
-        _cancel_timer(uid)
-        await state.clear()
+        d_cur     = await state.get_data()
+        cur_test  = d_cur.get("test", {})
+        cur_title = cur_test.get("title", "Noma'lum test")
+        cur_idx   = d_cur.get("idx", 0)
+        cur_total = len(d_cur.get("qs", []))
+        b = InlineKeyboardBuilder()
+        b.row(
+            InlineKeyboardButton(text="▶️ Davom etish",  callback_data="resume_inline"),
+            InlineKeyboardButton(text="🔄 Yangi test",   callback_data=f"force_start_{tid}"),
+        )
+        try:
+            await callback.message.answer(
+                f"⚠️ <b>Faol test mavjud!</b>\n\n"
+                f"📝 <b>{cur_title}</b>\n"
+                f"📊 Savol: {cur_idx}/{cur_total} ta yechilgan\n\n"
+                f"Iltimos, avvalgi testni yakunlab oling yoki to'xtatib yangi testni boshlang.",
+                reply_markup=b.as_markup()
+            )
+        except Exception:
+            pass
+        return
 
     test = get_test_by_id(tid)
     if not test or not test.get("questions"):
@@ -550,7 +569,60 @@ async def start_inline_test(callback: CallbackQuery, state: FSMContext):
         )
     except Exception: pass
 
+    # START bosgan odamni 0-natija bilan saqlaymiz
+    _register_participant(uid, tid, test)
+
     await _send_question_new(callback.bot, cid, state, uid)
+
+
+@router.callback_query(F.data.startswith("force_start_"))
+async def force_start_cb(callback: CallbackQuery, state: FSMContext):
+    """Faol testni to'xtatib, yangi testni boshlash"""
+    await callback.answer()
+    tid = callback.data[12:]
+    uid = callback.from_user.id
+
+    # Avvalgi testni tozalash
+    _cancel_timer(uid)
+    d_old = await state.get_data()
+    old_tid = d_old.get("test", {}).get("test_id", "")
+    if old_tid:
+        # Chala natijani saqlash
+        await _save_partial_result(
+            uid, old_tid,
+            list(d_old.get("ans", {}).values()),
+            d_old.get("qs", []),
+            d_old
+        )
+    await state.clear()
+
+    # Yangi testni boshlash — start_inline_test ga yo'naltirish
+    from aiogram.types import CallbackQuery as CQ
+    callback.data = f"start_test_{tid}"
+    await start_inline_test(callback, state)
+
+
+def _register_participant(uid: int, tid: str, test: dict):
+    """
+    Test boshlanganida foydalanuvchini 0-natija bilan ro'yxatga olish.
+    Agar bu user avval yechmagan bo'lsa — attempts=0 bo'lib ko'rinadi.
+    """
+    from utils import ram_cache as _ram
+    uid_str = str(uid)
+    stats   = _ram.get_user_stats_cache(uid_str) or {}
+    if tid not in stats:
+        from datetime import datetime, timezone as _tz
+        now_str = str(datetime.now(_tz.utc))[:16]
+        stats[tid] = {
+            "attempts":   0,
+            "all_pcts":   [],
+            "best_score": 0.0,
+            "avg_score":  0.0,
+            "last_at":    now_str,
+            "passed":     False,
+            "started":    True,
+        }
+        _ram.set_user_stats_cache(uid_str, stats, dirty=True)
 
 
 async def _send_question_new(bot, cid, state, uid):
