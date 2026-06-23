@@ -1245,25 +1245,28 @@ async def test_solvers_cb(callback: CallbackQuery):
         return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
 
     solvers = get_test_solvers(tid)
+    finished  = [s for s in solvers if s.get("attempts", 0) > 0]
+    started   = [s for s in solvers if s.get("attempts", 0) == 0]
+
     if not solvers:
         b = InlineKeyboardBuilder()
         b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"mytest_settings_{tid}"))
         try:
             await callback.message.edit_text(
-                f"📊 <b>{meta.get('title','?')} — KIM YECHGAN</b>\n\n😔 Hali hech kim yechmagan.",
+                f"📊 <b>{meta.get('title','?')} — KIM YECHGAN</b>\n\n😔 Hali hech kim boshlamagan.",
                 reply_markup=b.as_markup()
             )
         except TelegramBadRequest: pass
         return
 
     PG    = 5
-    total = (len(solvers)+PG-1)//PG
+    total = (len(finished)+PG-1)//PG if finished else 1
     page  = max(0, min(page, total-1))
-    chunk = solvers[page*PG:(page+1)*PG]
+    chunk = finished[page*PG:(page+1)*PG]
     text  = (
         f"📊 <b>{meta.get('title','?')} — KIM YECHGAN</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👥 {len(solvers)} kishi | Sahifa {page+1}/{total}\n"
+        f"✅ Tugatgan: {len(finished)} | ⏳ Boshlagan: {len(started)}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
     )
     b = InlineKeyboardBuilder()
@@ -1279,6 +1282,15 @@ async def test_solvers_cb(callback: CallbackQuery):
             text=f"🔍 {sv['name'][:20]} — {sv['best_score']}%",
             callback_data=f"solver_detail_{tid}_{sv['uid']}"
         ))
+
+    # Faqat boshlagan (0-natijali) userlar ro'yxati — oxirida
+    if started and not chunk:
+        text += "⏳ <b>Faqat boshlagan (tugatmagan):</b>\n"
+        for sv in started[:10]:
+            uname = f"@{sv['username']}" if sv.get("username") else ""
+            text += f"   👤 {sv['name']} {uname}\n"
+        if len(started) > 10:
+            text += f"   ... va yana {len(started)-10} kishi\n"
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="◀️", callback_data=f"test_solvers_{tid}_{page-1}"))
@@ -1286,8 +1298,8 @@ async def test_solvers_cb(callback: CallbackQuery):
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"test_solvers_{tid}_{page+1}"))
     if nav: b.row(*nav)
     b.row(
-        InlineKeyboardButton(text="📄 TXT",     callback_data=f"solvers_txt_{tid}"),
-        InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"mytest_settings_{tid}"),
+        InlineKeyboardButton(text="📊 PDF Hisobot", callback_data=f"solvers_pdf_{tid}"),
+        InlineKeyboardButton(text="⬅️ Orqaga",      callback_data=f"mytest_settings_{tid}"),
     )
     try:
         await callback.message.edit_text(text, reply_markup=b.as_markup())
@@ -1333,38 +1345,43 @@ async def solver_detail_cb(callback: CallbackQuery):
         await callback.message.answer(text, reply_markup=b.as_markup())
 
 
-@router.callback_query(F.data.startswith("solvers_txt_"))
-async def solvers_txt_cb(callback: CallbackQuery):
-    await callback.answer("⏳ TXT tayyorlanmoqda...")
+@router.callback_query(F.data.startswith("solvers_pdf_"))
+async def solvers_pdf_cb(callback: CallbackQuery):
+    await callback.answer("⏳ PDF tayyorlanmoqda...")
     tid  = callback.data[12:]
     uid  = callback.from_user.id
     meta = get_test_meta_any(tid)
+    if not meta:
+        return await callback.answer("❌ Test topilmadi.", show_alert=True)
     from config import ADMIN_IDS
     if uid != meta.get("creator_id") and uid not in ADMIN_IDS:
         return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
+
     solvers = get_test_solvers(tid)
-    lines   = [f"TEST: {meta.get('title',tid)}", f"KOD: {tid}",
-               f"JAMI: {len(solvers)} kishi", "="*55, ""]
-    for i, sv in enumerate(solvers,1):
-        all_p = " → ".join(f"{p}%" for p in sv["all_pcts"])
-        lines.append(f"{i}. {sv['name']}")
-        if sv.get("username"): lines.append(f"   @{sv['username']}")
-        lines.append(f"   Urinishlar: {sv['attempts']}")
-        lines.append(f"   Foizlar: {all_p}")
-        lines.append(f"   Eng yaxshi: {sv['best_score']}%")
-        fr = sv.get("first_result") or {}
-        if fr:
-            lines.append(
-                f"   1-urinish: {fr.get('percentage',0)}% | "
-                f"To'g'ri:{fr.get('correct_count',0)} Xato:{fr.get('wrong_count',0)}"
-            )
-        lines.append("")
-    doc = BufferedInputFile(
-        "\n".join(lines).encode("utf-8"),
-        filename=f"solvers_{meta.get('title',tid)}.txt"
-    )
+    try:
+        from utils.pdf_report import generate_solvers_pdf
+        bot_info  = await callback.bot.me()
+        bot_name  = bot_info.first_name or bot_info.username or "QuizMarkerBot"
+        pdf_bytes = generate_solvers_pdf(meta, solvers, bot_name=bot_name)
+    except Exception as e:
+        log.error(f"PDF yaratish xatosi: {e}")
+        return await callback.message.answer(f"❌ PDF yaratishda xato: {e}")
+
+    finished = [s for s in solvers if s.get("attempts", 0) > 0]
+    started  = [s for s in solvers if s.get("attempts", 0) == 0]
+    title    = meta.get("title", tid)
+    safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in title)[:40]
+
+    doc = BufferedInputFile(pdf_bytes, filename=f"Natijalar_{safe_name}.pdf")
     await callback.message.answer_document(
-        doc, caption=f"📊 <b>{meta.get('title',tid)}</b>\n👥 {len(solvers)} kishi"
+        doc,
+        caption=(
+            f"📊 <b>{title}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Tugatdi: <b>{len(finished)}</b> kishi\n"
+            f"⏳ Boshladi: <b>{len(started)}</b> kishi\n"
+            f"👥 Jami: <b>{len(solvers)}</b> kishi"
+        )
     )
 
 
