@@ -930,96 +930,66 @@ async def adm_backups(callback: CallbackQuery):
 @router.message(Command("rescan"))
 async def cmd_rescan(message: Message):
     """
-    TG kanaldan BARCHA JSON fayllarni skanerlaydi va ma'lumotlarni tiklaydi.
-    Testlar, userlar, guruhlar — hammasi tiklanadi.
+    SUPABASE versiyasida kanal skanerlash kerak emas.
+    Bu komanda endi Supabase'dan barcha ma'lumotlarni RAM ga qayta yuklaydi.
     """
     if not is_admin(message.from_user.id):
         return
     from utils import tg_db, ram_cache as ram
-    import time as _time
 
-    before_tests  = len(ram.get_all_tests_meta())
-    before_users  = len(ram.get_users())
-    before_groups = len([g for g in ram.get_known_groups().values() if g.get("active")])
-
+    before = len(ram.get_all_tests_meta())
     msg = await message.answer(
-        "🔍 <b>Kanal skanerlash boshlandi</b>\n\n"
-        "<code>[░░░░░░░░░░░░░░░░░░░░]</code> 0%\n"
-        "📨 0/3000 xabar ko'rildi\n"
-        "✅ 0 ta topildi\n\n"
-        "Bot ishlayveradi ✅"
+        "🔄 <b>Supabase dan qayta yuklanmoqda...</b>\n\n"
+        "Testlar, foydalanuvchilar va sozlamalar\n"
+        "to\'g\'ridan-to\'g\'ri bazadan o\'qiladi.\n\n"
+        "⏳ Bir soniya kuting..."
     )
 
-    # Progress callback
-    last_edit = [0]
-    async def on_progress(scanned, total, found, stage):
-        now = _time.time()
-        if now - last_edit[0] < 8:
-            return
-        last_edit[0] = now
-        bar_len = 20
-        filled  = int(bar_len * scanned / total) if total > 0 else 0
-        bar     = "█" * filled + "░" * (bar_len - filled)
-        pct     = int(100 * scanned / total) if total > 0 else 0
-        stage_txt = {
-            "scan":   "📡 Kanal skanerlash...",
-            "index":  "📋 Index chunklar...",
-            "tests":  "📝 Test fayllar...",
-            "users":  "👥 Foydalanuvchilar...",
-            "groups": "🏘 Guruhlar...",
-        }.get(stage, "⏳ Yuklanmoqda...")
-        try:
-            await msg.edit_text(
-                f"🔍 <b>Kanal skanerlash</b>\n\n"
-                f"{stage_txt}\n"
-                f"<code>[{bar}]</code> {pct}%\n"
-                f"📨 {scanned}/{total} xabar ko'rildi\n"
-                f"✅ {found} ta topildi\n\n"
-                f"Bot ishlayveradi ✅"
-            )
-        except Exception: pass
+    try:
+        await tg_db._load_tests_meta_to_ram()
+        await tg_db._load_users_to_ram()
+        await tg_db.load_known_groups()
 
-    result = await tg_db._migrate_from_old_index(progress_callback=on_progress)
+        after = len(ram.get_all_tests_meta())
+        users = len(ram.get_users())
 
-    after_tests  = len(ram.get_all_tests_meta())
-    after_users  = len(ram.get_users())
-    after_groups = len([g for g in ram.get_known_groups().values() if g.get("active")])
-
-    if result:
         await msg.edit_text(
-            f"✅ <b>Skanerlash yakunlandi!</b>\n\n"
-            f"📋 Testlar: <b>{before_tests}</b> → <b>{after_tests}</b> ta\n"
-            f"👥 Userlar: <b>{before_users}</b> → <b>{after_users}</b> ta\n"
-            f"🏘 Guruhlar: <b>{before_groups}</b> → <b>{after_groups}</b> ta\n\n"
-            f"✅ Hammasi tiklanib saqlandi!"
+            f"✅ <b>Yuklash yakunlandi!</b>\n\n"
+            f"📋 Testlar: <b>{before}</b> → <b>{after}</b> ta\n"
+            f"👥 Userlar: <b>{users}</b> ta\n\n"
+            f"🗄 Manba: Supabase (Postgres)"
         )
-    else:
-        await msg.edit_text(
-            "⚠️ Skanerlash natija bermadi.\n"
-            "Kanal bo'sh yoki xato yuz berdi."
-        )
+    except Exception as e:
+        await msg.edit_text(f"❌ Xato: {e}")
 
 
 @router.message(Command("reindex"))
 async def cmd_reindex(message: Message):
+    """
+    SUPABASE versiyasida reindex = barcha testlarni bazaga qayta yozish
+    (masalan meta ma'lumotlari to\'g\'rilash kerak bo\'lsa).
+    """
     if not is_admin(message.from_user.id):
         return
-    msg = await message.answer(
-        "♻️ <b>Reindex boshlandi...</b>\n"
-        "Barcha testlar qayta saqlanadi (protect_content=False).\n"
-        "Bu bir necha daqiqa davom etishi mumkin."
-    )
     from utils import tg_db, ram_cache as ram
-    metas  = ram.get_all_tests_meta()
-    total  = len(metas)
-    ok     = 0
+
+    metas = ram.get_all_tests_meta()
+    total = len(metas)
+    if not total:
+        await message.answer("📭 RAM da test yo\'q. Avval /rescan bajaring.")
+        return
+
+    msg = await message.answer(
+        f"♻️ <b>Reindex boshlandi...</b>\n"
+        f"{total} ta test meta Supabase ga yangilanadi."
+    )
+    ok = 0
     failed = 0
 
     for i, meta in enumerate(metas):
         tid = meta.get("test_id")
         if not tid:
             continue
-        # To'liq testni RAM yoki TGdan olish
         test = ram.get_cached_questions(tid) or tg_db._tests_cache.get(tid)
         if not test or not test.get("questions"):
             try:
@@ -1029,40 +999,32 @@ async def cmd_reindex(message: Message):
         if not test or not test.get("questions"):
             failed += 1
             continue
-        # protect_content=False bilan qayta saqlash
-        saved = await tg_db.save_test_full(test)
-        if saved:
-            ok += 1
-        else:
+        try:
+            saved = await tg_db.save_test_full(test)
+            if saved:
+                ok += 1
+            else:
+                failed += 1
+        except Exception:
             failed += 1
-        # Progress har 5 testda
-        if (i + 1) % 5 == 0:
+
+        if (i + 1) % 20 == 0:
             try:
                 await msg.edit_text(
                     f"♻️ <b>Reindex:</b> {i+1}/{total}\n"
-                    f"✅ {ok} ta saqlandi | ❌ {failed} ta xato"
+                    f"✅ {ok} ta | ❌ {failed} ta"
                 )
             except Exception:
                 pass
-        await asyncio.sleep(0.3)  # Flood oldini olish
 
-    try:
-        await msg.edit_text(
-            f"✅ <b>Reindex yakunlandi!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 Jami: {total} ta test\n"
-            f"✅ Saqlandi: {ok} ta\n"
-            f"❌ Xato: {failed} ta\n\n"
-            f"Endi barcha testlar protect_content=False bilan saqlanmoqda.\n"
-            f"Keyingi rebootlarda muammo bo'lmaydi."
-        )
-    except Exception:
-        pass
+    await msg.edit_text(
+        f"✅ <b>Reindex yakunlandi!</b>\n\n"
+        f"📋 Jami: {total} ta\n"
+        f"✅ Muvaffaqiyatli: {ok} ta\n"
+        f"❌ Xato: {failed} ta\n\n"
+        f"🗄 Manba: Supabase (Postgres)"
+    )
 
-
-# ── Forward rejimi ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-_forward_mode_users = set()   # Forward rejimda turgan adminlar
 
 @router.callback_query(F.data == "admin_forward_mode")
 async def enter_forward_mode(callback: CallbackQuery):
@@ -1731,3 +1693,210 @@ async def _show_loops(ev, edit=False):
             await msg.answer(text, reply_markup=b.as_markup())
     except TelegramBadRequest:
         await msg.answer(text, reply_markup=b.as_markup())
+
+
+# ══ LIVE MONITOR ══════════════════════════════════════════════
+@router.callback_query(F.data == "adm_live")
+async def adm_live_cb(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await _show_live(callback.message, edit=True)
+
+
+@router.callback_query(F.data == "adm_live_refresh")
+async def adm_live_refresh_cb(callback: CallbackQuery):
+    await callback.answer("🔄")
+    if not is_admin(callback.from_user.id): return
+    await _show_live(callback.message, edit=True)
+
+
+async def _show_live(msg, edit=False):
+    from utils.ram_cache import get_live_sessions, get_live_by_test
+    sessions  = get_live_sessions()
+    by_test   = get_live_by_test()
+
+    lines = ["📡 <b>LIVE MONITOR</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n"]
+
+    if not sessions:
+        lines.append("😴 Hozir hech kim test yechmayapti")
+    else:
+        lines.append(f"🟢 Aktiv: <b>{len(sessions)} kishi</b>\n")
+        for tid, sess_list in by_test.items():
+            title = sess_list[0].get("title", tid)
+            lines.append(f"📝 <b>{title[:35]}</b> — {len(sess_list)} kishi")
+            for s in sess_list[:5]:
+                mode_icon = "📊" if s["mode"] == "poll" else "📋"
+                chat = s["chat_title"]
+                lines.append(
+                    f"  {mode_icon} Savol {s['idx']}/{s['total']} | "
+                    f"⏱ {s['elapsed']} | 🏘 {chat}"
+                )
+            if len(sess_list) > 5:
+                lines.append(f"  ... va yana {len(sess_list)-5} kishi")
+            lines.append("")
+
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="🔄 Yangilash", callback_data="adm_live_refresh"),
+        InlineKeyboardButton(text="⬅️ Admin",     callback_data="admin_panel"),
+    )
+    text = "\n".join(lines)
+    try:
+        if edit:
+            await msg.edit_text(text, reply_markup=b.as_markup())
+        else:
+            await msg.answer(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=b.as_markup())
+
+
+# ══ TEST QIDIRISH (kod orqali) ═════════════════════════════════
+@router.callback_query(F.data == "adm_find_test")
+async def adm_find_test_cb(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="admin_panel"))
+    try:
+        await callback.message.edit_text(
+            "🔍 <b>TEST QIDIRISH</b>\n\n"
+            "Test kodini yoki sarlavhasining bir qismini yozing:\n\n"
+            "<i>Masalan: ABC123 yoki «matematika»</i>",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest:
+        await callback.message.answer(
+            "🔍 <b>TEST QIDIRISH</b>\n\nTest kodini yoki sarlavhasini yozing:",
+            reply_markup=b.as_markup()
+        )
+    await state.set_state(AdminPanel.find_test)
+
+
+@router.message(AdminPanel.find_test)
+async def adm_find_test_input(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    query = message.text.strip().upper()
+    try: await message.delete()
+    except Exception: pass
+
+    from utils.ram_cache import get_all_tests_meta, get_test_meta_any
+
+    # 1. To'g'ridan-to'g'ri kod bo'yicha qidirish
+    meta = get_test_meta_any(query)
+
+    # 2. Agar topilmasa — sarlavha bo'yicha qidirish
+    if not meta:
+        query_low = query.lower()
+        all_tests = get_all_tests_meta()
+        matches = [
+            t for t in all_tests
+            if query_low in t.get("title", "").lower()
+            or query_low in t.get("test_id", "").upper()
+        ]
+
+        if not matches:
+            b = InlineKeyboardBuilder()
+            b.row(InlineKeyboardButton(text="🔍 Qayta qidirish", callback_data="adm_find_test"))
+            b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+            await message.answer(
+                f"❌ <b>Topilmadi:</b> <code>{query}</code>\n\n"
+                "Test kodi yoki sarlavha bo'yicha qidirildi.",
+                reply_markup=b.as_markup()
+            )
+            await state.clear()
+            return
+
+        if len(matches) == 1:
+            # Bitta natija — darhol sozlamalarga
+            meta = matches[0]
+        else:
+            # Bir nechta — sahifalash bilan ro'yxat
+            await state.clear()
+            _find_cache[message.from_user.id] = {"matches": matches, "query": query}
+            await _show_find_results(message, matches, page=0, query=query,
+                                     uid=message.from_user.id)
+            return
+
+    # Topildi — sozlamalarga yo'naltirish
+    await state.clear()
+    tid = meta.get("test_id", "")
+    from handlers.profile import _show_test_settings
+    await _show_test_settings(message, meta, tid, edit=False,
+                               viewer_uid=message.from_user.id)
+
+
+# ── Find test pagination ────────────────────────────────────────
+FIND_PER_PAGE = 7
+_find_cache: dict = {}  # uid → {"matches": [...], "query": "..."}
+
+async def _show_find_results(msg, matches: list, page: int, query: str,
+                              edit: bool = False, uid: int = None):
+    total_pages = (len(matches) + FIND_PER_PAGE - 1) // FIND_PER_PAGE
+    page = max(0, min(page, total_pages - 1))
+    chunk = matches[page * FIND_PER_PAGE:(page + 1) * FIND_PER_PAGE]
+    offset = page * FIND_PER_PAGE
+
+    lines = [
+        f"🔍 <b>QIDIRUV:</b> <code>{query}</code>",
+        f"📋 {len(matches)} ta topildi  |  Sahifa {page+1}/{total_pages}\n",
+    ]
+    b = InlineKeyboardBuilder()
+
+    for i, t in enumerate(chunk, offset + 1):
+        tid     = t.get("test_id", "")
+        title   = t.get("title", "?")
+        qc      = t.get("question_count", 0)
+        creator = t.get("creator_name") or t.get("creator_username") or "?"
+        paused  = "⏸" if t.get("is_paused") else ""
+        lines.append(
+            f"{i}. {paused}<b>{title[:35]}</b>\n"
+            f"   🆔 <code>{tid}</code>  📋 {qc} savol  👤 {creator}"
+        )
+        b.row(InlineKeyboardButton(
+            text=f"⚙️ {i}. {title[:22]}",
+            callback_data=f"mytest_settings_{tid}"
+        ))
+
+    # Nav tugmalar
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm_find_p_{page-1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm_find_p_{page+1}"))
+    if nav:
+        b.row(*nav)
+    b.row(
+        InlineKeyboardButton(text="🔍 Qayta", callback_data="adm_find_test"),
+        InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"),
+    )
+
+    text = "\n".join(lines)
+    try:
+        if edit:
+            await msg.edit_text(text, reply_markup=b.as_markup())
+        else:
+            await msg.answer(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data.startswith("adm_find_p_"))
+async def adm_find_page_cb(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    page = int(callback.data[11:])
+    uid  = callback.from_user.id
+    cached = _find_cache.get(uid)
+    if not cached:
+        return await callback.answer("❌ Qidiruv muddati o'tdi. Qayta qidiring.", show_alert=True)
+    await _show_find_results(
+        callback.message,
+        cached["matches"],
+        page=page,
+        query=cached["query"],
+        edit=True,
+        uid=uid
+    )

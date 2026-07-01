@@ -123,7 +123,7 @@ def _make_result(test: dict, bot_username: str, demo=False) -> InlineQueryResult
         demo_q = min(DEMO_MAX, max(DEMO_MIN, qc // 3))
         msg_text = (
             f"🔍 <b>[DEMO] {title}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📁 Fan: <b>{cat}</b>\n"
             f"📊 Qiyinlik: {diff}\n"
             f"📋 Jami savollar: <b>{qc} ta</b>\n"
@@ -149,7 +149,7 @@ def _make_result(test: dict, bot_username: str, demo=False) -> InlineQueryResult
     else:
         msg_text = (
             f"📝 <b>{title}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📁 Fan: <b>{cat}</b>\n"
             f"📊 Qiyinlik: {diff}\n"
             f"📋 Savollar: <b>{qc} ta</b>\n"
@@ -163,16 +163,15 @@ def _make_result(test: dict, bot_username: str, demo=False) -> InlineQueryResult
             from handlers.webauth import WEBAPP_URL as _WU
         except Exception:
             _WU = "https://quizmarkerbotweb.vercel.app"
-        _web_url = f"{_WU}/web_test.html?id={tid}"
         b = InlineKeyboardBuilder()
         b.row(
-            InlineKeyboardButton(text="🌐 Web test",  url=_web_url),
-            InlineKeyboardButton(text="📊 Quiz Poll", url=f"{base}?start=poll_{tid}"),
+            InlineKeyboardButton(text="🌐 Web Test",  url=f"{base}?start=webtest_{tid}"),
+            InlineKeyboardButton(text="📊 Quiz Test", url=f"{base}?start=poll_{tid}"),
         )
         b.row(
-            InlineKeyboardButton(text="👥 Guruhda Poll",
+            InlineKeyboardButton(text="👥 Guruhda Poll Test",
                 url=f"https://t.me/{bot_username}?startgroup=gpoll_{tid}"),
-            InlineKeyboardButton(text="👥 Guruhda Inline",
+            InlineKeyboardButton(text="👥 Guruhda Inline Test",
                 url=f"https://t.me/{bot_username}?startgroup=ginline_{tid}"),
         )
         b.row(

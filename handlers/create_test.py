@@ -1,5 +1,5 @@
 """➕ TEST YARATISH — Fayl yoki QuizBot forward"""
-import os, re, html, logging, tempfile, asyncio
+import os, re, logging, tempfile, asyncio
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
 from aiogram.fsm.context import FSMContext
@@ -433,63 +433,93 @@ async def send_sample(callback: CallbackQuery):
 
 async def _upload_images_to_channel(bot, questions: list) -> list:
     """
-    Rasmli savollarning rasmlarini STORAGE_CHANNEL_ID kanalga yuklaydi.
-    Har rasm uchun file_id olinadi va test JSON ga qo'shiladi.
+    Rasmli savollarning rasmlarini Supabase Storage yoki
+    MEDIA_CHANNEL_ID kanalga yuklaydi.
 
-    q["_img_bytes"] → kanal → file_id → q["photo"] = file_id
-
-    Rasm yechish SHART EMAS — faqat testga ulanadi.
-    web_test.html bu file_id ni /api/proxy orqali ko'rsatadi.
+    Ustuvorlik tartibi:
+      1. Supabase Storage (SUPABASE_URL bor bo'lsa) — to'g'ridan saqlaydi
+      2. MEDIA_CHANNEL_ID (eski yoki alohida media kanal) — Telegram file_id
+      3. Hech biri yo'q — rasmlar saqlanmaydi (matnli savol qoladi)
     """
-    from config import STORAGE_CHANNEL_ID
+    from config import SUPABASE_URL, SUPABASE_KEY
     from aiogram.types import BufferedInputFile
 
-    if not STORAGE_CHANNEL_ID:
-        log.warning("STORAGE_CHANNEL_ID yo'q — rasmlar yuklanmadi")
+    # ── 1. Supabase Storage ──────────────────────────────────────
+    if SUPABASE_URL and SUPABASE_KEY:
+        from utils import supabase_client as sc
+        import base64, mimetypes
+        client = sc.get_client()
+        uploaded = failed = 0
+
+        for idx, q in enumerate(questions):
+            img_bytes = q.get("_img_bytes")
+            if not img_bytes:
+                continue
+            img_ext = q.get("_img_ext", ".png").lstrip(".")
+            fname   = f"quiz_images/q{idx+1}_{int(__import__('time').time())}.{img_ext}"
+            mime    = mimetypes.guess_type(f"f.{img_ext}")[0] or "image/png"
+            try:
+                res = client.storage.from_("quiz-images").upload(
+                    path=fname,
+                    file=img_bytes,
+                    file_options={"content-type": mime, "upsert": "true"},
+                )
+                pub = client.storage.from_("quiz-images").get_public_url(fname)
+                q["photo"]     = pub          # URL sifatida saqlanadi
+                q["photo_url"] = pub
+                uploaded += 1
+            except Exception as e:
+                log.warning(f"Supabase Storage rasm #{idx+1}: {e}")
+                failed += 1
+            finally:
+                q.pop("_img_bytes", None)
+                q.pop("_img_ext", None)
+
+        log.info(f"Rasmlar Supabase'ga: {uploaded} muvaffaqiyatli, {failed} xato")
         return questions
 
-    uploaded = 0
-    failed   = 0
+    # ── 2. MEDIA_CHANNEL_ID (Telegram) ───────────────────────────
+    from config import STORAGE_CHANNEL_ID
+    media_channel = STORAGE_CHANNEL_ID   # eski config moslik uchun saqlanadi
+    if not media_channel:
+        log.warning("SUPABASE_URL ham, STORAGE_CHANNEL_ID ham yo'q — rasmlar yuklanmadi")
+        for q in questions:
+            q.pop("_img_bytes", None)
+            q.pop("_img_ext", None)
+        return questions
 
+    uploaded = failed = 0
     for idx, q in enumerate(questions):
         img_bytes = q.get("_img_bytes")
         if not img_bytes:
             continue
-
         img_ext = q.get("_img_ext", ".png").lstrip(".")
         fname   = f"q{idx+1}.{img_ext}"
 
-        # Bir necha marta urinish (network xato uchun)
         for attempt in range(3):
             try:
                 photo = BufferedInputFile(img_bytes, filename=fname)
                 msg = await bot.send_photo(
-                    STORAGE_CHANNEL_ID,
-                    photo,
+                    media_channel, photo,
                     caption=f"📷 Savol #{idx+1}",
                     disable_notification=True,
                 )
-                # Eng katta o'lchamli rasmning file_id si
                 if msg.photo:
                     q["photo"] = msg.photo[-1].file_id
                     uploaded += 1
-                # Bytes ni JSON ga saqlamaymiz (juda katta bo'ladi)
                 q.pop("_img_bytes", None)
                 q.pop("_img_ext", None)
                 break
             except Exception as e:
-                if attempt < 2:
-                    await asyncio.sleep(2)
-                else:
-                    log.warning(f"Rasm #{idx+1} yuklanmadi: {e}")
-                    failed += 1
+                if attempt == 2:
+                    log.error(f"Rasm #{idx+1} yuklanmadi: {e}")
                     q.pop("_img_bytes", None)
                     q.pop("_img_ext", None)
+                    failed += 1
+                else:
+                    await __import__("asyncio").sleep(2)
 
-        # Telegram rate limit — har rasmdan keyin kichik pauza
-        await asyncio.sleep(0.3)
-
-    log.info(f"Rasmlar: {uploaded} yuklandi, {failed} xato")
+    log.info(f"Rasmlar Telegram'ga: {uploaded} muvaffaqiyatli, {failed} xato")
     return questions
 
 
@@ -510,29 +540,9 @@ async def upload_file(message: Message, state: FSMContext):
         await message.bot.download_file(file.file_path, tmp_path)
 
         questions = parse_file(tmp_path)
-
-        # Fayl hajmini ANIQLASH-DAN OLDIN o'lchaymiz (tmp_path keyinroq
-        # o'chirilishi mumkin) — "savol kam topildi" heuristikasi uchun.
-        try:
-            with open(tmp_path, "rb") as _f:
-                _file_size = len(_f.read())
-        except Exception:
-            _file_size = 0
-
-        total_preview = len(questions)
-        # Heuristika: fayl katta, lekin savol kam topilgan bo'lsa —
-        # bu format TO'LIQ tanilmagan bo'lishi mumkin (parser faqat
-        # qisman/tasodifiy mos kelgan). Bunday holda ham AI-aniqlash
-        # imkonini taklif qilamiz, lekin foydalanuvchi topilgan
-        # savollardan ham foydalanishi mumkin.
-        suspiciously_few = _file_size > 8000 and total_preview <= 5
-
-        # Rasmli savollar uchun tmp_path ni state da saqlaymiz.
-        # Savol UMUMAN topilmagan holatda HAM, "shubhali kam" holatda
-        # HAM faylni saqlaymiz — AI-format-aniqlash funksiyasi xom
-        # matnga keyinroq kirishi kerak bo'ladi.
+        # Rasmli savollar uchun tmp_path ni state da saqlaymiz
         has_img_qs = any(q.get("_has_image") for q in questions)
-        if has_img_qs or not questions or suspiciously_few:
+        if has_img_qs:
             await state.update_data(
                 _tmp_path=tmp_path,
                 _file_name=doc.file_name,  # Fayl nomi — test nomiga taklif
@@ -544,21 +554,14 @@ async def upload_file(message: Message, state: FSMContext):
         await _del(message.bot, message.chat.id, message.message_id)
 
         if not questions:
-            b = InlineKeyboardBuilder()
-            b.button(text="🤖 AI bilan formatni aniqlash", callback_data="fmt_ai_detect")
-            b.adjust(1)
             return await status.edit_text(
                 "❌ <b>Savollar topilmadi!</b>\n\n"
-                "Bu fayl formati botga tanish emas. Quyidagi formatlar "
-                "qo\'llab-quvvatlanadi:\n"
+                "Quyidagi formatlar qo\'llab-quvvatlanadi:\n"
                 "• <b>Standart:</b> <code>===A) To\'g\'ri javob</code>\n"
                 "• <b>==== + #:</b> Savol → ==== → #To\'g\'ri → ====\n"
                 "• <b>Jadval:</b> Savol | To\'g\'ri | Muqobil...\n"
                 "• <b>PDF:</b> ? savol → =Javob\n\n"
-                "AI yordamida bu faylning formatini avtomatik aniqlab "
-                "ko\'rishni xohlaysizmi?",
-                parse_mode="HTML",
-                reply_markup=b.as_markup()
+                "Namunani ko\'rish uchun turni qaytadan tanlang."
             )
 
         total    = len(questions)
@@ -588,10 +591,8 @@ async def upload_file(message: Message, state: FSMContext):
         await state.update_data(questions=questions, _file_id=doc.file_id)
         await state.set_state(CreateTest.upload_file)  # state saqlanadi
 
-        if unmarked > 0 or suspiciously_few:
+        if unmarked > 0:
             b = InlineKeyboardBuilder()
-            if suspiciously_few:
-                b.button(text="🤖 AI bilan formatni qayta aniqlash", callback_data="fmt_ai_detect")
             b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
             b.button(text="🤖 AI bilan yechish",   callback_data="uj_ai")
             b.button(text="📨 Adminga murojaat",   callback_data="uj_admin")
@@ -602,20 +603,13 @@ async def upload_file(message: Message, state: FSMContext):
                 img_line = f"🖼 Rasmli: <b>{img_count}</b> ta (test bilan ulandi)\n"
             elif img_in_file > 0:
                 img_line = f"⚠️ Faylda {img_in_file} rasm bor, lekin bog\'lanmadi\n"
-            warn_line = ""
-            if suspiciously_few:
-                warn_line = (
-                    "\n⚠️ <b>Diqqat:</b> Fayl hajmi katta, lekin atigi shu "
-                    "qadar savol topildi — format TO\'LIQ tanilmagan bo\'lishi "
-                    "mumkin!\n"
-                )
             await status.edit_text(
                 f"📋 <b>{total} TA SAVOL TOPILDI</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
                 f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n"
-                + img_line + warn_line +
-                f"\n<i>Nima qilamiz?</i>",
+                + img_line +
+                f"\n<i>To\'g\'ri javob aniqlanmagan. Nima qilamiz?</i>",
                 parse_mode="HTML",
                 reply_markup=b.as_markup()
             )
@@ -874,245 +868,6 @@ async def uj_back(cb: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         reply_markup=b.as_markup()
     )
-
-
-# ═══════════════════════════════════════════════════════════
-# AI BILAN FORMAT ANIQLASH — noma'lum/xato-tanilgan fayllar uchun
-# ═══════════════════════════════════════════════════════════
-
-@router.callback_query(F.data == "fmt_ai_detect", CreateTest.upload_file)
-async def fmt_ai_detect(cb: CallbackQuery, state: FSMContext):
-    await cb.answer()
-    d        = await state.get_data()
-    tmp_path = d.get("_tmp_path")
-    fname    = d.get("_file_name", "noma'lum")
-    uid      = cb.from_user.id
-    uname    = cb.from_user.full_name or str(uid)
-
-    if not tmp_path or not os.path.exists(tmp_path):
-        return await cb.message.edit_text(
-            "❌ Fayl topilmadi. Iltimos, faylni qaytadan yuboring."
-        )
-
-    await cb.message.edit_text(
-        "🤖 <b>AI format namunani tahlil qilmoqda...</b>\n"
-        "<i>Bu 10-20 soniya vaqt olishi mumkin</i>",
-        parse_mode="HTML"
-    )
-
-    from utils.parser import extract_raw_text, parse_file
-
-    sample = extract_raw_text(tmp_path, max_chars=4000)
-    if not sample.strip():
-        return await cb.message.edit_text(
-            "❌ Fayldan matn chiqarib bo'lmadi (bo'sh yoki rasm-asoslangan "
-            "PDF bo'lishi mumkin). Adminga murojaat qiling."
-        )
-
-    detected_pattern = None
-    detect_error = None
-    try:
-        detected_pattern = await _detect_format_with_ai(sample)
-    except Exception as e:
-        detect_error = str(e)
-        log.error(f"fmt_ai_detect: AI tahlil xato: {e}")
-
-    new_questions = []
-    applied_ok = False
-    if detected_pattern and detected_pattern.get("detected"):
-        try:
-            full_text = extract_raw_text(tmp_path, max_chars=200_000)
-            lines = [l for l in full_text.split("\n") if l.strip()]
-            new_questions = _apply_detected_pattern(lines, detected_pattern)
-            # Mantiqiy tekshiruv: variantlar soni barqarorligi va
-            # savol matni uzunligi me'yorida bo'lishi kerak — aks holda
-            # bu "muvaffaqiyat" ishonchsiz hisoblanadi.
-            if new_questions:
-                avg_opts = sum(len(q["options"]) for q in new_questions) / len(new_questions)
-                reasonable = 2 <= avg_opts <= 8
-                too_few_q = len(new_questions) < 2
-                applied_ok = reasonable and not too_few_q
-        except Exception as e:
-            log.error(f"fmt_ai_detect: pattern qo'llashda xato: {e}")
-            detect_error = (detect_error or "") + f" | apply_error: {e}"
-
-    # ── FALLBACK: qoida ishlamadi → AI to'g'ridan-to'g'ri o'qiydi ──
-    fallback_used = False
-    if not applied_ok:
-        try:
-            full_sample = extract_raw_text(tmp_path, max_chars=4000)
-            direct = await _ai_extract_questions_direct(full_sample)
-            if direct and len(direct) >= 2:
-                new_questions = direct
-                applied_ok = True
-                fallback_used = True
-        except Exception as e:
-            log.error(f"fmt_ai_detect: to'g'ridan-to'g'ri chiqarish xato: {e}")
-            detect_error = (detect_error or "") + f" | direct_error: {e}"
-
-    # ── ADMINGA TO'LIQ TEXNIK HISOBOT ──────────────────────────
-    from config import ADMIN_IDS
-    report_lines = [
-        "🆕 <b>YANGI FORMAT ANIQLANDI (yoki aniqlanmadi)</b>",
-        f"👤 {html.escape(uname)} (<code>{uid}</code>)",
-        f"📄 Fayl: <code>{html.escape(fname)}</code>",
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-    ]
-    if detected_pattern:
-        report_lines += [
-            f"📐 <b>Format nomi:</b> {html.escape(str(detected_pattern.get('format_name', '—')))}",
-            f"📝 <b>Tavsif:</b> {html.escape(str(detected_pattern.get('description', '—')))}",
-            f"❓ <b>Savol tugashi:</b> {html.escape(str(detected_pattern.get('question_ends_with', '—')))}",
-            f"🔘 <b>Variant prefiksi:</b> {html.escape(str(detected_pattern.get('option_prefix_pattern', '—')))}",
-            f"✅ <b>To'g'ri javob belgisi:</b> {html.escape(str(detected_pattern.get('correct_marker', '—')))}",
-            f"➗ <b>Ajratuvchi:</b> {html.escape(str(detected_pattern.get('separator', '—')))}",
-            f"📊 <b>AI ishonchi:</b> {html.escape(str(detected_pattern.get('confidence', '—')))}",
-        ]
-    else:
-        report_lines.append("⚠️ AI format aniqlay olmadi.")
-    fallback_label = "Ha" if fallback_used else "Yo'q"
-    report_lines += [
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"🔧 <b>Qoida orqali natija:</b> {len(new_questions) if applied_ok and not fallback_used else 0} savol",
-        f"🤖 <b>To'g'ridan-to'g'ri AI fallback ishlatildi:</b> {fallback_label}",
-        f"📦 <b>Yakuniy natija:</b> {len(new_questions)} savol topildi",
-    ]
-    if detect_error:
-        report_lines.append(f"❗ <b>Xatolar:</b> <code>{html.escape(str(detect_error)[:300])}</code>")
-    report_lines += [
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "📋 <b>XOM MATN NAMUNASI (qo'lda parser.py ga qo'shish uchun):</b>",
-        f"<pre>{html.escape(sample[:1200])}</pre>",
-    ]
-    report_text = "\n".join(report_lines)
-
-    for aid in ADMIN_IDS:
-        try:
-            await cb.bot.send_message(aid, report_text[:4000], parse_mode="HTML")
-        except Exception:
-            try:
-                # HTML render muvaffaqiyatsiz bo'lsa, teglarni olib tashlab,
-                # oddiy (plain) matn sifatida yuboramiz — escape qilingan
-                # &lt;/&gt;/&amp; ham qaytarib ochiladi, chunki bu safar
-                # parse_mode ishlatilmaydi.
-                plain = re.sub(r"<[^>]+>", "", report_text)
-                plain = html.unescape(plain)
-                await cb.bot.send_message(aid, plain[:4000])
-            except Exception:
-                pass
-        # Fayl namunasini ham alohida hujjat sifatida yuboramiz —
-        # to'liq matn (qisqartirilmagan) parser.py ga format qo'shish uchun
-        try:
-            if os.path.exists(tmp_path):
-                await cb.bot.send_document(
-                    aid, FSInputFile(tmp_path, filename=f"format_namuna_{fname}"),
-                    caption=f"📎 To'liq fayl namunasi — {fname} (yangi format)"
-                )
-        except Exception:
-            pass
-
-    # ── FOYDALANUVCHIGA NATIJA ──────────────────────────────────
-    if applied_ok and new_questions:
-        await state.update_data(questions=new_questions)
-        total    = len(new_questions)
-        unmarked = sum(1 for q in new_questions if not q.get("_marked"))
-        method_line = (
-            "🤖 To'g'ridan-to'g'ri AI orqali" if fallback_used
-            else "🔧 AI aniqlagan qoida orqali"
-        )
-        b = InlineKeyboardBuilder()
-        b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
-        b.button(text="🤖 AI bilan yechish",   callback_data="uj_ai")
-        b.button(text="📨 Adminga murojaat",   callback_data="uj_admin")
-        b.button(text="▶️ Shundayicha davom",  callback_data="uj_skip")
-        b.adjust(1)
-        await cb.message.edit_text(
-            f"✅ <b>Format aniqlandi!</b> ({method_line})\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📋 Jami: <b>{total}</b> ta savol\n"
-            f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
-            f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n\n"
-            f"<i>Bu format adminga yuborildi — kelajakda avtomatik "
-            f"tanilishi uchun parserga qo'shiladi. Davom etamizmi?</i>",
-            parse_mode="HTML",
-            reply_markup=b.as_markup()
-        )
-    else:
-        b = InlineKeyboardBuilder()
-        b.button(text="📨 Adminga murojaat", callback_data="uj_admin")
-        b.adjust(1)
-        await cb.message.edit_text(
-            "❌ <b>AI ham formatni aniqlay olmadi.</b>\n\n"
-            "Fayl namunasi va tafsilotlar adminga yuborildi — tez orada "
-            "bu format qo'llab-quvvatlanadigan formatlar ro'yxatiga "
-            "qo'shiladi.\n\n"
-            "Hozircha boshqa formatdagi fayl bilan urinib ko'ring, yoki "
-            "adminga to'g'ridan-to'g'ri murojaat qiling.",
-            parse_mode="HTML",
-            reply_markup=b.as_markup()
-        )
-
-
-async def _ai_extract_questions_direct(sample_text: str) -> list:
-    """
-    FALLBACK: qoida-asoslangan ajratish ishlamasa, AI to'g'ridan-to'g'ri
-    xom matndan savol+variant+(agar bor bo'lsa)to'g'ri-javobni JSON
-    qilib chiqaradi. AI savollar/variantlarning MANTIQAN to'g'ri va
-    yaxlit ekanligiga e'tibor berishi so'raladi (yarim qolgan jumlalar,
-    aralashib qolgan variantlar bo'lmasligi kerak).
-    """
-    SYSTEM = (
-        "Siz test-fayllarni JSON formatga o'tkazuvchi ekspertsiz. Berilgan "
-        "xom matn ichidan FAQAT chiroyli, MANTIQAN TO'LIQ savol va "
-        "variantlarni chiqarib oling. Agar biror savol yoki variant matni "
-        "kesilgan, tugallanmagan, yoki boshqa savol bilan aralashib qolgan "
-        "bo'lsa — UNI O'TKAZIB YUBORING (chiqarmang), chunki yarim-noto'g'ri "
-        "ma'lumot hech narsadan ko'ra yomonroq. Faqat JSON qaytaring."
-    )
-    USER = (
-        "Quyidagi matndan test savollarini chiqaring. Har bir savol uchun:\n"
-        "[\n"
-        "  {\n"
-        '    "question": "to\'liq savol matni",\n'
-        '    "options": ["variant1", "variant2", ...],\n'
-        '    "correct_idx": <agar to\'g\'ri javob ANIQ ko\'rinsa index, '
-        'aks holda -1>\n'
-        "  }\n"
-        "]\n\n"
-        "FAQAT to'liq, mantiqan tugal savollarni qaytaring. Shubhali "
-        "(kesilgan/aralashgan) savollarni o'tkazib yuboring.\n\n"
-        f"MATN:\n{sample_text[:4000]}"
-    )
-    result = await _ai_call_json({
-        "messages": [{"role": "system", "content": SYSTEM},
-                     {"role": "user", "content": USER}],
-        "max_tokens": 3000,
-        "temperature": 0.0,
-    })
-    if not isinstance(result, list):
-        return []
-
-    LBL = ["A", "B", "C", "D", "E", "F", "G", "H"]
-    questions = []
-    for item in result:
-        if not isinstance(item, dict):
-            continue
-        q_text = (item.get("question") or "").strip()
-        opts_raw = item.get("options") or []
-        if not q_text or len(opts_raw) < 2:
-            continue
-        opts = [f"{LBL[k] if k < len(LBL) else k+1}) {str(o).strip()}"
-                for k, o in enumerate(opts_raw)]
-        ci = item.get("correct_idx", -1)
-        has_mark = isinstance(ci, int) and 0 <= ci < len(opts)
-        questions.append({
-            "type": "multiple_choice", "question": q_text,
-            "options": opts,
-            "correct": opts[ci] if has_mark else "",
-            "explanation": "", "accepted_answers": [], "points": 1,
-            "_marked": has_mark,
-        })
-    return questions
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1461,297 +1216,6 @@ async def _solve_image_questions(questions: list, docx_path: str, msg, explain_m
             )
         except Exception:
             pass
-    return questions
-
-
-async def _ai_call_json(payload: dict, clients: list = None, max_attempts: int = None) -> dict:
-    """
-    Universal AI chaqiruv — har qanday JSON natija (list YOKI dict)
-    qaytaradigan so'rovlar uchun. _ai_solve ichidagi klient-aylanish
-    va xato-boshqarish mantig'ining MUSTAQIL, qayta ishlatiladigan
-    versiyasi (format-aniqlash funksiyasi shuni ishlatadi).
-
-    _ai_solve ning ichki _post/_parse_ai_response funksiyalariga
-    HECH QANDAY o'zgartirish kiritilmagan — bu butunlay yangi,
-    alohida funksiya.
-    """
-    import aiohttp
-
-    if clients is None:
-        clients = _load_ai_clients()
-    if not clients:
-        raise ValueError("AI API kaliti topilmadi!")
-
-    attempts = max_attempts or len(clients)
-    cli_idx = 0
-    last_err = None
-
-    for attempt in range(attempts):
-        cli = clients[cli_idx % len(clients)]
-        p = dict(payload)
-        p["model"] = cli["model"]
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    cli["url"],
-                    headers={"Authorization": f"Bearer {cli['key']}",
-                             "Content-Type": "application/json"},
-                    json=p, timeout=aiohttp.ClientTimeout(total=60),
-                ) as r:
-                    status = r.status
-                    data = await r.json(content_type=None)
-
-            is_rate = status == 429
-            if not is_rate and isinstance(data, dict):
-                err = data.get("error", {}) or {}
-                code = str(err.get("type", "")) + str(err.get("code", "")) + str(err.get("message", ""))
-                if any(w in code.lower() for w in
-                       ["rate_limit", "quota", "tokens_per", "capacity", "too_many", "overloaded"]):
-                    is_rate = True
-
-            if is_rate:
-                cli_idx += 1
-                last_err = ValueError(f"[{cli['name']}] rate limit")
-                await asyncio.sleep(2)
-                continue
-
-            txt = _extract_ai_text(data)
-            result = _extract_json_object(txt)
-            return result
-
-        except Exception as e:
-            last_err = e
-            cli_idx += 1
-            await asyncio.sleep(1)
-            continue
-
-    raise last_err or ValueError("AI chaqiruv muvaffaqiyatsiz")
-
-
-def _extract_ai_text(data: dict) -> str:
-    """AI javobidan matnni chiqaradi (OpenAI/Groq/Gemini formatlari)."""
-    if isinstance(data, dict):
-        err = data.get("error")
-        if err:
-            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-            raise ValueError(f"API xato: {msg}")
-
-    txt = ""
-    choices = data.get("choices") if isinstance(data, dict) else None
-    if choices and isinstance(choices, list) and choices:
-        c = choices[0]
-        if isinstance(c, dict):
-            msg = c.get("message") or c.get("delta") or {}
-            txt = msg.get("content", "") if isinstance(msg, dict) else (msg if isinstance(msg, str) else "")
-
-    if not txt:
-        candidates = data.get("candidates") if isinstance(data, dict) else None
-        if candidates and isinstance(candidates, list) and candidates:
-            c = candidates[0]
-            if isinstance(c, dict):
-                content = c.get("content", {})
-                if isinstance(content, dict):
-                    parts = content.get("parts", [])
-                    if parts and isinstance(parts, list):
-                        txt = parts[0].get("text", "") if isinstance(parts[0], dict) else ""
-
-    if not txt:
-        raise ValueError(f"AI javobida matn topilmadi: {str(data)[:150]}")
-    return txt
-
-
-def _extract_json_object(txt: str):
-    """
-    Matndan birinchi to'liq JSON obyekt YOKI massivni chiqaradi.
-    _ai_solve dagi list-qaytaruvchi mantiqdan farqli — bu DICT ham
-    qaytarishi mumkin (format-aniqlash natijasi {"pattern": ...} kabi).
-    """
-    import json
-    t = txt.strip()
-    t = re.sub(r"```json\s*", "", t)
-    t = re.sub(r"```\s*", "", t)
-    t = t.strip()
-
-    # Birinchi { yoki [ dan boshlab, mos yopilishini topamiz
-    start_obj = t.find("{")
-    start_arr = t.find("[")
-    candidates = [s for s in (start_obj, start_arr) if s != -1]
-    if not candidates:
-        raise ValueError("JSON topilmadi")
-    start = min(candidates)
-    open_ch = t[start]
-    close_ch = "}" if open_ch == "{" else "]"
-
-    depth, in_str, esc, end = 0, False, False, -1
-    for i in range(start, len(t)):
-        ch = t[i]
-        if esc:
-            esc = False
-            continue
-        if ch == "\\":
-            esc = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if not in_str:
-            if ch == open_ch:
-                depth += 1
-            elif ch == close_ch:
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-    if end == -1:
-        # To'liq yopilish topilmadi — oxirigacha kesib sinab ko'ramiz
-        return json.loads(t[start:])
-    return json.loads(t[start:end + 1])
-
-
-async def _detect_format_with_ai(sample_text: str) -> dict:
-    """
-    Noma'lum/parser tanimagan format namunasini AI'ga yuboradi va undan
-    STRUKTURAVIY tavsif (regex emas!) so'raydi. AI'ga regex yozishni
-    ishonib topshirish xavfli (noto'g'ri regex butun faylni buzishi
-    mumkin) — shuning uchun AI faqat quyidagi "savollar"ga javob beradi,
-    va Python kodi shu javoblar asosida MAVJUD, sinalgan heuristikalar
-    bilan ishlaydi (parser.py dagi _looks_like_* funksiyalariga o'xshash
-    mantiq, lekin moslashuvchan parametrlar bilan).
-
-    Qaytaradi:
-    {
-        "detected": bool,
-        "format_name": str,           # qisqa, inson o'qiy oladigan nom
-        "question_ends_with": [..],   # masalan ["?", ":"]
-        "option_prefix_pattern": str, # masalan "A)", "-", "raqamlanmagan"
-        "options_per_question": int,  # taxminiy variant soni (3-6)
-        "correct_marker": str,        # masalan "*", "+", "yo'q (belgisiz)"
-        "separator": str,             # savollar orasidagi ajratuvchi (bo'sh qator, "====" va h.k.)
-        "description": str,           # AI ning o'z so'zi bilan format tavsifi (o'zbek tilida)
-        "confidence": float,          # 0-1 oralig'ida, AI o'z aniqligiga ishonchi
-    }
-    """
-    SYSTEM = (
-        "Siz test-fayl formatlarini tahlil qiluvchi ekspertsiz. Sizga test "
-        "savollari bo'lgan xom matn namunasi beriladi. Vazifangiz — bu matn "
-        "qanday STRUKTURAGA ega ekanini aniqlash (regex YOZMANG, faqat "
-        "tavsiflang). Faqat JSON qaytaring, boshqa hech narsa yozmang."
-    )
-    USER = (
-        "Quyidagi matn test savollari va variantlaridan iborat bo'lishi "
-        "kerak, lekin formati noma'lum. Tahlil qilib, JSON qaytaring:\n\n"
-        "{\n"
-        '  "detected": true/false (agar bu umuman test savollari bo\'lmasa false),\n'
-        '  "format_name": "qisqa nom, masalan \'raqamsiz ketma-ket variantlar\'",\n'
-        '  "question_ends_with": ["?", ":" va h.k. ro\'yxat],\n'
-        '  "option_prefix_pattern": "variantlar qanday boshlanadi: \'A)\' yoki \'-\' yoki \'raqamlanmagan\'",\n'
-        '  "options_per_question": <eng ko\'p uchraydigan variant soni, butun son>,\n'
-        '  "correct_marker": "to\'g\'ri javobni bildiruvchi belgi (masalan \'*\', \'+\', \'#\') yoki \'yo\'q\' agar belgi bo\'lmasa",\n'
-        '  "separator": "savollar orasida nima bor: \'bo\'sh qator\', \'====\', \'raqam\' va h.k.",\n'
-        '  "description": "formatni o\'z so\'zingiz bilan o\'zbek tilida 1-2 jumlada tavsiflang",\n'
-        '  "confidence": <0.0 dan 1.0 gacha, aniqligingizga ishonchingiz>\n'
-        "}\n\n"
-        f"MATN NAMUNASI:\n{sample_text[:4000]}"
-    )
-
-    result = await _ai_call_json({
-        "messages": [{"role": "system", "content": SYSTEM},
-                     {"role": "user", "content": USER}],
-        "max_tokens": 800,
-        "temperature": 0.0,
-    })
-    if not isinstance(result, dict):
-        raise ValueError("AI format-aniqlash natijasi dict emas")
-    return result
-
-
-def _apply_detected_pattern(lines: list, pattern: dict) -> list:
-    """
-    AI aniqlagan STRUKTURAVIY tavsif asosida, mavjud sinalgan
-    heuristikalardan foydalanib savollarni ajratadi. AI hech qanday
-    kod/regex ishlatmaydi — faqat parametrlarni beradi, ajratish
-    logikasi to'liq Python tomonidan, oldindan sinalgan qoidalar
-    bilan bajariladi (xavfsizlik uchun).
-    """
-    q_endings = pattern.get("question_ends_with") or ["?", ":"]
-    marker = (pattern.get("correct_marker") or "").strip()
-    has_marker = marker and marker.lower() not in ("yo'q", "yoq", "none", "-", "")
-
-    def is_question(line: str) -> bool:
-        s = line.strip().rstrip()
-        if not s:
-            return False
-        for end in q_endings:
-            if end and s.endswith(end):
-                return True
-        if '___' in s or '......' in s:
-            return True
-        return False
-
-    def clean_option(line: str):
-        o = line.strip()
-        is_correct = False
-        if has_marker and o.startswith(marker):
-            is_correct = True
-            o = o[len(marker):].strip()
-        m = re.match(r"^[A-Ha-h]\s*[).]\s*(.*)$", o)
-        if m:
-            o = m.group(1).strip()
-        elif o.startswith(('-', '•', '*')) and not (has_marker and marker in ('-', '•', '*')):
-            o = o.lstrip('-•* ').strip()
-        return o, is_correct
-
-    # Sahifa-raqami qatorlarini olib tashlaymiz (PDF artefaktlari)
-    items = [l for l in lines if not re.match(r'^\d{1,3}$', l.strip())]
-    items = [l for l in items if l.strip()]
-
-    tags = ['Q' if is_question(l) else 'O' for l in items]
-
-    # Ketma-ket Q qatorlarni birlashtiramiz (qator-wrap holati)
-    merged, mtags = [], []
-    i, n = 0, len(items)
-    while i < n:
-        if tags[i] == 'Q':
-            text = items[i]
-            j = i + 1
-            while j < n and tags[j] == 'Q':
-                text += ' ' + items[j]
-                j += 1
-            merged.append(text); mtags.append('Q')
-            i = j
-        else:
-            merged.append(items[i]); mtags.append('O')
-            i += 1
-
-    questions = []
-    n2 = len(merged)
-    i = 0
-    while i < n2:
-        if mtags[i] != 'Q':
-            i += 1
-            continue
-        q_text = merged[i].strip()
-        j = i + 1
-        variants, correct_idx = [], -1
-        while j < n2 and mtags[j] == 'O':
-            opt_text, is_c = clean_option(merged[j])
-            if opt_text:
-                if is_c and correct_idx == -1:
-                    correct_idx = len(variants)
-                variants.append(opt_text)
-            j += 1
-        if q_text and len(variants) >= 2:
-            LBL = ["A","B","C","D","E","F","G","H"]
-            opts = [f"{LBL[k] if k < len(LBL) else k+1}) {v}" for k, v in enumerate(variants)]
-            questions.append({
-                "type": "multiple_choice", "question": q_text,
-                "options": opts,
-                "correct": opts[correct_idx] if correct_idx >= 0 else "",
-                "explanation": "", "accepted_answers": [], "points": 1,
-                "_marked": correct_idx >= 0,
-            })
-        i = j if j > i else i + 1
-
     return questions
 
 
