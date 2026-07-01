@@ -1,6 +1,6 @@
 """⌨️ BARCHA KLAVIATURALAR"""
 from aiogram.types import (InlineKeyboardMarkup, InlineKeyboardButton, SwitchInlineQueryChosenChat,
-                            ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove)
+                            ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, WebAppInfo)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import SUBJECTS
 
@@ -129,7 +129,7 @@ def test_info_kb(tid, creator_id=None, viewer_uid=None, back_cb="back_to_cats",
             _wp["uid"] = viewer_uid
         _web = f"{_WU}/web_test.html?" + _ul.urlencode(_wp)
         b.row(
-            InlineKeyboardButton(text="🌐 Web test",  url=_web),
+            InlineKeyboardButton(text="🌐 Web test",  web_app=WebAppInfo(url=_web)),
             InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
         )
     b.row(InlineKeyboardButton(text="📤 Ulashish", switch_inline_query=f"test_{tid}"))
@@ -150,7 +150,7 @@ def test_created_kb(tid, bot_username=""):
     _web = f"{_WU}/web_test.html?id={tid}"
     b = InlineKeyboardBuilder()
     b.row(
-        InlineKeyboardButton(text="🌐 Web test",  url=_web),
+        InlineKeyboardButton(text="🌐 Web test",  web_app=WebAppInfo(url=_web)),
         InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
     )
     b.row(
@@ -165,7 +165,6 @@ def test_created_kb(tid, bot_username=""):
             )
         ),
     )
-    b.row(InlineKeyboardButton(text="📤 Inline ulashish", switch_inline_query=f"test_{tid}"))
     b.row(InlineKeyboardButton(text="🏠 Asosiy menyu", callback_data="main_menu"))
     return b.as_markup()
 
@@ -176,7 +175,7 @@ def result_kb(tid, rid):
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="🔍 Batafsil tahlil", callback_data=f"analysis_{rid}_0"))
     b.row(
-        InlineKeyboardButton(text="🌐 Web test",  url=_web),
+        InlineKeyboardButton(text="🌐 Web test",  web_app=WebAppInfo(url=_web)),
         InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
     )
     b.row(
@@ -191,7 +190,6 @@ def result_kb(tid, rid):
             )
         ),
     )
-    b.row(InlineKeyboardButton(text="📤 Inline ulashish", switch_inline_query=f"test_{tid}"))
     b.row(InlineKeyboardButton(text="🏠 Bosh sahifa", callback_data="main_menu"))
     return b.as_markup()
 
@@ -209,7 +207,7 @@ def analysis_kb(rid, page, total, tid="", is_creator=False):
         from handlers.webauth import WEBAPP_URL
         b.row(InlineKeyboardButton(
             text="✏️ Savollarni tahrirlash (web)",
-            url=f"{WEBAPP_URL}/edit.html?id={tid}"
+            web_app=WebAppInfo(url=f"{WEBAPP_URL}/edit.html?id={tid}")
         ))
     b.row(InlineKeyboardButton(text="⬅️ Natijaga", callback_data=f"res_back_{rid}"))
     b.row(InlineKeyboardButton(text="🏠 Bosh sahifa", callback_data="main_menu"))
@@ -302,7 +300,11 @@ def admin_kb():
         InlineKeyboardButton(text="🛡 Xavfsizlik",        callback_data="admin_security"),
     )
     b.row(
-        InlineKeyboardButton(text="🔁 Loop monitor", callback_data="adm_loops"),
+        InlineKeyboardButton(text="📡 Live Monitor",  callback_data="adm_live"),
+        InlineKeyboardButton(text="🔁 Loop monitor",  callback_data="adm_loops"),
+    )
+    b.row(
+        InlineKeyboardButton(text="🔍 Test qidirish", callback_data="adm_find_test"),
         InlineKeyboardButton(text="🏠 Menyu",         callback_data="main_menu"),
     )
     return b.as_markup()
@@ -384,7 +386,6 @@ def mytest_settings_kb(tid, is_paused=False, is_admin=False):
         ),
     )
     b.row(
-        InlineKeyboardButton(text="📤 Inline ulashish",    switch_inline_query=f"test_{tid}"),
         InlineKeyboardButton(text="🔍 Demo ulashish",      switch_inline_query=f"demo_{tid}"),
     )
     b.row(
