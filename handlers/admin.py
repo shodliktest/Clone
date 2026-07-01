@@ -94,6 +94,7 @@ async def admin_stats(callback: CallbackQuery):
     try: await callback.message.edit_text(text, reply_markup=b.as_markup())
     except TelegramBadRequest: await callback.message.answer(text, reply_markup=b.as_markup())
 
+_forward_mode_users = set()  # Forward rejimdagi adminlarni saqlash uchun to'plam
 
 # ══ USERLAR ════════════════════════════════════════════════════
 @router.callback_query(F.data == "admin_users")
