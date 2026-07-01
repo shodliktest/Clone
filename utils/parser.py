@@ -128,81 +128,6 @@ def parse_file(path: str) -> list:
         return []
 
 
-def extract_raw_text(path: str, max_chars: int = 6000) -> str:
-    """
-    Fayldan XOM matnni chiqaradi (struktura/format aniqlamaydan) —
-    AI-asoslangan format-aniqlash uchun ishlatiladi (parse_file
-    hech qanday format topa olmaganda, AI'ga "namuna" sifatida
-    yuborish kerak bo'lganda).
-
-    Mavjud parsing pipeline'iga ASLO ta'sir qilmaydi — bu butunlay
-    mustaqil, faqat o'qish uchun yordamchi funksiya.
-    """
-    ext = Path(path).suffix.lower()
-    text = ""
-    try:
-        if ext == ".doc":
-            conv = _convert_doc(path)
-            if conv:
-                path, ext = conv, ".docx"
-
-        if ext == ".docx":
-            from docx import Document
-            doc = Document(path)
-            parts = [p.text for p in doc.paragraphs if p.text.strip()]
-            for t in doc.tables:
-                for row in t.rows:
-                    parts.append(" | ".join(c.text.strip() for c in row.cells))
-            text = "\n".join(parts)
-
-        elif ext == ".pdf":
-            try:
-                import fitz
-                d = fitz.open(path)
-                parts = []
-                for page in d:
-                    parts.append(page.get_text())
-                    if sum(len(p) for p in parts) > max_chars * 2:
-                        break
-                text = "\n".join(parts)
-            except Exception:
-                import pdfplumber
-                with pdfplumber.open(path) as pdf:
-                    parts = []
-                    for page in pdf.pages:
-                        t = page.extract_text()
-                        if t:
-                            parts.append(t)
-                        if sum(len(p) for p in parts) > max_chars * 2:
-                            break
-                    text = "\n".join(parts)
-
-        elif ext == ".txt":
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read()
-
-        elif ext in (".xlsx", ".xls", ".xlsm"):
-            import openpyxl
-            wb = wb_o = openpyxl.load_workbook(path, data_only=True, read_only=True)
-            parts = []
-            for ws in wb.worksheets:
-                for row in ws.iter_rows(values_only=True):
-                    cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
-                    if cells:
-                        parts.append(" | ".join(cells))
-                if sum(len(p) for p in parts) > max_chars * 2:
-                    break
-            text = "\n".join(parts)
-            try: wb_o.close()
-            except Exception: pass
-
-    except Exception as e:
-        log.error(f"extract_raw_text xato ({ext}): {e}")
-        return ""
-
-    return text[:max_chars]
-
-
 def _convert_doc(path: str) -> str:
     """
     .doc → .docx konvertatsiya.
@@ -806,33 +731,6 @@ def _looks_like_marker_free_question(line: str) -> bool:
     return False
 
 
-def _looks_like_option_line(line: str) -> bool:
-    """
-    PDF column-wrap holatida savol matnining birinchi qismi ham
-    "variant" qatori bilan bir xil ko'rinishda kelishi mumkin
-    (na "?" bilan tugaydi, na variantga o'xshaydi). Bu funksiya
-    qator HAQIQATAN HAM qisqa/variant-uslubidagi matn ekanini
-    tekshiradi — uzun, kop so'zli, savol-uslubidagi jumla bo'lsa
-    False qaytaradi (bu holda u savol matnining bo'lagi hisoblanadi).
-
-    Heuristika: variantlar odatda qisqa (<=8 so'z) BO'LADI, yoki
-    katta harflar/maxsus belgilar (rus tilidagi menyu nomlari kabi)
-    bilan yozilgan bo'ladi. Savol matni qoldig'i esa odatda uzun
-    (>8 so'z) va oddiy lotin-o'zbek harflarida bo'ladi.
-    """
-    s = line.strip()
-    if not s:
-        return False
-    word_count = len(s.split())
-    if word_count <= 8:
-        return True
-    # Katta harflar ustunlik qilsa (masalan rus menyu nomlari) — variant
-    letters = [c for c in s if c.isalpha()]
-    if letters and sum(1 for c in letters if c.isupper()) / len(letters) > 0.6:
-        return True
-    return False
-
-
 def _parse_marker_free_sequential(lines: list) -> list:
     """
     FORMAT J: Har savol va variant alohida qatorda, hech qanday
@@ -844,19 +742,9 @@ def _parse_marker_free_sequential(lines: list) -> list:
     javob / AI bilan yechish / Adminga murojaat orqali to'ldirishni
     so'raydi.
 
-    PDF dan kelgan matnda savol matni ko'pincha 2 QATORGA bo'linib
-    qoladi (sahifa kengligi sababli), VA bu ikki bo'lak orasiga
-    variant ro'yxati noto'g'ri "kirib qolishi" mumkin emas — aslida
-    ikkala holat ham bo'ladi:
-      (a) ketma-ket ikki "?"-bilan-tugagan qator → bittasiga birlashtiriladi
-      (b) savolning BIRINCHI qismi "?" bilan TUGAMAGANI uchun "variant"
-          deb noto'g'ri belgilanadi, keyin navbatdagi qisqa qoldiq
-          ("ko'rsating?", "sodir bo'ladi?" kabi) alohida "savol" bo'lib
-          chiqadi. Bu holatni aniqlash uchun: agar "Q" qatori juda QISQA
-          (<=5 so'z) bo'lsa va undan OLDINGI qator uzun/savol-uslubidagi
-          matn bo'lsa (variant emas) — ikkisi birlashtirilib, ASL savol
-          matni deb olinadi, va oldingi qator variant ro'yxatidan olib
-          tashlanadi.
+    PDF dan kelgan matnda savol matni ba'zan 2 qatorga bo'linib
+    qolishi mumkin (sahifa kengligi sababli) — bunday hollarda
+    ketma-ket "savolga o'xshash" qatorlar bittasiga birlashtiriladi.
     """
     if not lines:
         return []
@@ -867,34 +755,7 @@ def _parse_marker_free_sequential(lines: list) -> list:
 
     tags = ['Q' if _looks_like_marker_free_question(l) else 'O' for l in items]
 
-    # 1-BOSQICH: qisqa "quyruq" Q-qatorlarni aniqlash va oldingi
-    # "O" qatorga (agar u haqiqatda variant emas, savol bo'lagi
-    # bo'lsa) birlashtirish.
-    SHORT_TAIL_WORDS = 5
-    fixed_items, fixed_tags = [], []
-    i, n = 0, len(items)
-    while i < n:
-        if (tags[i] == 'Q'
-                and len(items[i].split()) <= SHORT_TAIL_WORDS
-                and fixed_tags
-                and fixed_tags[-1] == 'O'
-                and not _looks_like_option_line(fixed_items[-1])):
-            # Oldingi "O" aslida savol matnining birinchi qismi edi —
-            # uni variant ro'yxatidan chiqarib, shu qisqa quyruq bilan
-            # birlashtirib, savol matni deb belgilaymiz.
-            prev_text = fixed_items.pop()
-            fixed_tags.pop()
-            fixed_items.append(prev_text + ' ' + items[i])
-            fixed_tags.append('Q')
-        else:
-            fixed_items.append(items[i])
-            fixed_tags.append(tags[i])
-        i += 1
-
-    items, tags = fixed_items, fixed_tags
-
-    # 2-BOSQICH: Ketma-ket Q qatorlarni bitta savolga birlashtiramiz
-    # (oddiy PDF wrap holati — ikkala qator ham "?" bilan tugaydi).
+    # Ketma-ket Q qatorlarni bitta savolga birlashtiramiz (PDF wrap holati)
     merged_items, merged_tags = [], []
     i, n = 0, len(items)
     while i < n:

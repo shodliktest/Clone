@@ -7,7 +7,7 @@ Jarayon:
   1. Test yaratildi (bot/sayt/fayl/quiz forward — qayerdan bo'lmasin)
   2. Savollar → DOCX formatida fayl yaratiladi
   3. Guruhga DOCX yuboriladi
-  4. Faylga reply: test kartasi + Inline ulashish tugmasi
+  4. Faylga reply: test kartasi + Ulashish tugmasi
 """
 import io
 import logging
@@ -20,9 +20,9 @@ log = logging.getLogger(__name__)
 LETTERS = list("ABCDEFGH")
 
 
-# ══════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # DOCX YARATISH
-# ══════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 
 def _make_docx(questions: list, title: str = "", tid: str = "",
                category: str = "", creator_name: str = "") -> bytes:
@@ -52,14 +52,12 @@ def _make_docx(questions: list, title: str = "", tid: str = "",
     from datetime import datetime
     now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    # Yupqa chiziq
     sep = doc.add_paragraph()
     sep_run = sep.add_run("─" * 45)
     sep_run.font.size = Pt(9)
     sep_run.font.color.rgb = RGBColor(0xCC, 0xCC, 0xCC)
     sep.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # Meta bloki
     meta_items = []
     if tid:          meta_items.append(f"Kod: {tid}")
     if category:     meta_items.append(f"Fan: {category}")
@@ -74,7 +72,6 @@ def _make_docx(questions: list, title: str = "", tid: str = "",
         run.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
         run.italic = True
 
-    # Yupqa chiziq
     sep2 = doc.add_paragraph()
     sep2_run = sep2.add_run("─" * 45)
     sep2_run.font.size = Pt(9)
@@ -101,7 +98,7 @@ def _make_docx(questions: list, title: str = "", tid: str = "",
 
         # Variantlar
         for j, opt in enumerate(opts):
-            clean = re.sub(r'^[A-H]\s*[\).]\s*', '', str(opt)).strip()
+            clean = re.sub(r'^[A-H]\s*[).]\s*', '', str(opt)).strip()
             lbl   = LETTERS[j] if j < len(LETTERS) else str(j)
             is_ok = (j == correct_idx)
 
@@ -156,7 +153,7 @@ def _make_txt(questions: list, title: str = "", tid: str = "",
 
         lines.append(f"{i}. {qt}")
         for j, opt in enumerate(opts):
-            clean = re.sub(r'^[A-H]\s*[\).]\s*', '', str(opt)).strip()
+            clean = re.sub(r'^[A-H]\s*[).]\s*', '', str(opt)).strip()
             lbl   = LETTERS[j] if j < len(LETTERS) else str(j)
             prefix = "*" if j == correct_idx else ""
             lines.append(f"{prefix}{lbl}) {clean}")
@@ -167,25 +164,54 @@ def _make_txt(questions: list, title: str = "", tid: str = "",
     return "\n".join(lines)
 
 
+def _make_txt_plain(questions: list) -> str:
+    """
+    Sof TXT format — meta sarlavhasiz, faqat savol+variant+izoh.
+    Format:
+        1. Savol
+        A) variant
+        B) variant
+        *C) variant   ← to'g'ri javob
+        D) variant
+        Izoh : tushuntirish
+    """
+    lines = []
+    for i, q in enumerate(questions, 1):
+        qt   = q.get("question") or q.get("text") or q.get("q") or ""
+        opts = q.get("options", [])
+        expl = q.get("explanation", "") or ""
+        correct_idx = _resolve_correct_idx(q, opts)
+
+        lines.append(f"{i}. {qt}")
+        for j, opt in enumerate(opts):
+            clean = re.sub(r'^[A-H]\s*[).]\s*', '', str(opt)).strip()
+            lbl   = LETTERS[j] if j < len(LETTERS) else str(j)
+            prefix = "*" if j == correct_idx else ""
+            lines.append(f"{prefix}{lbl}) {clean}")
+        if expl:
+            lines.append(f"Izoh : {expl}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 
 def _add_watermark(doc, creator_name: str = "", bot_username: str = "Quizmarkerbot"):
     """Har sahifaga diagonal watermark: @Bot nomi + Muallif ismi"""
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
     from lxml import etree
 
-    wm1 = ("@" + bot_username) if bot_username else "@TestPro"
+    wm1 = ("@" + bot_username) if bot_username else "@Quizmarkerbot"
     wm2 = ("Muallif: " + creator_name) if creator_name else ""
 
     row2_xml = ""
     if wm2:
         row2_xml = (
             "<w:p>"
-            "<w:pPr><w:jc w:val=\"center\"/></w:pPr>"
+            '<w:pPr><w:jc w:val="center"/></w:pPr>'
             "<w:r>"
             "<w:rPr>"
-            "<w:color w:val=\"D8D8D8\"/>"
-            "<w:sz w:val=\"52\"/><w:szCs w:val=\"52\"/>"
+            '<w:color w:val="D8D8D8"/>'
+            '<w:sz w:val="52"/><w:szCs w:val="52"/>'
             "</w:rPr>"
             "<w:t>" + wm2 + "</w:t>"
             "</w:r>"
@@ -211,12 +237,12 @@ def _add_watermark(doc, creator_name: str = "", bot_username: str = "Quizmarkerb
         "<v:textbox>"
         "<w:txbxContent>"
         "<w:p>"
-        "<w:pPr><w:jc w:val=\"center\"/></w:pPr>"
+        '<w:pPr><w:jc w:val="center"/></w:pPr>'
         "<w:r>"
         "<w:rPr>"
         "<w:b/>"
         '<w:color w:val="C8C8C8"/>'
-        "<w:sz w:val=\"96\"/><w:szCs w:val=\"96\"/>"
+        '<w:sz w:val="96"/><w:szCs w:val="96"/>'
         "</w:rPr>"
         "<w:t>" + wm1 + "</w:t>"
         "</w:r>"
@@ -233,7 +259,6 @@ def _add_watermark(doc, creator_name: str = "", bot_username: str = "Quizmarkerb
 
     for section in doc.sections:
         hdr = section.header
-        # Header paragrafini tayyor qilamiz
         if not hdr.paragraphs:
             hdr.add_paragraph()
         para = hdr.paragraphs[0]
@@ -241,13 +266,13 @@ def _add_watermark(doc, creator_name: str = "", bot_username: str = "Quizmarkerb
         try:
             wm_el = etree.fromstring(xml_str)
             para._p.append(wm_el)
-        except Exception as xe:
-            # Fallback — oddiy matn
+        except Exception:
             from docx.shared import Pt, RGBColor
             r = para.add_run(wm1 + ("  |  " + wm2 if wm2 else ""))
             r.font.size = Pt(7)
             r.font.color.rgb = RGBColor(0xCC, 0xCC, 0xCC)
             r.italic = True
+
 
 def _resolve_correct_idx(q: dict, opts: list) -> int:
     """To'g'ri javob indeksini aniqlash"""
@@ -262,22 +287,22 @@ def _resolve_correct_idx(q: dict, opts: list) -> int:
 
     if isinstance(corr, str):
         # "B) ..." formatida
-        m = re.match(r'^([A-H])\s*[\).]', corr.strip(), re.IGNORECASE)
+        m = re.match(r'^([A-H])\s*[).]', corr.strip(), re.IGNORECASE)
         if m:
             return ord(m.group(1).upper()) - 65
 
         # Variant matni bilan solishtiramiz
-        corr_clean = re.sub(r'^[A-H]\s*[\).]\s*', '', corr).strip()
+        corr_clean = re.sub(r'^[A-H]\s*[).]\s*', '', corr).strip()
         for j, opt in enumerate(opts):
-            opt_clean = re.sub(r'^[A-H]\s*[\).]\s*', '', str(opt)).strip()
+            opt_clean = re.sub(r'^[A-H]\s*[).]\s*', '', str(opt)).strip()
             if opt_clean == corr_clean or corr_clean in opt_clean or opt_clean in corr_clean:
                 return j
     return 0
 
 
-# ══════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # ASOSIY FUNKSIYA
-# ══════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 
 async def publish_to_baza(
     bot,
@@ -294,7 +319,7 @@ async def publish_to_baza(
     """
     Baza Guruhiga e'lon qilish:
       1. DOCX fayl yuborish
-      2. Faylga reply — test kartasi + Inline ulashish
+      2. Faylga reply — test kartasi + Ulashish
     """
     try:
         from config import BAZA_GROUP_ID
@@ -311,11 +336,6 @@ async def publish_to_baza(
         from aiogram.utils.keyboard import InlineKeyboardBuilder
         from aiogram.types import InlineKeyboardButton
 
-        try:
-            from handlers.webauth import WEBAPP_URL
-        except Exception:
-            WEBAPP_URL = "https://quizmarkerbotweb.vercel.app"
-
         diff_map = {
             "easy":   "🟢 Oson",
             "medium": "🟡 O'rtacha",
@@ -327,8 +347,7 @@ async def publish_to_baza(
 
         # ── 1. DOCX fayl tayyorlash ──
         # Fayl nomi — test nomidan, xavfsiz belgilar
-        import re as _re
-        safe_name = _re.sub(r'[\\/:*?"<>|]', '', title or tid).strip() or tid
+        safe_name = re.sub(r'[\\/:*?"<>|]', '', title or tid).strip() or tid
         safe_name = safe_name[:60]  # Maksimal uzunlik
 
         try:
@@ -340,62 +359,90 @@ async def publish_to_baza(
                 creator_name=creator_name,
             )
             filename = f"{safe_name}.docx"
-            mime_ok  = True
         except Exception as de:
             log.warning(f"DOCX xato, TXT ga o'tish: {de}")
             docx_bytes = _make_txt(questions, title, tid, creator_name).encode("utf-8")
             filename   = f"{safe_name}.txt"
-            mime_ok    = False
 
         doc_file = BufferedInputFile(docx_bytes, filename=filename)
+
+        # ── TXT fayl ham tayyorlaymiz (sof format, meta sarlavhasiz) ──
+        txt_str   = _make_txt_plain(questions)
+        txt_bytes = txt_str.encode("utf-8")
+        txt_file  = BufferedInputFile(txt_bytes, filename=f"{safe_name}.txt")
 
         # Caption
         caption = (
             f"📄 <b>{title}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
             f"🆔 <code>{tid}</code>\n"
             f"📁 {category or 'Boshqa'}\n"
             f"📊 {diff_txt}\n"
             f"📋 <b>{qc} ta savol</b>\n"
             f"🎯 O'tish: {passing_score}%\n"
-            f"👤 {creator_name or 'Noma\'lum'}"
+            f"👤 {creator_name or "Noma'lum"}"
         )
 
-        # ── 2. Faylni guruhga yuborish ──
+        # ── 2. DOCX guruhga, TXT esa Storage kanalga (database) ──
         file_msg = await bot.send_document(
             chat_id=gid,
             document=doc_file,
             caption=caption,
         )
+        try:
+            from config import STORAGE_CHANNEL_ID
+            storage_gid = int(STORAGE_CHANNEL_ID or 0)
+        except Exception:
+            storage_gid = 0
+
+        if storage_gid:
+            try:
+                await bot.send_document(
+                    chat_id=storage_gid,
+                    document=txt_file,
+                    caption=f"📦 {title} | {tid}",
+                )
+            except Exception as te:
+                log.warning(f"TXT storage kanalga yuborilmadi: {te}")
+        else:
+            log.info("STORAGE_CHANNEL_ID yo'q — TXT yuborilmadi")
 
         # ── 3. Faylga reply — test kartasi + tugmalar ──
-        web_url = f"{WEBAPP_URL}/web_test.html?id={tid}"
+        # MUHIM: "Web test" va "Quiz Poll" — bot deep-link orqali
+        # (?start=webtest_TID / ?start=poll_TID). Guruh xabarida
+        # web_app tugmasi ishlamaydi (Telegram cheklovi), shuning
+        # uchun bosilganda avtomatik bot shaxsiy chatiga o'tkaziladi.
+        bu = bot_username or ""
+        if not bu:
+            try:
+                me = await bot.get_me()
+                bu = me.username
+            except Exception:
+                bu = ""
 
         bld = InlineKeyboardBuilder()
-        bld.row(
-            InlineKeyboardButton(text="🌐 Web test",  url=web_url),
-            InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
-        )
+        if bu:
+            bld.row(
+                InlineKeyboardButton(text="🌐 Web test",
+                    url=f"https://t.me/{bu}?start=webtest_{tid}"),
+                InlineKeyboardButton(text="📊 Quiz Test ",
+                    url=f"https://t.me/{bu}?start=poll_{tid}"),
+            )
         bld.row(
             InlineKeyboardButton(
-                text="📤 Ulashish",
+                text="📨 Testni ulashish",
                 switch_inline_query=f"test_{tid}",
             )
         )
-        if bot_username:
-            bld.row(InlineKeyboardButton(
-                text="🤖 Botda ochish",
-                url=f"https://t.me/{bot_username}?start={tid}",
-            ))
 
         card = (
             f"📌 <b>Yangi test!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
             f"📝 <b>{title}</b>\n"
             f"📋 {qc} savol | {diff_txt} | {category or 'Boshqa'}\n"
             f"🆔 <code>{tid}</code>\n\n"
             f"👆 Fayl yuqorida\n"
-            f"👇 Boshlash:"
+            f"👇 Boshlash: Web Yoki Quiz"
         )
 
         await bot.send_message(
@@ -409,54 +456,3 @@ async def publish_to_baza(
 
     except Exception as e:
         log.error(f"❌ publish_to_baza xato: {e}", exc_info=True)
-
-
-# ── Guruh faylini parse qilish ─────────────────────────────────
-async def parse_group_file(bot, message, chat_id: int, group_title: str = ""):
-    """
-    Guruhda yuborilgan fayl (docx/pdf/txt) ni parse qilib
-    test sifatida saqlash.
-    """
-    try:
-        from utils.parser import parse_file
-        import tempfile, os
-
-        doc = message.document
-        if not doc:
-            return
-
-        # Faylni yuklab olish
-        with tempfile.NamedTemporaryFile(
-            suffix=os.path.splitext(doc.file_name or "file.txt")[1],
-            delete=False
-        ) as tmp:
-            tmp_path = tmp.name
-
-        file_info = await bot.get_file(doc.file_id)
-        await bot.download_file(file_info.file_path, destination=tmp_path)
-
-        # Parse qilish
-        questions = parse_file(tmp_path)
-        os.remove(tmp_path)
-
-        if not questions:
-            return
-
-        # Test sifatida saqlash
-        from utils.db import create_test
-        title = os.path.splitext(doc.file_name or "Test")[0]
-        tid = await create_test(
-            creator_id=message.from_user.id if message.from_user else 0,
-            data={
-                "title":      title,
-                "category":   group_title or "Boshqa",
-                "questions":  questions,
-                "visibility": "link",
-            },
-            creator_name=getattr(message.from_user, "full_name", "") if message.from_user else "",
-        )
-        log.info(f"parse_group_file: {tid} ({len(questions)} savol) guruh {chat_id}")
-        return tid
-    except Exception as e:
-        log.error(f"parse_group_file: {e}")
-        return None

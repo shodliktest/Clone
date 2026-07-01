@@ -1,4 +1,4 @@
-"""✅ DB — CRUD operatsiyalar (ASYNC FIX)"""
+"""DB — CRUD operatsiyalar"""
 import uuid, logging
 from datetime import datetime, timezone
 from utils import ram_cache as ram
@@ -28,14 +28,10 @@ async def get_or_create_user(tg_id, name, username=None):
         "_just_created": True,
     }
     ram.upsert_user(tg_id, user)
+    # Yangi user — dirty flag, auto_flush da yoziladi
     ram.mark_users_dirty()
-    # ✅ FIXED: Async import qilish
-    try:
-        from utils import tg_db
-        if tg_db.ready():
-            tg_db.mark_users_dirty_tg()
-    except Exception as e:
-        log.warning(f"tg_db mark_users_dirty_tg error: {e}")
+    from utils import tg_db
+    tg_db.mark_users_dirty_tg()
     return user
 
 def update_user(tg_id, data):
@@ -46,22 +42,20 @@ def update_user(tg_id, data):
 
 def block_user(tg_id, blocked=True):
     update_user(tg_id, {"is_blocked": blocked})
-    # ✅ FIXED: RAM set da ham yangilash — middleware tez topsin
+    # RAM set da ham yangilash — middleware tez topsin
+    from utils import ram_cache as ram
     ram.set_blocked(tg_id, blocked)
 
 def get_all_users():
     return list(ram.get_users().values())
 
 async def _flush_users_to_tg():
-    """✅ Users JSON ni TG ga yuborish — yangi user kelganda chaqiriladi"""
-    try:
-        from utils import tg_db
-        if tg_db.ready():
-            await tg_db.save_users(ram.get_users())
-            ram.clear_users_dirty()
-            log.info("Users TG ga yuborildi")
-    except Exception as e:
-        log.error(f"_flush_users_to_tg error: {e}")
+    """Users JSON ni TG ga yuborish — yangi user kelganda chaqiriladi"""
+    from utils import tg_db
+    if tg_db.ready():
+        await tg_db.save_users(ram.get_users())
+        ram.clear_users_dirty()
+        log.info("Users TG ga yuborildi")
 
 
 # ══ TESTS ══════════════════════════════════════════════════════
@@ -72,24 +66,21 @@ def get_test(tid):
 async def get_test_full(tid):
     """
     To'liq test (savollar bilan):
-    1. 48 soat RAM cache ✅ FIXED: 12h → 48h
+    1. 12 soat RAM cache
     2. TG kanaldan yuklab oladi + cache qiladi
     3. Web testlar uchun index qayta tekshiriladi
     """
     cached = ram.get_cached_questions(tid)
     if cached:
         return cached
-    try:
-        from utils import tg_db
-        if tg_db.ready():
-            full = await tg_db.get_test_full(tid)
-            if full and full.get("questions"):
-                ram.cache_questions(tid, full)
-                return full
-            else:
-                log.warning(f"get_test_full: {tid} uchun savollar topilmadi (web test bo'lishi mumkin, 60s kuting)")
-    except Exception as e:
-        log.error(f"get_test_full error: {e}")
+    from utils import tg_db
+    if tg_db.ready():
+        full = await tg_db.get_test_full(tid)
+        if full and full.get("questions"):
+            ram.cache_questions(tid, full)
+            return full
+        else:
+            log.warning(f"get_test_full: {tid} uchun savollar topilmadi (web test bo'lishi mumkin, 60s kuting)")
     # Meta bor bo'lsa qaytaramiz (savollarsiz)
     meta = ram.get_test_meta(tid)
     return meta if meta else {}
@@ -121,6 +112,7 @@ async def create_test(creator_id, data, creator_name="", creator_username=""):
         "poll_time":        data.get("poll_time", 30),
         "passing_score":    data.get("passing_score", 60),
         "max_attempts":     data.get("max_attempts", 0),
+        # Referal tizimi
         "ref_required":     data.get("ref_required", False),
         "ref_count":        int(data.get("ref_count", 0)),
         "questions":        data.get("questions", []),
@@ -134,14 +126,11 @@ async def create_test(creator_id, data, creator_name="", creator_username=""):
     # RAMga qo'shamiz
     ram.add_test(test)
     # TG kanalga darhol to'liq yuboramiz (JSON fayl)
-    try:
-        from utils import tg_db
-        if tg_db.ready():
-            ok = await tg_db.save_test_full(test)
-            if ok:
-                log.info(f"Yangi test TG ga yuborildi: {tid}")
-    except Exception as e:
-        log.error(f"create_test save_test_full error: {e}")
+    from utils import tg_db
+    if tg_db.ready():
+        ok = await tg_db.save_test_full(test)
+        if ok:
+            log.info(f"Yangi test TG ga yuborildi: {tid}")
     return tid
 
 async def delete_test(tid):
@@ -149,16 +138,14 @@ async def delete_test(tid):
     ADMIN o'chirganda — butunlay o'chiriladi.
     TG dan ham o'chiriladi (is_active=False + backup).
     """
-    try:
-        from utils import tg_db
-        test = ram.get_cached_questions(tid) or ram.get_test_meta_any(tid) or {}
-        if tg_db.ready() and test:
-            await tg_db.save_deleted_test_backup(test)
-        ram.delete_test_from_ram(tid)
-        if tg_db.ready():
-            await tg_db.delete_test_tg(tid)
-    except Exception as e:
-        log.error(f"delete_test error: {e}")
+    from utils import tg_db
+    test = ram.get_cached_questions(tid) or ram.get_test_meta_any(tid) or {}
+    if tg_db.ready() and test:
+        await tg_db.save_deleted_test_backup(test)
+    ram.delete_test_from_ram(tid)
+    if tg_db.ready():
+        await tg_db.delete_test_tg(tid)
+
 
 async def creator_delete_test(tid):
     """
@@ -167,21 +154,15 @@ async def creator_delete_test(tid):
     Admin ko'ra oladi va TXT yuklab olishi mumkin.
     TG bazada saqlanib turadi.
     """
-    try:
-        from utils import tg_db
-        ram.soft_delete_test(tid)
-        if tg_db.ready():
-            await tg_db.update_test_meta_tg(tid, {"is_deleted": True})
-    except Exception as e:
-        log.error(f"creator_delete_test error: {e}")
+    from utils import tg_db
+    ram.soft_delete_test(tid)
+    if tg_db.ready():
+        await tg_db.update_test_meta_tg(tid, {"is_deleted": True})
 
 def pause_test(tid, paused: bool):
     ram.update_test_meta(tid, {"is_paused": paused})
-    try:
-        from utils import tg_db
-        tg_db.mark_stats_dirty()
-    except Exception as e:
-        log.warning(f"pause_test tg_db error: {e}")
+    from utils import tg_db
+    tg_db.mark_stats_dirty()
 
 def get_all_tests_admin():
     """Admin uchun — o'chirilganlarni ham ko'rsatadi"""
@@ -220,12 +201,9 @@ def save_result(user_id, test_id, result, via_link=False):
             "avg_score":   round(ts / tt, 1),
         })
     # Dirty flag — 5 daqiqada TG ga yuklanadi
-    try:
-        from utils import tg_db
-        tg_db.mark_stats_dirty()
-        tg_db.mark_users_dirty_tg()
-    except Exception as e:
-        log.warning(f"save_result tg_db error: {e}")
+    from utils import tg_db
+    tg_db.mark_stats_dirty()
+    tg_db.mark_users_dirty_tg()
     return rid
 
 def get_user_results(user_id):
@@ -255,11 +233,13 @@ async def _sync_from_tg():
     tg_db.web_sync_loop() tomonidan chaqiriladi.
     Yangi chunked arxitektura bilan ishlaydi.
     """
-    try:
-        from utils import tg_db
-        if not tg_db.ready():
-            return 0
+    from utils import tg_db
+    if not tg_db.ready():
+        return 0
 
+    try:
+        # Yangi tg_db da _load_index yo'q — get_tests_meta() ishlatamiz
+        # (u _index["tests_meta"] ni qaytaradi, init da chunklar yuklanadi)
         fresh_metas = tg_db.get_tests_meta()
         if not fresh_metas:
             return 0

@@ -1,123 +1,106 @@
 """
-TG_DB — Chunked Index + Xavfsiz Saqlash
-=========================================
+TG_DB — Supabase (Postgres) bilan ishlaydigan ma'lumotlar qatlami
+====================================================================
+MUHIM: Bu modulning nomi va public funksiyalari ATAYLAB eski
+"Telegram Storage Channel" versiyasi bilan bir xil saqlangan
+(get_test_full, save_test_full, get_tests_meta, init, ready, ...).
 
-ASOSIY QOIDALAR:
-  1. AVVAL YOZ, KEYIN O'CHIR  — hech qachon ma'lumot yo'qolmasin
-  2. _save_meta() faqat barcha chunklar muvaffaqiyatli bo'lganda chaqiriladi
-  3. auto_flush_loop — faqat stats va users, INDEX ga tegmaydi
-  4. _save_index() faqat test qo'shilganda / o'zgartirilganda chaqiriladi
-  5. Debounce: _index_dirty flag — keraksiz yozuvlar oldini oladi
+Sabab: handlers/*.py, bot.py, streamlit_app.py barchasi shu
+funksiya nomlari orqali murojaat qiladi. Shu fayl ichini
+o'zgartirish orqali boshqa birorta faylga tegmasdan butun
+saqlash arxitekturasini Telegram'dan Supabase'ga ko'chirish
+mumkin bo'ladi.
 
-ARXITEKTURA:
-  index_meta.json  (pinned, ~5KB)
-    index_chunks:      [{n, msg_id, fid, count}]
-    users_list_chunks: [{n, msg_id, fid, count}]
-    user_stats_chunks: [{n, msg_id, fid, uids}]
-    tests_stats_msg_id, leaderboard_msg_id, ...
-    backups: {date: msg_id}
-
-  index_chunk_N.json  (har biri ~100 test)
-    tests_meta: [...]
-    test_{tid}: msg_id
-    fid_{msg_id}: file_id
+NIMA O'ZGARDI (eski versiyaga nisbatan):
+  • Endi hech qanday "kanal skanerlash", "chunk", "pin", "forward"
+    yo'q — har bir o'qish/yozish to'g'ridan-to'g'ri SQL so'rov.
+  • web_sync_loop endi DEYARLI BO'SH: bot va Telegram Web App
+    bir xil Postgres'ga yozgani uchun alohida sinxronizatsiya
+    kerak emas — RAM cache'ni vaqti-vaqti bilan yangilab turadi.
+  • Flood-wait, "Too Many Requests", forward/delete xatolari —
+    butunlay yo'qoladi (Telegram Bot API chaqirilmaydi, faqat
+    PostgREST orqali ma'lumotlar bazasiga so'rov ketadi).
+  • Crash xavfi kamaydi: har bir DB chaqiruvi alohida try/except
+    bilan o'ralgan, bitta so'rov xatosi botni yiqitmaydi.
 """
 
-import json, logging, io, asyncio
+import asyncio
+import logging
 from datetime import datetime, timezone, date
 
-log      = logging.getLogger(__name__)
-UTC      = timezone.utc
-_bot     = None
-_cid     = None
-_can_pin = True
+from utils import supabase_client as sb
 
-_meta:  dict = {}
-_index: dict = {"tests_meta": []}
+log  = logging.getLogger(__name__)
+UTC  = timezone.utc
 
-_tests_cache: dict = {}
-_stats_dirty       = False
-_users_dirty       = False
-_index_dirty       = False   # Index o'zgarganda True — keyingi flush da saqlanadi
+_ready       = False
+_tests_cache: dict = {}     # RAM-darajadagi tezkor cache (eski xulq-atvor saqlanadi)
 
-INDEX_CHUNK_SIZE = 100
-_save_lock = None   # asyncio.Lock — parallel yozuvni oldini oladi
+_stats_dirty = False
+_users_dirty = False
+_index_dirty = False        # Endi haqiqiy ma'noga ega emas, lekin API moslik uchun saqlanadi
 
-
-def _get_lock():
-    global _save_lock
-    if _save_lock is None:
-        _save_lock = asyncio.Lock()
-    return _save_lock
+_otp_store: dict = {}        # OTP RAMda — bazaga yozish shart emas (qisqa umrli)
 
 
 # ══════════════════════════════════════════════════════════════
 # INIT
 # ══════════════════════════════════════════════════════════════
 
-async def init(bot, channel_id):
-    global _bot, _cid, _meta, _index, _tests_cache
-    global _stats_dirty, _users_dirty, _index_dirty
+async def init(bot, channel_id=None):
+    """
+    Eski imzo bilan moslik uchun `channel_id` parametri qoldirildi,
+    lekin endi ishlatilmaydi — Supabase ulanishi config.py dagi
+    SUPABASE_URL / SUPABASE_KEY orqali amalga oshiriladi.
+    """
+    global _ready, _tests_cache, _stats_dirty, _users_dirty, _index_dirty
 
-    _cid         = int(channel_id)
-    _meta        = {}
-    _index       = {"tests_meta": []}
     _tests_cache = {}
     _stats_dirty = False
     _users_dirty = False
     _index_dirty = False
 
-    from aiogram import Bot as _BotClass
-    from aiogram.client.default import DefaultBotProperties
-    from aiogram.enums import ParseMode
-    _bot = _BotClass(
-        token=bot.token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=False)
-    )
+    set_bot_instance(bot)
 
-    _meta = await _load_meta()
-    if not _meta:
-        # Yangi meta topilmadi — eski index.json formatini tekshirish
-        log.info("index_meta topilmadi — eski format tekshirilmoqda...")
-        _meta = await _migrate_from_old_index()
-        if _meta:
-            log.info("✅ Eski format migratsiya qilindi!")
-        else:
-            log.info("Yangi baza yaratilmoqda...")
-            _meta = {
-                "index_chunks":      [],
-                "users_list_chunks": [],
-                "user_stats_chunks": [],
-                "backups":           {},
-            }
-            await _save_meta()
-            return
+    from config import SUPABASE_URL, SUPABASE_KEY
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        log.error("❌ SUPABASE_URL / SUPABASE_KEY sozlanmagan — secrets.toml ni tekshiring")
+        _ready = False
+        return
 
-    log.info(f"Meta yuklandi: {len(_meta.get('index_chunks',[]))} index chunk")
+    try:
+        sb.init_client(SUPABASE_URL, SUPABASE_KEY)
+        await sb.count("tests")
+        _ready = True
+        log.info("✅ Supabase ulanish tayyor")
+    except Exception as e:
+        _ready = False
+        log.error(f"❌ Supabase ulanish xato: {e}")
+        return
 
-    # Tezkor yuklash — faqat fid orqali (kanal skanerlashsiz)
-    # Bot polling shu qadar tezroq boshlanadi
-    await _load_all_index_chunks_fast()
-    await _load_tests_stats()
+    try:
+        await _load_tests_meta_to_ram()
+    except Exception as e:
+        log.error(f"tests meta yuklashda xato: {e}")
 
-    # Users va guruhlar — background da yuklanadi (bot allaqachon ishlaydi)
-    asyncio.create_task(_load_users_list())
+    asyncio.create_task(_load_users_to_ram())
+    asyncio.create_task(_load_user_stats_to_ram())
     asyncio.create_task(load_known_groups())
-    asyncio.create_task(_load_leaderboard())
     asyncio.create_task(_load_blocked_to_ram())
 
-    log.info(f"Tayyor (tez): {len(_index.get('tests_meta',[]))} test meta yuklandi")
-    log.info("Users, guruhlar va leaderboard background da yuklanmoqda...")
+    log.info("Tayyor: tests meta yuklandi, qolganlari background da")
 
 
 def ready():
-    return _bot is not None and bool(_cid)
+    return _ready
+
 
 def mark_stats_dirty():
     global _stats_dirty
     _stats_dirty = True
 
 def mark_index_dirty():
+    """Endi alohida 'index' tushunchasi yo'q — moslik uchun saqlangan no-op."""
     global _index_dirty
     _index_dirty = True
 
@@ -130,1287 +113,460 @@ def is_dirty():
 
 
 # ══════════════════════════════════════════════════════════════
-# INDEX META — pinned kichik fayl
+# YUKLASH — bot startida RAM cache'ni Supabase'dan to'ldiramiz
 # ══════════════════════════════════════════════════════════════
 
-async def _migrate_from_old_index(progress_callback=None) -> dict:
-    """
-    TO'LIQ KANAL SKANERLASH:
-    Kanaldan barcha JSON fayllarni topib ma'lumotlarni tiklaydi.
-
-    Tartib:
-      1. index_meta.json  → chunk msg_id lar → har chunk dan tests_meta
-      2. index_chunk_N    → test_{tid}: msg_id → barcha testlar
-      3. index.json (eski)→ tests_meta + test_{tid} msg_id lar
-      4. users_list_N     → foydalanuvchilar
-      5. known_groups     → guruhlar
-      6. test_XXX.json    → to'g'ridan savollar (zaxira)
-    """
-    if not ready(): return {}
-
-    log.info("TO'LIQ kanal skanerlash boshlandi (3000 xabar)...")
-
-    # === 1-QADAM: Kanal tarixini skanerlash ===
-    all_json_files = {}  # {msg_id: {file_name, file_id}}
-    try:
-        probe = await _bot.send_message(_cid, ".", protect_content=False)
-        cur   = probe.message_id
-        await _bot.delete_message(_cid, cur)
-
-        total_range = min(3000, cur - 1)
-        for i, mid in enumerate(range(cur - 1, max(1, cur - 3000), -1)):
-            try:
-                fwd = await _bot.forward_message(_cid, _cid, mid)
-                doc = getattr(fwd, "document", None)
-                try:
-                    await _bot.delete_message(_cid, fwd.message_id)
-                except: pass
-                if doc and doc.file_name and doc.file_name.endswith(".json"):
-                    all_json_files[mid] = {
-                        "name": doc.file_name.lower(),
-                        "fid":  doc.file_id,
-                    }
-                # Polling ga joy berish — har 5 xabardan keyin
-                if i % 5 == 0:
-                    await asyncio.sleep(0)
-                else:
-                    await asyncio.sleep(0.03)
-                # Progress callback
-                if progress_callback and i % 50 == 0:
-                    await progress_callback(i, total_range, len(all_json_files), "scan")
-            except Exception:
-                await asyncio.sleep(0)
-
-        log.info(f"Topilgan JSON fayllar: {len(all_json_files)} ta")
-    except Exception as e:
-        log.warning(f"Kanal skanerlash xato: {e}")
-        return {}
-
-    if not all_json_files:
-        return {}
-
-    # === 2-QADAM: Fayllarni turkumlash ===
-    index_meta_files  = []   # index_meta.json
-    index_chunk_files = []   # index_chunk_N.json
-    index_old_files   = []   # index.json (eski format)
-    test_full_files   = []   # test_XXX.json
-    users_list_files  = []   # users_list_N.json
-    group_files       = []   # known_groups.json
-    stats_files       = []   # tests_stats.json
-    settings_files    = []   # settings.json
-    leaderboard_files = []   # leaderboard.json
-
-    for mid, info in sorted(all_json_files.items(), reverse=True):
-        name = info["name"]
-        if "index_meta" in name:
-            index_meta_files.append((mid, info))
-        elif "index_chunk" in name:
-            index_chunk_files.append((mid, info))
-        elif name == "index.json":
-            index_old_files.append((mid, info))
-        elif (name.startswith("test_") and "deleted" not in name
-              and "stats" not in name and "backup" not in name
-              and "meta" not in name and "chunk" not in name):
-            test_full_files.append((mid, info))
-        elif "users_list" in name:
-            users_list_files.append((mid, info))
-        elif "known_groups" in name:
-            group_files.append((mid, info))
-        elif "tests_stats" in name:
-            stats_files.append((mid, info))
-        elif "settings" in name:
-            settings_files.append((mid, info))
-        elif "leaderboard" in name and "group" not in name:
-            leaderboard_files.append((mid, info))
-
-    log.info(f"  index_meta: {len(index_meta_files)}, "
-             f"index_chunk: {len(index_chunk_files)}, "
-             f"index_old: {len(index_old_files)}, "
-             f"test_full: {len(test_full_files)}, "
-             f"users_list: {len(users_list_files)}")
-
-    global _index
-    recovered_tids = set()
-    new_meta = {
-        "index_chunks":      [],
-        "users_list_chunks": [],
-        "user_stats_chunks": [],
-        "backups":           {},
-    }
-
-    # === 3-QADAM: index_meta.json dan chunk ma'lumotlarini olish ===
-    for mid, info in index_meta_files[:1]:   # eng yangi bitta
-        data = await _read_file(info["fid"])
-        if not isinstance(data, dict): continue
-        if "index_chunks" in data:
-            log.info(f"index_meta topildi: {len(data.get('index_chunks',[]))} chunk")
-            # Meta ma'lumotlarini ko'chirish
-            for key in ("leaderboard_msg_id","leaderboard_fid","tests_stats_msg_id",
-                        "tests_stats_fid","settings_msg_id","settings_fid",
-                        "group_lb_msg_id","group_lb_fid","group_lb_date",
-                        "known_groups_msg_id","known_groups_fid","backups"):
-                if data.get(key):
-                    new_meta[key] = data[key]
-
-    # === 4-QADAM: index_chunk_N.json dan tests_meta va msg_id lar ===
-    for mid, info in index_chunk_files:
-        data = await _read_file(info["fid"])
-        if not isinstance(data, dict): continue
-        for m in data.get("tests_meta", []):
-            tid = m.get("test_id")
-            if tid and tid not in recovered_tids:
-                recovered_tids.add(tid)
-                _index.setdefault("tests_meta", []).append(m)
-        for k, v in data.items():
-            if k.startswith("test_") or k.startswith("fid_"):
-                _index[k] = v
-        log.info(f"  chunk yukl: {len(data.get('tests_meta',[]))} test")
-
-    # === 5-QADAM: Eski index.json dan (chunk da bo'lmaganlar) ===
-    for mid, info in index_old_files[:1]:
-        data = await _read_file(info["fid"])
-        if not isinstance(data, dict): continue
-        for m in data.get("tests_meta", []):
-            tid = m.get("test_id")
-            if tid and tid not in recovered_tids:
-                recovered_tids.add(tid)
-                _index.setdefault("tests_meta", []).append(m)
-        for k, v in data.items():
-            if k.startswith("test_") or k.startswith("fid_"):
-                if k not in _index:
-                    _index[k] = v
-        # Eski users, settings saqlab olish
-        for key in ("leaderboard_msg_id","leaderboard_fid","tests_stats_msg_id",
-                    "tests_stats_fid","settings_msg_id"):
-            if data.get(key) and not new_meta.get(key):
-                new_meta[key] = data[key]
-        if data.get("users_list_chunks") and not new_meta.get("users_list_chunks"):
-            new_meta["users_list_chunks"] = data["users_list_chunks"]
-        log.info(f"  eski index yukl: {len(data.get('tests_meta',[]))} test")
-
-    # === 6-QADAM: test_XXX.json dan to'g'ridan (hali topilmaganlar) ===
-    new_from_files = 0
-    for mid, info in test_full_files:
-        data = await _read_file(info["fid"])
-        if not isinstance(data, dict): continue
-        tid = data.get("test_id")
-        if not tid or not data.get("questions"): continue
-        # msg_id ni saqlash (har doim yangilash — eng yangi versiya)
-        _index[f"test_{tid}"] = mid
-        _index[f"fid_{mid}"]  = info["fid"]
-        _tests_cache[tid]     = data
-        if tid not in recovered_tids:
-            recovered_tids.add(tid)
-            meta = {k: v for k, v in data.items() if k != "questions"}
-            meta["question_count"] = len(data["questions"])
-            meta.setdefault("is_active", True)
-            _index.setdefault("tests_meta", []).append(meta)
-            new_from_files += 1
-            log.info(f"  + test fayl: {data.get('title','?')} [{tid}]")
-    if new_from_files:
-        log.info(f"test fayl skanidan {new_from_files} yangi test tiklandi")
-
-    # === 7-QADAM: Users list ===
-    if users_list_files and not new_meta.get("users_list_chunks"):
-        from utils import ram_cache as ram
-        all_users = {}
-        sorted_ulf = sorted(users_list_files, key=lambda x: x[0], reverse=True)
-        # Har bir chunk faylini yukla (nomi bo'yicha ajrat)
-        chunk_map = {}
-        for mid, info in sorted_ulf:
-            n = info["name"]  # users_list_1.json, users_list_2.json ...
-            if n not in chunk_map:  # faqat eng yangi versiyasini ol
-                chunk_map[n] = (mid, info)
-        new_ul_chunks = []
-        for name, (mid, info) in sorted(chunk_map.items()):
-            data = await _read_file(info["fid"])
-            if isinstance(data, dict) and data.get("users"):
-                all_users.update(data["users"])
-                new_ul_chunks.append({"n": len(new_ul_chunks)+1,
-                                      "msg_id": mid, "fid": info["fid"],
-                                      "count": len(data["users"])})
-        if all_users:
-            ram.set_users(all_users)
-            new_meta["users_list_chunks"] = new_ul_chunks
-            log.info(f"Users tiklandi: {len(all_users)} ta")
-
-    # === 8-QADAM: Known groups ===
-    if group_files and not new_meta.get("known_groups_msg_id"):
-        mid, info = group_files[0]
-        data = await _read_file(info["fid"])
-        if isinstance(data, dict) and data.get("groups"):
-            from utils import ram_cache as ram
-            ram.set_known_groups(data["groups"])
-            new_meta["known_groups_msg_id"] = mid
-            new_meta["known_groups_fid"]    = info["fid"]
-            log.info(f"Guruhlar tiklandi: {len(data['groups'])} ta")
-
-    # === 9-QADAM: Stats va Settings ===
-    if stats_files and not new_meta.get("tests_stats_msg_id"):
-        mid, info = stats_files[0]
-        new_meta["tests_stats_msg_id"] = mid
-        new_meta["tests_stats_fid"]    = info["fid"]
-    if settings_files and not new_meta.get("settings_msg_id"):
-        mid, info = settings_files[0]
-        new_meta["settings_msg_id"] = mid
-        new_meta["settings_fid"]    = info["fid"]
-    if leaderboard_files and not new_meta.get("leaderboard_msg_id"):
-        mid, info = leaderboard_files[0]
-        new_meta["leaderboard_msg_id"] = mid
-        new_meta["leaderboard_fid"]    = info["fid"]
-
-    _meta.update(new_meta)
-
-    # question_count 0 bo'lgan testlarni to'ldirish
+async def _load_tests_meta_to_ram():
     from utils import ram_cache as ram
-    fixed = 0
-    for m in _index.get("tests_meta", []):
-        tid = m.get("test_id")
-        if not tid: continue
-        if m.get("question_count", 0) == 0:
-            cached = _tests_cache.get(tid)
-            if cached and cached.get("questions"):
-                qc = len(cached["questions"])
-                if qc > 0:
-                    m["question_count"] = qc
-                    ram.update_test_meta(tid, {"question_count": qc})
-                    fixed += 1
-    if fixed:
-        log.info(f"✅ {fixed} ta test question_count to'ldirildi")
-
-    total = len(_index.get("tests_meta", []))
-    log.info(f"✅ To'liq skanerlash tugadi: {total} test meta tiklandi")
-
-    # Yangi chunked formatda saqlash
-    await _save_index_chunks()
-    log.info("✅ Migratsiya yakunlandi!")
-    return new_meta
-
-
-async def _load_meta() -> dict:
-    if not ready(): return {}
-
-    # 1. Pin dan o'qi
     try:
-        chat = await _bot.get_chat(_cid)
-        pin  = getattr(chat, "pinned_message", None)
-        if pin:
-            doc = getattr(pin, "document", None)
-            if doc and "index_meta" in (doc.file_name or "").lower():
-                data = await _read_file(doc.file_id)
-                if isinstance(data, dict) and "index_chunks" in data:
-                    log.info("index_meta pindan yuklandi")
-                    return data
+        rows = await sb.select("tests", columns="test_id,title,meta,question_count,"
+                                                  "is_active,is_paused,solve_count,avg_score")
     except Exception as e:
-        log.warning(f"Pin o'qish: {e}")
+        log.error(f"_load_tests_meta_to_ram: {e}")
+        return
 
-    # 2. Oxirgi 100 xabarni skanerlash
+    metas = []
+    for r in rows:
+        meta = dict(r.get("meta") or {})
+        meta["test_id"]        = r["test_id"]
+        meta["title"]          = r.get("title", meta.get("title", ""))
+        meta["question_count"] = r.get("question_count", 0)
+        meta["is_active"]      = r.get("is_active", True)
+        meta["is_paused"]      = r.get("is_paused", False)
+        meta["solve_count"]    = r.get("solve_count", 0)
+        meta["avg_score"]      = float(r.get("avg_score") or 0)
+        metas.append(meta)
+
+    ram.set_tests_meta(metas)
+    log.info(f"tests meta yuklandi: {len(metas)} ta")
+
+
+async def _load_users_to_ram():
+    from utils import ram_cache as ram
     try:
-        probe = await _bot.send_message(_cid, ".", protect_content=False)
-        cur   = probe.message_id
-        await _bot.delete_message(_cid, cur)
-        for mid in range(cur - 1, max(1, cur - 100), -1):
-            try:
-                fwd = await _bot.forward_message(_cid, _cid, mid)
-                doc = getattr(fwd, "document", None)
-                try:
-                    await _bot.delete_message(_cid, fwd.message_id)
-                except: pass
-                if doc and "index_meta" in (doc.file_name or "").lower():
-                    data = await _read_file(doc.file_id)
-                    if isinstance(data, dict) and "index_chunks" in data:
-                        log.info(f"index_meta topildi (msg {mid})")
-                        await _pin_msg(mid)
-                        return data
-                await asyncio.sleep(0)
-            except: pass
+        rows = await sb.select("users")
     except Exception as e:
-        log.warning(f"Meta qidirish: {e}")
-    return {}
+        log.error(f"_load_users_to_ram: {e}")
+        return
+    users = {}
+    for r in rows:
+        d = dict(r.get("data") or {})
+        d["tg_id"]      = r["tg_id"]
+        d["is_blocked"] = r.get("is_blocked", False)
+        users[str(r["tg_id"])] = d
+    ram.set_users(users)
+    log.info(f"users yuklandi: {len(users)} ta")
 
 
-async def _save_meta():
-    """
-    index_meta.json ni TG ga yuboradi va pin qiladi.
-    AVVAL yangi xabar yuboradi, KEYIN eskisini o'chiradi.
-    """
-    global _can_pin
-    if not ready(): return False
-    ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-
-    old_msg_id = _meta.get("_last_meta_msg_id")
+async def _load_user_stats_to_ram():
+    from utils import ram_cache as ram
     try:
-        # 1. AVVAL yangi xabar yuborish
-        msg = await _bot.send_document(
-            _cid,
-            document=_buf(_meta, "index_meta.json"),
-            caption=f"INDEX_META | {ts}",
-            protect_content=False
-        )
-        # 2. Pin qilish
-        if _can_pin:
-            try:
-                await _bot.pin_chat_message(_cid, msg.message_id, disable_notification=True)
-            except:
-                _can_pin = False
+        rows = await sb.select("user_stats")
+    except Exception as e:
+        log.error(f"_load_user_stats_to_ram: {e}")
+        return
+    total = 0
+    for r in rows:
+        uid_str = str(r["tg_id"])
+        ram.set_user_stats_cache(uid_str, dict(r.get("data") or {}), dirty=False)
+        total += 1
+    log.info(f"user_stats yuklandi: {total} ta")
 
-        # 3. KEYIN eskisini o'chirish
-        if old_msg_id and old_msg_id != msg.message_id:
-            try:
-                await _bot.delete_message(_cid, old_msg_id)
-            except: pass
 
-        _meta["_last_meta_msg_id"] = msg.message_id
-        _meta["_last_meta_fid"]    = msg.document.file_id
+async def _load_blocked_to_ram():
+    from utils import ram_cache as ram
+    try:
+        blocked = await load_blocked_users()
+        for uid in blocked:
+            ram.set_blocked(uid, True)
+        log.info(f"blocked yuklandi: {len(blocked)} ta")
+    except Exception as e:
+        log.error(f"_load_blocked_to_ram: {e}")
+
+
+# ══════════════════════════════════════════════════════════════
+# TESTLAR
+# ══════════════════════════════════════════════════════════════
+
+def get_tests_meta():
+    from utils import ram_cache as ram
+    return ram.get_all_tests_meta()
+
+
+def get_test_meta(tid):
+    from utils import ram_cache as ram
+    m = ram.get_test_meta(tid)
+    return m if (m and m.get("is_active", True)) else {}
+
+
+async def get_test_full(tid: str) -> dict:
+    """
+    Test + savollarni qaytaradi. RAM cache → Postgres tartibida.
+    Eski versiyadagi 4 bosqichli "fid/msg_id/chunk skan" zanjiri
+    endi shunchaki BITTA SQL so'roviga almashtirildi.
+    """
+    from utils import ram_cache as ram
+
+    if tid in _tests_cache:
+        ram.touch_test_access(tid)
+        return _tests_cache[tid]
+
+    cached = ram.get_cached_questions(tid)
+    if cached:
+        _tests_cache[tid] = cached
+        return cached
+
+    if not ready():
+        return {}
+
+    try:
+        row = await sb.select_one("tests", "test_id", tid)
+    except Exception as e:
+        log.error(f"get_test_full({tid}): {e}")
+        return {}
+
+    if not row:
+        log.warning(f"{tid} topilmadi")
+        return {}
+
+    full = dict(row.get("meta") or {})
+    full["test_id"]   = row["test_id"]
+    full["title"]     = row.get("title", full.get("title", ""))
+    full["questions"] = row.get("questions") or []
+
+    _tests_cache[tid] = full
+    ram.cache_questions(tid, full)
+    return full
+
+
+async def get_tests():
+    return get_tests_meta()
+
+
+async def save_test_full(test: dict) -> bool:
+    """Test (meta + savollar) ni Postgres ga to'liq saqlaydi (upsert)."""
+    if not ready():
+        return False
+    tid = test.get("test_id", "")
+    if not tid:
+        log.error("save_test_full: test_id yo'q")
+        return False
+
+    try:
+        qc   = len(test.get("questions", []))
+        meta = {k: v for k, v in test.items() if k not in ("questions", "test_id", "title")}
+
+        row = {
+            "test_id":        tid,
+            "title":          test.get("title", ""),
+            "questions":      test.get("questions", []),
+            "meta":           meta,
+            "question_count": qc,
+            "is_active":      test.get("is_active", True),
+            "is_paused":      test.get("is_paused", False),
+            "solve_count":    test.get("solve_count", 0),
+            "avg_score":      float(test.get("avg_score") or 0),
+        }
+        await sb.upsert("tests", row, on_conflict="test_id")
+
+        _tests_cache[tid] = test
+
+        from utils import ram_cache as ram
+        clean = {k: v for k, v in test.items() if k != "questions"}
+        clean["question_count"] = qc
+        ram.add_test_meta(clean)
+        ram.cache_questions(tid, test)
+
+        log.info(f"save_test_full: {tid} saqlandi ({qc} savol)")
         return True
     except Exception as e:
-        log.error(f"_save_meta: {e}")
+        log.error(f"save_test_full({tid}): {e}")
         return False
 
 
-# ══════════════════════════════════════════════════════════════
-# INDEX CHUNKS — xavfsiz saqlash
-# ══════════════════════════════════════════════════════════════
-
-async def _load_all_index_chunks_fast():
-    """
-    TEZKOR yuklash — faqat mavjud fid/msg_id dan o'qiydi.
-    Kanal skanerlashsiz. Bot polling tezroq boshlanadi.
-    Agar ma'lumotlar to'liq bo'lmasa — background da to'liq skan ishga tushadi.
-    """
-    chunks    = _meta.get("index_chunks", [])
-    all_metas = []
-
-    for ch in chunks:
-        fid = ch.get("fid")
-        mid = ch.get("msg_id")
-        data = {}
-        if fid:
-            data = await _read_file(fid)
-        if not data and mid:
-            data = await _download_doc(mid)
-        if not data:
-            continue
-        for m in data.get("tests_meta", []):
-            if not any(x.get("test_id") == m.get("test_id") for x in all_metas):
-                all_metas.append(m)
-        for k, v in data.items():
-            if k.startswith("test_") or k.startswith("fid_"):
-                _index[k] = v
-
-    _index["tests_meta"] = all_metas
-
-    # Kutilgan va yuklangan sonini solishtirish
-    expected = sum(ch.get("count", 0) for ch in chunks)
-    actual   = len(all_metas)
-    log.info(f"Tezkor yuklash: {actual} test meta (kutilgan: {expected})")
-
-    # Agar to'liq emas — background da to'liq skanerlash
-    need_full = (
-        not all_metas
-        or (expected > 0 and actual < expected * 0.5)
-        or (expected == 0 and actual <= 1 and chunks)
-    )
-    # question_count = 0 bo'lgan testlarni background da to'ldirish
-    asyncio.create_task(_fix_question_counts())
-
-    if need_full:
-        log.warning(f"Ma'lumotlar to'liq emas — background skanerlash boshlanadi...")
-        asyncio.create_task(_background_full_rescan())
+async def save_deleted_test_backup(test: dict):
+    """O'chirilgan testni 'backups' jadvaliga arxivlaydi (yo'qolmasligi uchun)."""
+    if not ready():
+        return
+    tid = test.get("test_id", "NOID")
+    _tests_cache.pop(tid, None)
+    try:
+        ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
+        key = f"deleted_test_{tid}_{ts}"
+        await sb.upsert("backups", {
+            "date_str": key,
+            "data": {"type": "deleted_test", "test": test, "deleted_at": ts},
+        }, on_conflict="date_str")
+        log.info(f"O'chirilgan test arxivlandi: {tid}")
+    except Exception as e:
+        log.error(f"save_deleted_test_backup({tid}): {e}")
 
 
-async def _fix_question_counts():
-    """
-    Bot yoqilganda question_count = 0 bo'lgan testlarni
-    TG kanaldan yuklab to'ldiradi.
-    """
-    await asyncio.sleep(3)   # Polling boshlansin
+async def delete_test_tg(tid: str):
+    """Testni 'soft delete' qiladi (is_active=False) — ma'lumot bazada qoladi."""
+    if not ready():
+        return
+    try:
+        await sb.update("tests", "test_id", tid, {"is_active": False})
+    except Exception as e:
+        log.error(f"delete_test_tg({tid}): {e}")
+
+    _tests_cache.pop(tid, None)
     from utils import ram_cache as ram
-    fixed = 0
-    metas = ram.get_all_tests_meta()
-    for m in metas:
-        tid = m.get("test_id")
-        if not tid: continue
-        if m.get("question_count", 0) > 0: continue
-
-        # Cache dan tekshirish
-        cached = _tests_cache.get(tid) or ram.get_cached_questions(tid)
-        if cached and cached.get("questions"):
-            qc = len(cached["questions"])
-        else:
-            # TG dan yuklab olamiz
-            msg_id = _index.get(f"test_{tid}")
-            if not msg_id: continue
-            try:
-                fid = _index.get(f"fid_{msg_id}")
-                data = {}
-                if fid:
-                    data = await _read_file(fid)
-                if not data or not data.get("questions"):
-                    data = await _download_doc(msg_id)
-                if not data or not data.get("questions"):
-                    continue
-                qc = len(data["questions"])
-                _tests_cache[tid] = data
-                ram.cache_questions(tid, data)
-            except Exception as e:
-                log.warning(f"_fix_qc {tid}: {e}")
-                continue
-
-        if qc > 0:
-            m["question_count"] = qc
-            ram.update_test_meta(tid, {"question_count": qc})
-            # _index da ham
-            for im in _index.get("tests_meta", []):
-                if im.get("test_id") == tid:
-                    im["question_count"] = qc
-                    break
-            fixed += 1
-
-    if fixed:
-        log.info(f"✅ {fixed} ta test question_count to'ldirildi")
-        mark_index_dirty()   # Keyingi saqlashda chunk yangilanadi
+    ram.update_test_meta(tid, {"is_active": False})
+    mark_stats_dirty()
 
 
-
-async def _background_full_rescan():
-    """
-    Background da to'liq kanal skanerlash.
-    Bot polling ishlayotgan paytda amalga oshadi.
-    Admin ga progress xabarlari yuboriladi.
-    """
-    await asyncio.sleep(5)   # Polling boshlangandan keyin
-
-    from config import ADMIN_IDS
-    admin_id = ADMIN_IDS[0] if ADMIN_IDS else None
-
-    log.info("Background to'liq skanerlash boshlandi...")
-
-    # Admin ga boshlash xabari
-    progress_msg_id = None
-    if admin_id and _bot:
-        try:
-            msg = await _bot.send_message(
-                admin_id,
-                "🔍 <b>Kanal skanerlash boshlandi</b>\n\n"
-                "⏳ Bot testlar, userlar va guruhlarni tiklamoqda...\n"
-                "Bu 2-5 daqiqa davom etishi mumkin.\n\n"
-                "Bot shu paytda ham ishlayveradi ✅"
-            )
-            progress_msg_id = msg.message_id
-        except Exception: pass
-
-    result = await _migrate_from_old_index(
-        progress_callback=_make_progress_callback(admin_id, progress_msg_id)
-    )
-
-    tests_count = len(_index.get("tests_meta", []))
+async def update_test_meta_tg(tid: str, updates: dict):
+    """Test meta'sini qisman yangilaydi (masalan is_paused, title, va h.k.)."""
     from utils import ram_cache as ram
-    users_count  = len(ram.get_users())
-    groups_count = len([g for g in ram.get_known_groups().values() if g.get("active")])
 
-    if admin_id and _bot and progress_msg_id:
-        try:
-            if result:
-                await _bot.edit_message_text(
-                    chat_id=admin_id,
-                    message_id=progress_msg_id,
-                    text=(
-                        f"✅ <b>Kanal skanerlash tugadi!</b>\n\n"
-                        f"📋 Testlar: <b>{tests_count} ta</b>\n"
-                        f"👥 Foydalanuvchilar: <b>{users_count} ta</b>\n"
-                        f"🏘 Guruhlar: <b>{groups_count} ta</b>\n\n"
-                        f"Bot to'liq tayyor! 🚀"
-                    )
-                )
-            else:
-                await _bot.edit_message_text(
-                    chat_id=admin_id,
-                    message_id=progress_msg_id,
-                    text="⚠️ Skanerlash natija bermadi. Kanal bo'sh bo'lishi mumkin."
-                )
-        except Exception: pass
+    if not ready():
+        return
 
-    log.info(f"Background skanerlash tugadi: {tests_count} test, "
-             f"{users_count} user, {groups_count} guruh")
-
-
-def _make_progress_callback(admin_id, msg_id):
-    """Progress callback — har 50 xabardan keyin admin ga yangilash"""
-    if not admin_id or not msg_id or not _bot:
-        return None
-
-    last_update = [0]
-
-    async def callback(scanned: int, total: int, found: int, stage: str):
-        import time
-        now = time.time()
-        if now - last_update[0] < 10:   # 10 soniyada 1 marta yangilash
+    try:
+        row = await sb.select_one("tests", "test_id", tid)
+        if not row:
+            log.warning(f"update_test_meta_tg: {tid} topilmadi")
             return
-        last_update[0] = now
 
-        bar_len   = 20
-        filled    = int(bar_len * scanned / total) if total > 0 else 0
-        bar       = "█" * filled + "░" * (bar_len - filled)
-        pct       = int(100 * scanned / total) if total > 0 else 0
+        patch = {}
+        for col in ("title", "is_active", "is_paused", "solve_count", "avg_score"):
+            if col in updates:
+                patch[col] = updates[col]
 
-        stage_txt = {
-            "scan":   "📡 Kanal skanerlash...",
-            "index":  "📋 Index chunklar...",
-            "tests":  "📝 Test fayllar...",
-            "users":  "👥 Foydalanuvchilar...",
-            "groups": "🏘 Guruhlar...",
-        }.get(stage, "⏳ Yuklanmoqda...")
+        meta = dict(row.get("meta") or {})
+        extra = {k: v for k, v in updates.items()
+                 if k not in ("title", "is_active", "is_paused", "solve_count",
+                              "avg_score", "test_id", "questions")}
+        meta.update(extra)
+        patch["meta"] = meta
 
-        try:
-            await _bot.edit_message_text(
-                chat_id=admin_id,
-                message_id=msg_id,
-                text=(
-                    f"🔍 <b>Kanal skanerlash</b>\n\n"
-                    f"{stage_txt}\n"
-                    f"<code>[{bar}]</code> {pct}%\n"
-                    f"📨 {scanned}/{total} xabar ko'rildi\n"
-                    f"✅ {found} ta topildi\n\n"
-                    f"Bot ishlayveradi ✅"
-                )
-            )
-        except Exception: pass
-
-    return callback
-
-
-async def _load_all_index_chunks():
-    chunks    = _meta.get("index_chunks", [])
-    all_metas = []
-    meta_updated = False
-
-    for ch in chunks:
-        fid  = ch.get("fid")
-        mid  = ch.get("msg_id")
-        data = {}
-
-        # 1. fid orqali o'qi
-        if fid:
-            data = await _read_file(fid)
-            if data and len(data.get("tests_meta", [])) == 0 and mid:
-                # fid ishlamoqda lekin bo'sh natija — msg_id orqali ham tekshir
-                data2 = await _download_doc(mid)
-                if data2 and len(data2.get("tests_meta", [])) > 0:
-                    data = data2
-                    # fid ni yangilash
-                    ch["fid"] = ""
-                    meta_updated = True
-
-        # 2. fid ishlamadi — msg_id orqali
-        if not data or len(data.get("tests_meta", [])) == 0:
-            if mid:
-                data = await _download_doc(mid)
-                if data:
-                    # Yangi fid ni saqlash
-                    ch["fid"] = ""
-                    meta_updated = True
-
-        if not data or not data.get("tests_meta"):
-            log.warning(f"Index chunk {ch.get('n')} yuklanmadi yoki bo'sh")
-            continue
-
-        loaded = 0
-        for m in data.get("tests_meta", []):
-            if not any(x.get("test_id") == m.get("test_id") for x in all_metas):
-                all_metas.append(m)
-                loaded += 1
-        for k, v in data.items():
-            if k.startswith("test_") or k.startswith("fid_"):
-                _index[k] = v
-        log.info(f"  chunk {ch.get('n')}: {loaded} yangi + "
-                 f"{len(data.get('tests_meta',[]))-loaded} mavjud test meta")
-
-    # Kutilgan test soni bilan solishtirish
-    expected_total = sum(ch.get("count", 0) for ch in chunks)
-    actual_total   = len(all_metas)
-
-    # Kanal skanerlash kerak bo'lgan holatlar:
-    # 1. Hech narsa yuklanmadi
-    # 2. Yuklanganlar kutilgandan 2x kam (chunk eskirgan)
-    need_rescan = (
-        not all_metas
-        or (expected_total > 0 and actual_total < expected_total * 0.5)
-        or (expected_total == 0 and actual_total <= 1 and chunks)
-    )
-
-    if need_rescan:
-        log.warning(
-            f"Chunk ma'lumotlari to'liq emas "
-            f"(yuklandi: {actual_total}, kutilgan: {expected_total}) "
-            f"— kanaldan qayta skanerlash..."
-        )
-        all_metas = await _recover_index_from_channel()
-        meta_updated = True
-
-    _index["tests_meta"] = all_metas
-    log.info(f"Index chunks yuklandi: {len(all_metas)} test meta")
-
-
-async def _recover_index_from_channel() -> list:
-    """
-    Kanaldan index_chunk_N.json fayllarini topib meta va msg_id larni tiklaydi.
-    """
-    if not ready(): return []
-    log.info("Kanaldan index_chunk fayllar qidirilmoqda...")
-    all_metas    = []
-    new_chunks   = []
-    seen_tids    = set()
-    chunk_names  = {}   # {name: (mid, fid)}
-
-    try:
-        probe = await _bot.send_message(_cid, ".", protect_content=False)
-        cur   = probe.message_id
-        await _bot.delete_message(_cid, cur)
-
-        for mid in range(cur - 1, max(1, cur - 2000), -1):
-            try:
-                fwd = await _bot.forward_message(_cid, _cid, mid)
-                doc = getattr(fwd, "document", None)
-                try:
-                    await _bot.delete_message(_cid, fwd.message_id)
-                except: pass
-                if doc and doc.file_name:
-                    fname = doc.file_name.lower()
-                    if "index_chunk" in fname and fname.endswith(".json"):
-                        if fname not in chunk_names:
-                            chunk_names[fname] = (mid, doc.file_id)
-                            log.info(f"  index_chunk topildi: {doc.file_name} (msg {mid})")
-                await asyncio.sleep(0)
-            except: pass
-
-        # Har bir chunk ni yuklash
-        for fname, (mid, fid) in sorted(chunk_names.items()):
-            data = await _read_file(fid)
-            if not data:
-                data = await _download_doc(mid)
-            if not data: continue
-
-            # Chunk raqami
-            import re as _re
-            m = _re.search(r'(\d+)', fname)
-            n = int(m.group(1)) if m else len(new_chunks) + 1
-
-            for meta in data.get("tests_meta", []):
-                tid = meta.get("test_id")
-                if tid and tid not in seen_tids:
-                    seen_tids.add(tid)
-                    all_metas.append(meta)
-            for k, v in data.items():
-                if k.startswith("test_") or k.startswith("fid_"):
-                    _index[k] = v
-
-            new_chunks.append({
-                "n":      n,
-                "msg_id": mid,
-                "fid":    fid,
-                "count":  len(data.get("tests_meta", [])),
-            })
-            log.info(f"  chunk {n}: {len(data.get('tests_meta',[]))} test meta yuklandi")
-
-        if new_chunks:
-            _meta["index_chunks"] = sorted(new_chunks, key=lambda x: x["n"])
-            log.info(f"✅ Kanaldan {len(all_metas)} test meta tiklandi "
-                     f"({len(new_chunks)} chunk)")
-
+        await sb.update("tests", "test_id", tid, patch)
     except Exception as e:
-        log.error(f"_recover_index_from_channel: {e}")
+        log.error(f"update_test_meta_tg({tid}): {e}")
+        return
 
-    return all_metas
+    ram.update_test_meta(tid, updates)
 
+    if tid in _tests_cache:
+        _tests_cache[tid].update(updates)
+        ram.cache_questions(tid, _tests_cache[tid])
+    else:
+        cached = ram.get_cached_questions(tid)
+        if cached:
+            cached.update(updates)
+            ram.cache_questions(tid, cached)
+            _tests_cache[tid] = cached
 
-async def _save_index_chunks():
-    """
-    XAVFSIZ saqlash:
-    1. Yangi chunk yuboriladi
-    2. Faqat muvaffaqiyatli bo'lsa new_chunks ga qo'shiladi
-    3. Barcha chunklar muvaffaqiyatli bo'lgandan keyin _save_meta()
-    4. Faqat shundan keyin eski chunk o'chiriladi
-    """
-    async with _get_lock():
-        from utils import ram_cache as ram
-
-        # RAM dan yangilangan meta ni _index ga o'tkaz
-        for m in _index.get("tests_meta", []):
-            tid = m.get("test_id")
-            if not tid: continue
-            rm = ram.get_test_meta(tid)
-            if not rm: continue
-            for key in ("solve_count", "avg_score", "is_paused", "is_active",
-                        "poll_time", "allowed_users", "title", "max_attempts",
-                        "question_count", "ref_required", "ref_count",
-                        "visibility", "difficulty", "category",
-                        "time_limit", "passing_score"):
-                if key in rm:
-                    m[key] = rm[key]
-
-        metas      = _index.get("tests_meta", [])
-        groups     = [metas[i:i+INDEX_CHUNK_SIZE]
-                      for i in range(0, max(len(metas), 1), INDEX_CHUNK_SIZE)]
-        old_chunks = _meta.get("index_chunks", [])
-        new_chunks = []
-        ts         = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-        all_ok     = True
-
-        for i, group in enumerate(groups):
-            chunk_data = {"n": i+1, "saved_at": ts, "tests_meta": group}
-            for m in group:
-                tid = m.get("test_id")
-                if tid and _index.get(f"test_{tid}"):
-                    msg_id = _index[f"test_{tid}"]
-                    chunk_data[f"test_{tid}"] = msg_id
-                    fk = f"fid_{msg_id}"
-                    if _index.get(fk):
-                        chunk_data[fk] = _index[fk]
-
-            try:
-                # 1. AVVAL yangi chunk yuborish
-                msg = await _bot.send_document(
-                    _cid,
-                    document=_buf(chunk_data, f"index_chunk_{i+1}.json"),
-                    caption=f"INDEX_CHUNK_{i+1} | {len(group)} test | {ts}",
-                    protect_content=False
-                )
-                new_chunks.append({
-                    "n":      i + 1,
-                    "msg_id": msg.message_id,
-                    "fid":    msg.document.file_id,
-                    "count":  len(group),
-                    "_old_mid": old_chunks[i]["msg_id"] if i < len(old_chunks) else None,
-                })
-                await asyncio.sleep(0.3)
-            except Exception as e:
-                log.error(f"index chunk {i+1} yuborish xato: {e}")
-                all_ok = False
-                # Eski chunkni saqlab qolish
-                if i < len(old_chunks):
-                    old = dict(old_chunks[i])
-                    old["_old_mid"] = None   # o'chirmaslik uchun
-                    new_chunks.append(old)
-
-        # 2. _save_meta() — yangi chunk msg_id lar bilan
-        meta_chunks = [
-            {"n": c["n"], "msg_id": c["msg_id"], "fid": c["fid"], "count": c.get("count", 0)}
-            for c in new_chunks
-        ]
-        _meta["index_chunks"] = meta_chunks
-        meta_ok = await _save_meta()
-
-        # 3. Faqat meta muvaffaqiyatli bo'lganda eski chunklar o'chiriladi
-        if meta_ok:
-            for c in new_chunks:
-                old_mid = c.get("_old_mid")
-                if old_mid and old_mid != c["msg_id"]:
-                    try:
-                        await _bot.delete_message(_cid, old_mid)
-                        await asyncio.sleep(0.1)
-                    except: pass
-
-        log.info(f"Index chunks saqlandi: {len(new_chunks)} chunk, "
-                 f"{len(metas)} test, ok={all_ok}, meta_ok={meta_ok}")
-        return all_ok and meta_ok
-
-
-async def _save_index():
-    """Index ni saqlash — faqat o'zgarish bo'lganda"""
-    global _index_dirty
-    _index_dirty = False
-    return await _save_index_chunks()
+    mark_stats_dirty()
+    log.info(f"update_test_meta_tg: {tid} → {list(updates.keys())}")
 
 
 # ══════════════════════════════════════════════════════════════
-# USERS LIST
+# USERS
 # ══════════════════════════════════════════════════════════════
 
-async def _load_users_list():
-    global _users_dirty
+async def get_users():
     from utils import ram_cache as ram
-    chunks = _meta.get("users_list_chunks", [])
-    total  = 0
-
-    if not chunks:
-        # Chunk yo'q — kanaldan users_list fayllarni qidirish
-        log.info("users_list_chunks yo'q — kanaldan qidirilmoqda...")
-        await _recover_users_from_channel()
-        return
-
-    for chunk in chunks:
-        fid  = chunk.get("fid")
-        mid  = chunk.get("msg_id")
-        data = {}
-        if fid:
-            data = await _read_file(fid)
-        if not data and mid:
-            data = await _download_doc(mid)
-        if not data:
-            _users_dirty = True
-            log.warning(f"users_list chunk yuklanmadi: msg_id={mid}")
-            continue
-        users = data.get("users", {})
-        cur   = ram.get_users()
-        cur.update(users)
-        ram.set_users(cur)
-        total += len(users)
-
-    if total == 0 and chunks:
-        # Chunklar bor lekin yuklanmadi — kanaldan qidirish
-        log.warning("users_list chunklar yuklanmadi — kanaldan qidirilmoqda...")
-        await _recover_users_from_channel()
-        return
-
-    log.info(f"Users: {total} ta ({len(chunks)} chunk)")
+    return ram.get_users()
 
 
-async def _recover_users_from_channel():
-    """Kanaldan users_list fayllarni topib yuklaydi"""
-    global _users_dirty
-    from utils import ram_cache as ram
-    try:
-        probe = await _bot.send_message(_cid, ".", protect_content=False)
-        cur   = probe.message_id
-        await _bot.delete_message(_cid, cur)
-        all_users = {}
-        new_chunks = []
-        chunk_names_seen = set()
+async def save_users(users):
+    mark_users_dirty_tg()
+    return True
 
-        for mid in range(cur - 1, max(1, cur - 3000), -1):
-            try:
-                fwd = await _bot.forward_message(_cid, _cid, mid)
-                doc = getattr(fwd, "document", None)
-                try:
-                    await _bot.delete_message(_cid, fwd.message_id)
-                except: pass
-                if doc and doc.file_name:
-                    fname = doc.file_name.lower()
-                    if "users_list" in fname and fname.endswith(".json"):
-                        if fname not in chunk_names_seen:
-                            chunk_names_seen.add(fname)
-                            data = await _read_file(doc.file_id)
-                            if isinstance(data, dict) and data.get("users"):
-                                all_users.update(data["users"])
-                                new_chunks.append({
-                                    "n":     len(new_chunks) + 1,
-                                    "msg_id": mid,
-                                    "fid":   doc.file_id,
-                                    "count": len(data["users"]),
-                                })
-                                log.info(f"  users_list topildi: {len(data['users'])} user")
-                await asyncio.sleep(0)
-            except: pass
 
-        if all_users:
-            ram.set_users(all_users)
-            _meta["users_list_chunks"] = new_chunks
-            log.info(f"Kanaldan users tiklandi: {len(all_users)} ta, {len(new_chunks)} chunk")
-        else:
-            log.warning("Kanaldan users topilmadi")
-            _users_dirty = True
-    except Exception as e:
-        log.error(f"_recover_users_from_channel: {e}")
-        _users_dirty = True
+async def save_users_full():
+    await _flush_users_list()
+    return True
 
 
 async def _flush_users_list():
-    """XAVFSIZ: avval yoz, keyin o'chir"""
     global _users_dirty
+    if not ready():
+        return
     from utils import ram_cache as ram
     users = ram.get_users()
-    if not users: return
+    if not users:
+        return
 
-    async with _get_lock():
-        chunks     = _meta.get("users_list_chunks", [])
-        all_uids   = list(users.keys())
-        uid_groups = [all_uids[i:i+500] for i in range(0, len(all_uids), 500)]
-        new_chunks = []
-        ts         = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
+    rows = []
+    for uid_str, data in users.items():
+        try:
+            tg_id = int(uid_str)
+        except (TypeError, ValueError):
+            continue
+        d = dict(data)
+        is_blocked = bool(d.pop("is_blocked", False))
+        rows.append({"tg_id": tg_id, "data": d, "is_blocked": is_blocked})
 
-        for i, group in enumerate(uid_groups):
-            chunk_users = {uid: users[uid] for uid in group if uid in users}
-            old_mid     = chunks[i]["msg_id"] if i < len(chunks) else None
-            try:
-                msg = await _bot.send_document(
-                    _cid,
-                    document=_buf({"users": chunk_users, "count": len(chunk_users),
-                                   "saved_at": ts}, f"users_list_{i+1}.json"),
-                    caption=f"USERS_LIST_{i+1} | {len(chunk_users)} user | {ts}",
-                    protect_content=False
-                )
-                new_chunks.append({
-                    "n": i+1, "msg_id": msg.message_id,
-                    "fid": msg.document.file_id, "count": len(chunk_users),
-                    "_old_mid": old_mid
-                })
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                log.error(f"users_list chunk {i+1}: {e}")
-                if i < len(chunks):
-                    old = dict(chunks[i])
-                    old["_old_mid"] = None
-                    new_chunks.append(old)
-
-        _meta["users_list_chunks"] = [
-            {"n": c["n"], "msg_id": c["msg_id"], "fid": c["fid"], "count": c.get("count", 0)}
-            for c in new_chunks
-        ]
-        meta_ok = await _save_meta()
-
-        if meta_ok:
-            for c in new_chunks:
-                old_mid = c.get("_old_mid")
-                if old_mid and old_mid != c["msg_id"]:
-                    try:
-                        await _bot.delete_message(_cid, old_mid)
-                    except: pass
-
+    BATCH = 500
+    try:
+        for i in range(0, len(rows), BATCH):
+            await sb.upsert_many("users", rows[i:i+BATCH], on_conflict="tg_id")
         _users_dirty = False
-        log.info(f"Users saqlandi: {len(users)} ta, {len(new_chunks)} chunk")
+        log.info(f"Users saqlandi: {len(rows)} ta")
+    except Exception as e:
+        log.error(f"_flush_users_list: {e}")
 
 
 # ══════════════════════════════════════════════════════════════
-# USER STATS
+# USER STATS (kim qaysi testni yechgan)
 # ══════════════════════════════════════════════════════════════
 
 async def flush_dirty_user_stats():
+    if not ready():
+        return
     from utils import ram_cache as ram
     dirty_stats = ram.get_dirty_user_stats()
-    if not dirty_stats: return
+    if not dirty_stats:
+        return
 
-    chunks          = _meta.get("user_stats_chunks", [])
-    dirty_chunk_ids = set()
+    rows = []
     for uid_str in dirty_stats:
-        for i, chunk in enumerate(chunks):
-            if uid_str in chunk.get("uids", []):
-                dirty_chunk_ids.add(i)
-                break
-        else:
-            if chunks and len(chunks[-1].get("uids", [])) < 50:
-                chunks[-1]["uids"].append(uid_str)
-                dirty_chunk_ids.add(len(chunks) - 1)
-            else:
-                chunks.append({
-                    "n": len(chunks)+1, "msg_id": None,
-                    "fid": None, "uids": [uid_str]
-                })
-                dirty_chunk_ids.add(len(chunks) - 1)
-
-    ts    = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-    saved = False
-
-    for i in dirty_chunk_ids:
-        if i >= len(chunks): continue
-        chunk       = chunks[i]
-        chunk_stats = {}
-        for uid_str in chunk.get("uids", []):
-            s = ram.get_user_stats_cache(uid_str)
-            if s:
-                chunk_stats[uid_str] = s
-        if not chunk_stats: continue
-
-        old_mid = chunk.get("msg_id")
-        try:
-            # AVVAL yangi chunk
-            msg = await _bot.send_document(
-                _cid,
-                document=_buf({"stats": chunk_stats, "saved_at": ts},
-                              f"user_stats_{i+1}.json"),
-                caption=f"USER_STATS_{i+1} | {len(chunk_stats)} user | {ts}",
-                protect_content=False
-            )
-            # Muvaffaqiyatli bo'lsa eski ni o'chirish
-            if old_mid and old_mid != msg.message_id:
-                try:
-                    await _bot.delete_message(_cid, old_mid)
-                except: pass
-            chunk["msg_id"] = msg.message_id
-            chunk["fid"]    = msg.document.file_id
-            saved = True
-            for uid_str in chunk.get("uids", []):
-                ram.clear_stats_dirty(uid_str)
-            await asyncio.sleep(1)
-        except Exception as e:
-            log.error(f"user_stats chunk {i}: {e}")
-
-    _meta["user_stats_chunks"] = chunks
-    if saved:
-        await _save_meta()
-        log.info(f"User stats saqlandi")
-
-
-async def _load_user_stats(uid_str):
-    from utils import ram_cache as ram
-    if ram.get_user_stats_cache(uid_str) is not None:
-        return
-    for chunk in _meta.get("user_stats_chunks", []):
-        if uid_str not in chunk.get("uids", []):
+        s = ram.get_user_stats_cache(uid_str)
+        if s is None:
             continue
-        fid  = chunk.get("fid")
-        mid  = chunk.get("msg_id")
-        data = {}
-        if fid:
-            data = await _read_file(fid)
-        if not data and mid:
-            data = await _download_doc(mid)
-        if not data: return
-        for uid, s in data.get("stats", {}).items():
-            if ram.get_user_stats_cache(uid) is None:
-                ram.set_user_stats_cache(uid, s, dirty=False)
+        try:
+            tg_id = int(uid_str)
+        except (TypeError, ValueError):
+            continue
+        rows.append({"tg_id": tg_id, "data": s})
+
+    if not rows:
         return
+    try:
+        await sb.upsert_many("user_stats", rows, on_conflict="tg_id")
+        for uid_str in dirty_stats:
+            ram.clear_stats_dirty(uid_str)
+        log.info(f"User stats saqlandi: {len(rows)} ta")
+    except Exception as e:
+        log.error(f"flush_dirty_user_stats: {e}")
 
 
 # ══════════════════════════════════════════════════════════════
 # TESTS STATS
 # ══════════════════════════════════════════════════════════════
 
-async def _load_tests_stats():
+async def save_tests_stats() -> bool:
     global _stats_dirty
-    fid = _meta.get("tests_stats_fid")
-    mid = _meta.get("tests_stats_msg_id")
-    data = {}
-    if fid:
-        data = await _read_file(fid)
-    if not data and mid:
-        data = await _download_doc(mid)
-    if not data and not mid:
-        # tests_stats_msg_id yo'q — kanaldan qidirish
-        log.info("tests_stats: meta da yo'q, kanaldan qidirilmoqda...")
-        try:
-            # Kanaldan so'nggi TESTS_STATS caption li xabar topish
-            async for msg in _bot.get_chat_history(_cid, limit=200):
-                if msg.document and msg.caption and "TESTS_STATS" in (msg.caption or ""):
-                    found = await _read_file(msg.document.file_id)
-                    if found and found.get("stats"):
-                        data = found
-                        _meta["tests_stats_msg_id"] = msg.message_id
-                        _meta["tests_stats_fid"]    = msg.document.file_id
-                        log.info(f"tests_stats: kanaldan topildi (msg_id={msg.message_id})")
-                        break
-        except Exception as e:
-            log.warning(f"tests_stats kanaldan qidirish: {e}")
-    if not data:
-        _stats_dirty = True
-        return
+    if not ready():
+        return False
     from utils import ram_cache as ram
-    for tid, s in data.get("stats", {}).items():
-        ram.update_test_meta(tid, {
-            "solve_count": s.get("solve_count", 0),
-            "avg_score":   s.get("avg_score", 0.0),
-            "is_paused":   s.get("is_paused", False),
-            "is_active":   s.get("is_active", True),
-        })
-        if s.get("solvers"):
-            ram.load_solvers_to_ram(tid, s["solvers"])
-    log.info(f"tests_stats: {len(data.get('stats',{}))} test yuklandi")
 
-    # question_count 0 bo'lgan testlarni _tests_cache dan to'ldirish
-    for m in ram.get_all_tests_meta():
-        tid = m.get("test_id")
-        if not tid: continue
-        if m.get("question_count", 0) == 0:
-            # Cache dan tekshirish
-            cached = _tests_cache.get(tid) or ram.get_cached_questions(tid)
-            if cached and cached.get("questions"):
-                qc = len(cached["questions"])
-                if qc > 0:
-                    ram.update_test_meta(tid, {"question_count": qc})
-                    # _index da ham yangilash
-                    for idx_m in _index.get("tests_meta", []):
-                        if idx_m.get("test_id") == tid:
-                            idx_m["question_count"] = qc
-                            break
-
-
-async def save_tests_stats():
-    """
-    XAVFSIZ: avval yoz, keyin o'chir.
-    INDEX GA TEGMAYDI — faqat stats faylini yangilaydi.
-    """
-    global _stats_dirty
-    if not ready(): return False
-    from utils import ram_cache as ram
-    metas  = ram.get_all_tests_meta()
-    daily  = ram.get_daily()
-    stats  = {}
-    for m in metas:
-        tid = m.get("test_id", "")
-        if not tid: continue
-        solvers = {}
-        for uid_str, udata in daily.items():
-            entry = udata.get("by_test", {}).get(tid)
-            if entry and entry.get("attempts", 0) > 0:
-                solvers[uid_str] = {
-                    "attempts":   entry["attempts"],
-                    "best_score": entry["best_score"],
-                    "avg_score":  entry["avg_score"],
-                    "all_pcts":   entry["all_pcts"],
-                    "last_at":    entry.get("last_at", ""),
-                }
-        stats[tid] = {
-            "solve_count": m.get("solve_count", 0),
-            "avg_score":   m.get("avg_score", 0.0),
-            "is_paused":   m.get("is_paused", False),
-            "is_active":   m.get("is_active", True),
-            "solvers":     solvers,
-        }
-    ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-    old_mid = _meta.get("tests_stats_msg_id")
+    metas = ram.get_all_tests_meta()
     try:
-        # AVVAL yangi fayl
-        msg = await _bot.send_document(
-            _cid,
-            document=_buf({"stats": stats, "saved_at": ts}, "tests_stats.json"),
-            caption=f"TESTS_STATS | {len(stats)} test | {ts}",
-            protect_content=False
-        )
-        _meta["tests_stats_msg_id"] = msg.message_id
-        _meta["tests_stats_fid"]    = msg.document.file_id
+        for m in metas:
+            tid = m.get("test_id", "")
+            if not tid:
+                continue
+            await sb.update("tests", "test_id", tid, {
+                "solve_count": m.get("solve_count", 0),
+                "avg_score":   float(m.get("avg_score") or 0),
+                "is_paused":   m.get("is_paused", False),
+                "is_active":   m.get("is_active", True),
+            })
 
-        # _save_meta — LEKIN index chunk ga tegmaydi
-        await _save_meta()
-
-        # Muvaffaqiyatli bo'lgach eski o'chir
-        if old_mid and old_mid != msg.message_id:
+        daily = ram.get_daily()
+        stat_rows = []
+        for uid_str, udata in daily.items():
             try:
-                await _bot.delete_message(_cid, old_mid)
-            except: pass
+                tg_id = int(uid_str)
+            except (TypeError, ValueError):
+                continue
+            stat_rows.append({"tg_id": tg_id, "data": udata})
+        if stat_rows:
+            for i in range(0, len(stat_rows), 500):
+                await sb.upsert_many("user_stats", stat_rows[i:i+500], on_conflict="tg_id")
 
         _stats_dirty = False
-        log.info(f"tests_stats: {len(stats)} test saqlandi")
+        log.info(f"tests_stats: {len(metas)} test saqlandi")
         return True
     except Exception as e:
         log.error(f"save_tests_stats: {e}")
         return False
 
 
+async def _load_tests_stats():
+    """Bot startida chaqirilardi — endi _load_tests_meta_to_ram bilan
+    birlashtirilgan, shu uchun no-op sifatida saqlanadi (moslik uchun)."""
+    return
+
+
 # ══════════════════════════════════════════════════════════════
 # LEADERBOARD
 # ══════════════════════════════════════════════════════════════
 
-async def _load_leaderboard():
-    from utils import ram_cache as ram
-    fid = _meta.get("leaderboard_fid")
-    mid = _meta.get("leaderboard_msg_id")
-    if not mid: return
-    data = {}
-    if fid:
-        data = await _read_file(fid)
-    if not data and mid:
-        data = await _download_doc(mid)
-    if data:
-        ram.set_global_leaderboard(data.get("top20", []))
-        log.info(f"Leaderboard: {len(data.get('top20',[]))} ta")
-
-
 async def save_leaderboard():
-    from utils import ram_cache as ram
-    top20   = ram.update_global_leaderboard()
-    if not top20: return
-    ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-    old_mid = _meta.get("leaderboard_msg_id")
+    if not ready():
+        return False
     try:
-        msg = await _bot.send_document(
-            _cid,
-            document=_buf({"top20": top20, "saved_at": ts}, "leaderboard.json"),
-            caption=f"LEADERBOARD | top {len(top20)} | {ts}",
-            protect_content=False
-        )
-        _meta["leaderboard_msg_id"] = msg.message_id
-        _meta["leaderboard_fid"]    = msg.document.file_id
-        await _save_meta()
-        if old_mid and old_mid != msg.message_id:
-            try: await _bot.delete_message(_cid, old_mid)
-            except: pass
-        log.info(f"Leaderboard saqlandi: {len(top20)} ta")
+        from utils import ram_cache as ram
+        data = ram.get_global_leaderboard()
+        await sb.upsert("leaderboard", {"scope": "global", "data": data}, on_conflict="scope")
+        return True
     except Exception as e:
         log.error(f"save_leaderboard: {e}")
+        return False
 
 
-async def save_group_leaderboard():
-    from utils import ram_cache as ram
-    if not ram.is_group_lb_dirty(): return
-    lb    = ram.get_group_leaderboard()
-    if not lb: return
-    today   = str(date.today())
-    ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-    old_mid = _meta.get("group_lb_msg_id")
+async def _load_leaderboard():
+    if not ready():
+        return
     try:
-        msg = await _bot.send_document(
-            _cid,
-            document=_buf({"top20": lb, "date": today, "saved_at": ts},
-                          f"group_lb_{today}.json"),
-            caption=f"GROUP_LB | {today} | top {len(lb)} | {ts}",
-            protect_content=False
-        )
-        _meta["group_lb_msg_id"] = msg.message_id
-        _meta["group_lb_fid"]    = msg.document.file_id
-        _meta["group_lb_date"]   = today
-        await _save_meta()
-        if old_mid and old_mid != msg.message_id:
-            try: await _bot.delete_message(_cid, old_mid)
-            except: pass
-        ram.clear_group_lb_dirty()
-        log.info(f"Guruh leaderboard saqlandi: {len(lb)} ta")
+        row = await sb.select_one("leaderboard", "scope", "global")
+        if row:
+            from utils import ram_cache as ram
+            ram.set_global_leaderboard(row.get("data") or [])
+    except Exception as e:
+        log.error(f"_load_leaderboard: {e}")
+
+
+async def save_group_leaderboard(chat_id=None, data=None):
+    """Guruh leaderboard'i kunlik bo'lib, ram_cache da bitta 'bugungi'
+    ro'yxat sifatida saqlanadi. chat_id berilmasa, joriy guruh
+    leaderboard'ini scope='group_today' ostida saqlaymiz."""
+    if not ready():
+        return False
+    try:
+        from utils import ram_cache as ram
+        payload = data if data is not None else ram.get_group_leaderboard()
+        scope = f"group_{chat_id}" if chat_id is not None else "group_today"
+        await sb.upsert("leaderboard", {"scope": scope, "data": payload}, on_conflict="scope")
+        return True
     except Exception as e:
         log.error(f"save_group_leaderboard: {e}")
+        return False
 
 
-async def load_group_leaderboard():
-    from utils import ram_cache as ram
-    today   = str(date.today())
-    lb_date = _meta.get("group_lb_date", "")
-    if lb_date != today:
-        ram.clear_group_leaderboard()
-        return
-    fid = _meta.get("group_lb_fid")
-    mid = _meta.get("group_lb_msg_id")
-    data = {}
-    if fid:
-        data = await _read_file(fid)
-    if not data and mid:
-        data = await _download_doc(mid)
-    if data:
-        from utils.ram_cache import _set
-        _set("group_leaderboard", data.get("top20", []))
-
-
-# ══════════════════════════════════════════════════════════════
-# AUTO FLUSH LOOP — MINIMAL YOZUV
-# ══════════════════════════════════════════════════════════════
-
-
-async def _load_blocked_to_ram():
-    """Background da bloklangan IDlarni TG dan yuklab RAMga qo'yadi."""
+async def load_group_leaderboard(chat_id=None):
+    if not ready():
+        return []
     try:
-        ids = await load_blocked_users()
-        if ids:
-            import blocked as _bl
-            for bid in ids:
-                _bl._blocked.add(bid)
-            log.info(f"Bloklangan IDlar yuklandi: {len(ids)} ta")
+        scope = f"group_{chat_id}" if chat_id is not None else "group_today"
+        row = await sb.select_one("leaderboard", "scope", scope)
+        return (row or {}).get("data") or []
     except Exception as e:
-        log.error(f"_load_blocked_to_ram: {e}")
+        log.error(f"load_group_leaderboard({chat_id}): {e}")
+        return []
+
+
+# ══════════════════════════════════════════════════════════════
+# AUTO FLUSH LOOP
+# ══════════════════════════════════════════════════════════════
 
 async def auto_flush_loop():
-    """
-    QOIDA: auto_flush faqat stats va users ni saqlaydi.
-    INDEX ni SAQLAMAYDI — u faqat test qo'shilganda/o'zgartirilganda saqlanadi.
-    Soatlik: leaderboard va user_stats.
-    Kunlik: backup.
-    """
+    """Har bir bosqich alohida try/except bilan — bittasi xato bersa
+    ham loop davom etadi (crash yo'q, eski xulq-atvor saqlanadi)."""
     await asyncio.sleep(60)
     last_hourly = datetime.now(UTC)
-    last_index  = datetime.now(UTC)
 
     while True:
         try:
-            await asyncio.sleep(300)   # 5 daqiqa (oldin 2 edi)
+            await asyncio.sleep(300)
             now = datetime.now(UTC)
 
-            # Heartbeat — bot.py dan import qilamiz (circular import oldini olish)
             try:
                 import bot as _bot_mod
                 if hasattr(_bot_mod, "_beat"):
@@ -1418,30 +574,27 @@ async def auto_flush_loop():
             except Exception:
                 pass
 
-            # Stats — faqat o'zgarga
             if _stats_dirty:
-                log.info("auto_flush: tests_stats...")
-                await save_tests_stats()
+                try:
+                    await save_tests_stats()
+                except Exception as e:
+                    log.error(f"auto_flush stats: {e}")
 
-            # Users — faqat o'zgarga
             if _users_dirty:
-                log.info("auto_flush: users_list...")
-                await _flush_users_list()
+                try:
+                    await _flush_users_list()
+                except Exception as e:
+                    log.error(f"auto_flush users: {e}")
 
-            # Index — faqat o'zgarga VA kamida 10 daqiqa o'tgan bo'lsa
-            if _index_dirty and (now - last_index).total_seconds() >= 600:
-                log.info("auto_flush: index chunks...")
-                await _save_index()
-                last_index = now
-
-            # Soatlik
             if (now - last_hourly).total_seconds() >= 3600:
                 last_hourly = now
                 log.info("Soatlik flush...")
-                await flush_dirty_user_stats()
-                await save_leaderboard()
-                await save_group_leaderboard()
-                await save_known_groups()
+                for fn in (flush_dirty_user_stats, save_leaderboard,
+                           save_group_leaderboard, save_known_groups):
+                    try:
+                        await fn()
+                    except Exception as e:
+                        log.error(f"auto_flush hourly {fn.__name__}: {e}")
                 log.info("Soatlik flush tugadi")
 
         except asyncio.CancelledError:
@@ -1453,14 +606,12 @@ async def auto_flush_loop():
                     _bot_mod._beat("auto_flush", "error", str(e))
             except Exception:
                 pass
-            log.error(f"auto_flush: {e}")
+            log.error(f"auto_flush_loop: {e}")
 
 
 # ══════════════════════════════════════════════════════════════
-# OTP
+# OTP — Web App login kodlari (RAM, qisqa umrli — DB shart emas)
 # ══════════════════════════════════════════════════════════════
-
-_otp_store: dict = {}
 
 def generate_otp(test_id: str, uid: int = 0) -> str:
     import random, string, time
@@ -1473,35 +624,153 @@ def generate_otp(test_id: str, uid: int = 0) -> str:
             del _otp_store[k]
     return code
 
+
 def verify_otp(code: str) -> dict:
     import time
     entry = _otp_store.get(code.upper().strip())
-    if not entry: return {"ok": False, "error": "Kod topilmadi"}
+    if not entry:
+        return {"ok": False, "error": "Kod topilmadi"}
     if entry["expires_at"] < time.time():
         del _otp_store[code]
         return {"ok": False, "error": "Kod muddati tugagan"}
-    if entry["used"]: return {"ok": False, "error": "Kod ishlatilgan"}
+    if entry["used"]:
+        return {"ok": False, "error": "Kod ishlatilgan"}
     entry["used"] = True
     return {"ok": True, "test_id": entry["test_id"], "uid": entry["uid"]}
+
 
 def get_otp_info(code: str) -> dict:
     import time
     entry = _otp_store.get(code.upper().strip())
-    if not entry or entry["expires_at"] < time.time(): return {}
+    if not entry or entry["expires_at"] < time.time():
+        return {}
     return entry
 
 
 # ══════════════════════════════════════════════════════════════
-# WEB SYNC
+# WEB SYNC — Supabase'da DEYARLI KERAK EMAS
 # ══════════════════════════════════════════════════════════════
+# Eski versiyada bot va Telegram Web App ikkita alohida joyga
+# (kanal pin xabari) yozardi, shuning uchun har 60 soniyada
+# "pin o'zgardimi" deb tekshirish kerak edi.
+#
+# Endi ikkalasi ham BITTA Postgres bazasiga yozadi — demak
+# bot tomoni har doim eng so'nggi holatni to'g'ridan-to'g'ri
+# o'qiy oladi. Bu loop endi faqat RAM cache'ni vaqti-vaqti bilan
+# yangilab turish uchun qoldirilgan (masalan boshqa joydan —
+# web paneldan — qo'shilgan testlar botning RAM cache'iga ham
+# kirib kelishi uchun).
+
+async def web_sync_loop():
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await asyncio.sleep(60)
+            if not ready():
+                continue
+            await _sync_new_tests_from_db()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.error(f"web_sync_loop: {e}")
+            await asyncio.sleep(60)
+
+
+async def _sync_new_tests_from_db():
+    from utils import ram_cache as ram
+    try:
+        rows = await sb.select("tests", columns="test_id,title,meta,question_count,"
+                                                  "is_active,is_paused,solve_count,avg_score")
+    except Exception as e:
+        log.error(f"_sync_new_tests_from_db: {e}")
+        return
+
+    ram_ids = {t.get("test_id") for t in ram.get_all_tests_meta()}
+    added = 0
+    for r in rows:
+        tid = r["test_id"]
+        if tid in ram_ids:
+            old_meta = next((m for m in ram.get_all_tests_meta() if m.get("test_id") == tid), {})
+            new_qc   = r.get("question_count", 0)
+            if old_meta and old_meta.get("question_count", 0) != new_qc:
+                _tests_cache.pop(tid, None)
+                ram.invalidate_cached_questions(tid)
+                meta = dict(r.get("meta") or {})
+                meta.update({
+                    "test_id": tid, "title": r.get("title", ""),
+                    "question_count": new_qc,
+                    "is_active": r.get("is_active", True),
+                    "is_paused": r.get("is_paused", False),
+                })
+                ram.update_test_meta(tid, meta)
+            continue
+
+        meta = dict(r.get("meta") or {})
+        meta.update({
+            "test_id":        tid,
+            "title":          r.get("title", ""),
+            "question_count": r.get("question_count", 0),
+            "is_active":      r.get("is_active", True),
+            "is_paused":      r.get("is_paused", False),
+            "solve_count":    r.get("solve_count", 0),
+            "avg_score":      float(r.get("avg_score") or 0),
+        })
+        ram.add_test_meta(meta)
+        added += 1
+        if meta.get("source", "") in ("web", "web_split"):
+            asyncio.create_task(_notify_web_test(meta, tid))
+
+    if added:
+        log.info(f"web_sync: {added} yangi test RAM ga qo'shildi")
+
+
+_global_bot_ref = None
+
+def set_bot_instance(bot):
+    """bot.py main() ichida tg_db.init() orqali avtomatik chaqiriladi —
+    notify funksiyalari (_notify_web_test) uchun bot referensi saqlanadi."""
+    global _global_bot_ref
+    _global_bot_ref = bot
+
+
+def _get_aiogram_bot():
+    return _global_bot_ref
+
+
+async def get_or_create_bot():
+    """
+    Streamlit tomoni (alohida prosess/thread) uchun: agar asosiy bot
+    instansiyasi shu prosessda mavjud bo'lmasa (masalan Streamlit
+    botdan butunlay alohida ishga tushgan bo'lsa), BOT_TOKEN orqali
+    vaqtinchalik aiogram.Bot yaratadi. Bu faqat xabar yuborish kabi
+    bir martalik amallar uchun ishlatiladi — ma'lumotlar bazasi bilan
+    ishlash uchun emas (u Supabase orqali to'g'ridan-to'g'ri amalga
+    oshadi).
+    """
+    if _global_bot_ref:
+        return _global_bot_ref
+    from config import BOT_TOKEN
+    if not BOT_TOKEN:
+        return None
+    from aiogram import Bot as _BotClass
+    from aiogram.client.default import DefaultBotProperties
+    from aiogram.enums import ParseMode
+    return _BotClass(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
 
 
 async def _notify_web_test(meta: dict, tid: str):
+    """Web orqali yaratilgan test haqida foydalanuvchiga xabar beradi."""
     if not meta.get("creator_id"):
+        return
+    bot_obj = _get_aiogram_bot()
+    if not bot_obj:
         return
     try:
         from keyboards.keyboards import test_created_kb
-        bu    = (await _bot.get_me()).username
+        bu    = (await bot_obj.get_me()).username
         title = meta.get("title", tid)
         qc    = meta.get("question_count", 0)
         lines = [
@@ -1512,38 +781,32 @@ async def _notify_web_test(meta: dict, tid: str):
             "",
             "\U0001f447 Boshlash usulini tanlang:",
         ]
-        await _bot.send_message(
-            meta["creator_id"],
-            "\n".join(lines),
+        await bot_obj.send_message(
+            meta["creator_id"], "\n".join(lines),
             reply_markup=test_created_kb(tid, bu)
         )
-
-        # Baza guruhiga publish
         try:
             from utils.baza_publisher import publish_to_baza
             full = await get_test_full(tid)
             if full and full.get("questions"):
                 await publish_to_baza(
-                    bot           = _bot,
-                    tid           = tid,
-                    title         = meta.get("title", tid),
-                    questions     = full["questions"],
-                    creator_id    = int(meta.get("creator_id") or 0),
-                    creator_name  = meta.get("creator_name", ""),
-                    bot_username  = bu,
-                    category      = meta.get("category", ""),
-                    difficulty    = meta.get("difficulty", "medium"),
-                    passing_score = int(meta.get("passing_score") or 60),
+                    bot=bot_obj, tid=tid, title=meta.get("title", tid),
+                    questions=full["questions"],
+                    creator_id=int(meta.get("creator_id") or 0),
+                    creator_name=meta.get("creator_name", ""),
+                    bot_username=bu, category=meta.get("category", ""),
+                    difficulty=meta.get("difficulty", "medium"),
+                    passing_score=int(meta.get("passing_score") or 60),
                 )
         except Exception as _bp:
-            log.warning("_notify_web_test baza: %s", _bp)
-    except Exception as _e:
-        log.warning("_notify_web_test %s: %s", tid, _e)
+            log.warning(f"_notify_web_test baza: {_bp}")
+    except Exception as e:
+        log.warning(f"_notify_web_test {tid}: {e}")
 
 
 async def _notify_updated_test(meta: dict, tid: str, old_qc: int, new_qc: int):
-    """Tahrirlangan test haqida creator ga hisobot."""
-    if not meta.get("creator_id"):
+    bot_obj = _get_aiogram_bot()
+    if not bot_obj or not meta.get("creator_id"):
         return
     try:
         diff = new_qc - old_qc
@@ -1564,410 +827,50 @@ async def _notify_updated_test(meta: dict, tid: str, old_qc: int, new_qc: int):
             + "\U0001f4cb Jami: " + str(new_qc) + " ta savol" + NL + NL
             + "\u2139\ufe0f Yangilangan test keyingi yechishdan kuchga kiradi."
         )
-        await _bot.send_message(meta["creator_id"], txt)
+        await bot_obj.send_message(meta["creator_id"], txt)
         log.info(f"_notify_updated_test: {tid} → {meta['creator_id']}")
-    except Exception as _e:
-        log.warning("_notify_updated_test %s: %s", tid, _e)
-
-
-async def _read_pinned_index() -> dict:
-    """
-    Pinned xabardagi faylni o'qiydi.
-    Fayl nomi muhim emas — index.json ham, index_meta.json ham ishlaydi.
-    """
-    if not ready():
-        return {}
-    try:
-        chat = await _bot.get_chat(_cid)
-        pin  = getattr(chat, "pinned_message", None)
-        if not pin:
-            return {}
-        doc = getattr(pin, "document", None)
-        if not doc:
-            return {}
-        data = await _read_file(doc.file_id)
-        if isinstance(data, dict):
-            return data
     except Exception as e:
-        log.warning(f"_read_pinned_index: {e}")
-    return {}
-
-
-async def web_sync_loop():
-    global _index   # Global _index ni o'zgartirish uchun
-    await asyncio.sleep(30)
-    consecutive_errors  = 0
-    last_sig            = None   # (msg_id, file_unique_id) — kontent o'zgarishini ham tutadi
-    while True:
-        try:
-            await asyncio.sleep(60)    # 1 daqiqa
-            if not ready(): continue
-            from utils import ram_cache as ram
-
-            # Pinned xabarni o'qish
-            try:
-                chat = await asyncio.wait_for(_bot.get_chat(_cid), timeout=10)
-                pin  = getattr(chat, "pinned_message", None)
-                if not pin:
-                    continue
-                # Faqat msg_id emas — hujjat file_unique_id ham:
-                # web tomoni pinned xabarni JOYIDA tahrir qilsa msg_id o'zgarmaydi,
-                # lekin yangi fayl yuklangani uchun file_unique_id o'zgaradi.
-                doc = getattr(pin, "document", None)
-                doc_uid = getattr(doc, "file_unique_id", None) if doc else None
-                cur_sig = (pin.message_id, doc_uid, getattr(pin, "edit_date", None))
-            except Exception:
-                consecutive_errors += 1
-                continue
-
-            # Hech narsa o'zgarmagan bo'lsa — tekshirish shart emas
-            if cur_sig == last_sig:
-                continue
-            last_sig = cur_sig
-
-            # Pinned faylni o'qish
-            try:
-                new_meta = await asyncio.wait_for(_read_pinned_index(), timeout=20)
-            except asyncio.TimeoutError:
-                consecutive_errors += 1
-                continue
-            if not new_meta:
-                continue
-            consecutive_errors = 0
-
-            new_metas    = []
-            new_test_ids = {}
-            for ch in new_meta.get("index_chunks", []):
-                fid  = ch.get("fid")
-                mid  = ch.get("msg_id")
-                data = {}
-                if fid:
-                    data = await _read_file(fid)
-                if not data and mid:
-                    data = await _download_doc(mid)
-                for m in data.get("tests_meta", []):
-                    if not any(x.get("test_id") == m.get("test_id") for x in new_metas):
-                        new_metas.append(m)
-                for k, v in data.items():
-                    if k.startswith("test_"):
-                        new_test_ids[k] = v
-
-            # Ikkala format: bot (index_chunks) va proxy (tests_meta) ni qo'llab-quvvatlash
-            if "tests_meta" in new_meta and "index_chunks" not in new_meta:
-                # Proxy (web) format — tests_meta to'g'ridan
-                new_metas    = new_meta.get("tests_meta", [])
-                new_test_ids = {k: v for k, v in new_meta.items() if k.startswith("test_")}
-
-            ram_ids = {t.get("test_id") for t in ram.get_all_tests_meta()}
-            added   = 0
-            updated = 0
-            for meta in new_metas:
-                tid = meta.get("test_id")
-                if not tid: continue
-                new_msg_id  = new_test_ids.get(f"test_{tid}")
-                old_msg_id  = _index.get(f"test_{tid}")
-                msg_changed = new_msg_id and str(new_msg_id) != str(old_msg_id or "")
-                if tid not in ram_ids:
-                    clean = {k: v for k, v in meta.items() if k != "questions"}
-                    ram.add_test_meta(clean)
-                    if not any(m.get("test_id") == tid for m in _index.get("tests_meta", [])):
-                        _index.setdefault("tests_meta", []).insert(0, clean)
-                    if new_msg_id:
-                        _index[f"test_{tid}"] = new_msg_id
-                    added += 1
-                    if meta.get("source", "") in ("web", "web_split"):
-                        asyncio.create_task(_notify_web_test(meta, tid))
-                elif msg_changed:
-                    # Eski savol sonini saqlab qo'yamiz
-                    old_meta = next(
-                        (m for m in ram.get_all_tests_meta() if m.get("test_id") == tid),
-                        {}
-                    )
-                    old_qc = old_meta.get("question_count", 0)
-
-                    # 1. tg_db._tests_cache dan tozalash (asosiy muammo)
-                    _tests_cache.pop(tid, None)
-
-                    # 2. ram_cache dan tozalash
-                    ram.invalidate_cached_questions(tid)
-
-                    # 3. Index yangilash
-                    _index[f"test_{tid}"] = new_msg_id
-                    _index.pop(f"fid_{old_msg_id}", None)
-
-                    # 4. Meta yangilash
-                    clean = {k: v for k, v in meta.items() if k != "questions"}
-                    ram.update_test_meta(tid, clean)
-
-                    updated += 1
-                    log.info(f"Web sync: {tid} yangilandi — cache tozalandi")
-
-                    # 5. Creator ga hisobot (bot orqali)
-                    new_qc = meta.get("question_count", 0)
-                    asyncio.create_task(_notify_updated_test(meta, tid, old_qc, new_qc))
-            if added or updated:
-                log.info(f"Web sync: {added} yangi, {updated} yangilangan test")
-                mark_index_dirty()
-                try:
-                    await _save_index()
-                    log.info("Web sync: index TG ga saqlandi")
-                    # Bot o'z pini ni bilsin — keraksiz qayta ishlamasin
-                    try:
-                        chat2 = await _bot.get_chat(_cid)
-                        pin2  = getattr(chat2, "pinned_message", None)
-                        if pin2:
-                            doc2 = getattr(pin2, "document", None)
-                            uid2 = getattr(doc2, "file_unique_id", None) if doc2 else None
-                            last_sig = (pin2.message_id, uid2, getattr(pin2, "edit_date", None))
-                    except Exception:
-                        pass
-                except Exception as _se:
-                    log.warning(f"Web sync: index saqlashda xato: {_se}")
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            consecutive_errors += 1
-            log.error(f"web_sync_loop: {e}")
-            if consecutive_errors >= 5:
-                await asyncio.sleep(900)
-                consecutive_errors = 0
-
-
-# ══════════════════════════════════════════════════════════════
-# TESTLAR
-# ══════════════════════════════════════════════════════════════
-
-def get_tests_meta():
-    return _index.get("tests_meta", [])
-
-def get_test_meta(tid):
-    return next((t for t in get_tests_meta()
-                 if t.get("test_id") == tid and t.get("is_active", True)), {})
-
-async def get_test_full(tid):
-    from utils import ram_cache as ram
-
-    # 1. RAM cache
-    if tid in _tests_cache:
-        ram.touch_test_access(tid)
-        return _tests_cache[tid]
-    cached = ram.get_cached_questions(tid)
-    if cached:
-        _tests_cache[tid] = cached
-        return cached
-
-    # 2. fid orqali (tez)
-    msg_id  = _index.get(f"test_{tid}")
-    fid_key = f"fid_{msg_id}" if msg_id else None
-    if msg_id and fid_key and _index.get(fid_key):
-        data = await _read_file(_index[fid_key])
-        if data and data.get("questions"):
-            _tests_cache[tid] = data
-            ram.cache_questions(tid, data)
-            return data
-        _index.pop(fid_key, None)
-
-    # 3. msg_id orqali
-    if msg_id:
-        data = await _download_doc(msg_id)
-        if data and data.get("questions"):
-            _tests_cache[tid] = data
-            ram.cache_questions(tid, data)
-            return data
-
-    # 4. Barcha chunklarni skan (so'nggi chora)
-    log.info(f"{tid} — chunkdan qidirilmoqda...")
-    for ch in _meta.get("index_chunks", []):
-        fid   = ch.get("fid")
-        mid   = ch.get("msg_id")
-        cdata = {}
-        if fid:
-            cdata = await _read_file(fid)
-        if not cdata and mid:
-            cdata = await _download_doc(mid)
-        new_mid = cdata.get(f"test_{tid}")
-        if new_mid:
-            _index[f"test_{tid}"] = new_mid
-            data = await _download_doc(new_mid)
-            if data and data.get("questions"):
-                _tests_cache[tid] = data
-                ram.cache_questions(tid, data)
-                log.info(f"{tid} chunk skanidan topildi")
-                return data
-
-    log.warning(f"{tid} topilmadi")
-    return {}
-
-async def get_tests():
-    return _index.get("tests_meta", [])
-
-async def save_test_full(test):
-    if not ready(): return False
-    tid = test.get("test_id", "")
-    try:
-        qc  = len(test.get("questions", []))
-        msg = await _bot.send_document(
-            _cid,
-            document=_buf(test, f"test_{tid}.json"),
-            caption=f"TEST | {test.get('title','?')} | {qc} savol | {tid}",
-            protect_content=False
-        )
-        _index[f"test_{tid}"]           = msg.message_id
-        _index[f"fid_{msg.message_id}"] = msg.document.file_id
-        _tests_cache[tid] = test
-
-        meta = {k: v for k, v in test.items() if k != "questions"}
-        meta["question_count"] = qc
-        metas = [m for m in _index.get("tests_meta", []) if m.get("test_id") != tid]
-        metas.insert(0, meta)
-        _index["tests_meta"] = metas
-
-        from utils import ram_cache as ram
-        ram.add_test_meta(meta)
-        ram.cache_questions(tid, test)
-
-        # Index ni saqlash + dirty flag
-        await _save_index()
-        return True
-    except Exception as e:
-        log.error(f"save_test_full: {e}")
-        return False
-
-async def save_deleted_test_backup(test):
-    if not ready(): return
-    tid = test.get("test_id", "NOID")
-    _tests_cache.pop(tid, None)
-    try:
-        await _bot.send_document(
-            _cid,
-            document=_buf(test, f"DELETED_test_{tid}.json"),
-            caption=f"DELETED: {test.get('title','?')} | {tid}",
-            protect_content=False
-        )
-    except Exception as e:
-        log.error(f"delete backup: {e}")
-
-async def delete_test_tg(tid):
-    for m in _index.get("tests_meta", []):
-        if m.get("test_id") == tid:
-            m["is_active"] = False
-            break
-    _tests_cache.pop(tid, None)
-    await _save_index()
-    mark_stats_dirty()
-
-async def update_test_meta_tg(tid: str, updates: dict):
-    """Meta yangilash — INDEX ni saqlaydi"""
-    from utils import ram_cache as ram
-
-    for m in _index.get("tests_meta", []):
-        if m.get("test_id") == tid:
-            m.update(updates)
-            break
-
-    ram.update_test_meta(tid, updates)
-
-    if tid in _tests_cache:
-        _tests_cache[tid].update(updates)
-        ram.cache_questions(tid, _tests_cache[tid])
-    else:
-        cached = ram.get_cached_questions(tid)
-        if cached:
-            cached.update(updates)
-            ram.cache_questions(tid, cached)
-            _tests_cache[tid] = cached
-
-    await _save_index()
-    mark_stats_dirty()
-    log.info(f"update_test_meta_tg: {tid} → {list(updates.keys())}")
-
-
-# ══════════════════════════════════════════════════════════════
-# USERS
-# ══════════════════════════════════════════════════════════════
-
-async def get_users():
-    from utils import ram_cache as ram
-    return ram.get_users()
-
-async def save_users(users):
-    mark_users_dirty_tg()
-    return True
-
-async def save_users_full():
-    await _flush_users_list()
-    return True
+        log.warning(f"_notify_updated_test {tid}: {e}")
 
 
 # ══════════════════════════════════════════════════════════════
 # SETTINGS
 # ══════════════════════════════════════════════════════════════
 
-async def save_settings(settings_dict):
-    if not ready(): return False
-    ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-    old_mid = _meta.get("settings_msg_id")
+async def save_settings(settings_dict: dict) -> bool:
+    if not ready():
+        return False
     try:
-        msg = await _bot.send_document(
-            _cid,
-            document=_buf({"settings": settings_dict, "saved_at": ts}, "settings.json"),
-            caption=f"SETTINGS | {ts}",
-            protect_content=False
-        )
-        _meta["settings_msg_id"] = msg.message_id
-        _meta["settings_fid"]    = msg.document.file_id
-        await _save_meta()
-        if old_mid and old_mid != msg.message_id:
-            try: await _bot.delete_message(_cid, old_mid)
-            except: pass
+        await sb.upsert("app_settings", {"id": 1, "data": settings_dict}, on_conflict="id")
         return True
     except Exception as e:
         log.error(f"save_settings: {e}")
         return False
 
-async def get_settings_tg():
-    fid = _meta.get("settings_fid")
-    mid = _meta.get("settings_msg_id")
-    if not mid: return {}
-    data = {}
-    if fid:
-        data = await _read_file(fid)
-    if not data and mid:
-        data = await _download_doc(mid)
-    return data.get("settings", {}) if isinstance(data, dict) else {}
 
-
-# ══════════════════════════════════════════════════════════════
-# GURUHLAR
-# ══════════════════════════════════════════════════════════════
-
-
-# ══════════════════════════════════════════════════════════════
-# BLOKLANGAN FOYDALANUVCHILAR — TG da saqlash
-# ══════════════════════════════════════════════════════════════
-
-async def save_blocked_users(blocked_ids: set):
-    """Bloklangan IDlar ro'yxatini TG kanalga saqlaydi."""
-    if not ready(): return False
-    ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-    old_mid = _meta.get("blocked_msg_id")
+async def get_settings_tg() -> dict:
+    if not ready():
+        return {}
     try:
-        msg = await _bot.send_document(
-            _cid,
-            document=_buf(
-                {"blocked_ids": list(blocked_ids), "count": len(blocked_ids), "saved_at": ts},
-                "blocked_ids.json"
-            ),
-            caption=f"BLOCKED_IDS | {len(blocked_ids)} ta | {ts}",
-            protect_content=False
-        )
-        _meta["blocked_msg_id"] = msg.message_id
-        _meta["blocked_fid"]    = msg.document.file_id
-        await _save_meta()
-        if old_mid and old_mid != msg.message_id:
-            try: await _bot.delete_message(_cid, old_mid)
-            except: pass
+        row = await sb.select_one("app_settings", "id", 1)
+        return (row or {}).get("data") or {}
+    except Exception as e:
+        log.error(f"get_settings_tg: {e}")
+        return {}
+
+
+# ══════════════════════════════════════════════════════════════
+# BLOCKED USERS
+# ══════════════════════════════════════════════════════════════
+
+async def save_blocked_users(blocked_ids: set) -> bool:
+    if not ready():
+        return False
+    try:
+        rows = [{"tg_id": int(uid), "is_blocked": True} for uid in blocked_ids]
+        if rows:
+            for i in range(0, len(rows), 500):
+                await sb.upsert_many("users", rows[i:i+500], on_conflict="tg_id")
         log.info(f"Bloklangan IDlar saqlandi: {len(blocked_ids)} ta")
         return True
     except Exception as e:
@@ -1976,46 +879,33 @@ async def save_blocked_users(blocked_ids: set):
 
 
 async def load_blocked_users() -> set:
-    """TG kanaldan bloklangan IDlarni yuklaydi."""
-    fid = _meta.get("blocked_fid")
-    mid = _meta.get("blocked_msg_id")
-    if not mid and not fid:
+    if not ready():
         return set()
-    data = {}
-    if fid:
-        data = await _read_file(fid)
-    if not data and mid:
-        data = await _download_doc(mid)
-    if not data:
-        return set()
-    ids = data.get("blocked_ids", [])
-    result = set(int(i) for i in ids if str(i).isdigit())
-    log.info(f"Bloklangan IDlar yuklandi: {len(result)} ta")
-    return result
-
-
-async def save_known_groups():
-    """Bot admin bo'lgan guruhlarni TG ga JSON sifatida saqlaydi."""
-    if not ready(): return False
-    from utils import ram_cache as ram
-    groups  = ram.get_known_groups()
-    if not groups: return True
-    ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-    old_mid = _meta.get("known_groups_msg_id")
     try:
-        msg = await _bot.send_document(
-            _cid,
-            document=_buf({"groups": groups, "count": len(groups), "saved_at": ts},
-                          "known_groups.json"),
-            caption=f"KNOWN_GROUPS | {len(groups)} guruh | {ts}",
-            protect_content=False
-        )
-        _meta["known_groups_msg_id"] = msg.message_id
-        _meta["known_groups_fid"]    = msg.document.file_id
-        await _save_meta()
-        if old_mid and old_mid != msg.message_id:
-            try: await _bot.delete_message(_cid, old_mid)
-            except: pass
+        rows = await sb.select("users", columns="tg_id", filters={"is_blocked": True})
+        result = {int(r["tg_id"]) for r in rows}
+        log.info(f"Bloklangan IDlar yuklandi: {len(result)} ta")
+        return result
+    except Exception as e:
+        log.error(f"load_blocked_users: {e}")
+        return set()
+
+
+# ══════════════════════════════════════════════════════════════
+# KNOWN GROUPS
+# ══════════════════════════════════════════════════════════════
+
+async def save_known_groups() -> bool:
+    if not ready():
+        return False
+    from utils import ram_cache as ram
+    groups = ram.get_known_groups()
+    if not groups:
+        return True
+    try:
+        rows = [{"chat_id": int(cid), "data": gdata} for cid, gdata in groups.items()]
+        for i in range(0, len(rows), 500):
+            await sb.upsert_many("known_groups", rows[i:i+500], on_conflict="chat_id")
         log.info(f"known_groups saqlandi: {len(groups)} ta")
         return True
     except Exception as e:
@@ -2024,169 +914,108 @@ async def save_known_groups():
 
 
 async def load_known_groups():
-    """Bot yoqilganda guruhlarni TG dan yuklaydi.
-    known_groups_msg_id yo'q bo'lsa kanaldan qidiradi."""
+    if not ready():
+        return
     from utils import ram_cache as ram
-    fid = _meta.get("known_groups_fid")
-    mid = _meta.get("known_groups_msg_id")
-
-    data = {}
-    if fid:
-        data = await _read_file(fid)
-    if not data and mid:
-        data = await _download_doc(mid)
-
-    # msg_id yo'q yoki yuklanmadi — kanaldan qidirish
-    if not data:
-        if not ready(): return
-        try:
-            probe = await _bot.send_message(_cid, ".", protect_content=False)
-            cur   = probe.message_id
-            await _bot.delete_message(_cid, cur)
-            for scan_mid in range(cur - 1, max(1, cur - 2000), -1):
-                try:
-                    fwd = await _bot.forward_message(_cid, _cid, scan_mid)
-                    doc = getattr(fwd, "document", None)
-                    try:
-                        await _bot.delete_message(_cid, fwd.message_id)
-                    except: pass
-                    if doc and doc.file_name and "known_groups" in doc.file_name.lower():
-                        data = await _read_file(doc.file_id)
-                        if isinstance(data, dict) and data.get("groups"):
-                            _meta["known_groups_msg_id"] = scan_mid
-                            _meta["known_groups_fid"]    = doc.file_id
-                            log.info(f"known_groups kanaldan topildi (msg {scan_mid})")
-                            break
-                    await asyncio.sleep(0)
-                except: pass
-        except Exception as e:
-            log.warning(f"load_known_groups kanal skani: {e}")
-
-    if not data: return
-    groups = data.get("groups", {})
-    if groups:
-        ram.set_known_groups(groups)
-        log.info(f"known_groups yuklandi: {len(groups)} ta guruh")
+    try:
+        rows = await sb.select("known_groups")
+        groups = {str(r["chat_id"]): dict(r.get("data") or {}) for r in rows}
+        if groups:
+            ram.set_known_groups(groups)
+            log.info(f"known_groups yuklandi: {len(groups)} ta guruh")
+    except Exception as e:
+        log.error(f"load_known_groups: {e}")
 
 
 # ══════════════════════════════════════════════════════════════
 # BACKUP
 # ══════════════════════════════════════════════════════════════
 
-async def upload_backup(daily_data, date_str):
-    if not ready(): return 0
+async def upload_backup(daily_data, date_str) -> bool:
+    if not ready():
+        return False
     try:
         r_count = sum(len(v.get("by_test", {})) for v in daily_data.values())
-        ts      = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
-        msg     = await _bot.send_document(
-            _cid,
-            document=_buf({
-                "date": date_str, "saved_at": ts,
-                "users": len(daily_data), "results": r_count,
-                "data":  daily_data,
-            }, f"backup_{date_str}.json"),
-            caption=f"BACKUP | {date_str} | {len(daily_data)} user | {r_count} natija",
-            protect_content=False
-        )
-        _meta.setdefault("backups", {})[date_str] = msg.message_id
-        await _save_meta()
+        await sb.upsert("backups", {
+            "date_str": date_str,
+            "data": {"users": len(daily_data), "results": r_count, "data": daily_data},
+        }, on_conflict="date_str")
         log.info(f"Backup: {date_str}")
-        return msg.message_id
+        return True
     except Exception as e:
-        log.error(f"backup: {e}")
-        return 0
+        log.error(f"upload_backup: {e}")
+        return False
 
-async def get_backup(date_str):
-    mid = _meta.get("backups", {}).get(date_str)
-    if not mid: return {}
-    data = await _download_doc(mid)
-    return data.get("data", {}) if isinstance(data, dict) else {}
 
-def get_backup_dates():
-    return sorted(_meta.get("backups", {}).keys(), reverse=True)
+async def get_backup(date_str) -> dict:
+    if not ready():
+        return {}
+    try:
+        row = await sb.select_one("backups", "date_str", date_str)
+        d = (row or {}).get("data") or {}
+        return d.get("data", {})
+    except Exception as e:
+        log.error(f"get_backup({date_str}): {e}")
+        return {}
+
+
+def get_backup_dates() -> list:
+    """Eski versiya sinxron edi — endi bo'sh ro'yxat qaytaradi (moslik uchun).
+    Haqiqiy ro'yxat uchun get_backup_dates_async() ishlatilsin."""
+    return []
+
+
+async def get_backup_dates_async() -> list:
+    if not ready():
+        return []
+    try:
+        rows = await sb.select("backups", columns="date_str")
+        return sorted([r["date_str"] for r in rows], reverse=True)
+    except Exception as e:
+        log.error(f"get_backup_dates_async: {e}")
+        return []
 
 
 # ══════════════════════════════════════════════════════════════
 # MANUAL FLUSH
 # ══════════════════════════════════════════════════════════════
 
-async def manual_flush(daily_data, users, settings=None):
+async def manual_flush(daily_data, users, settings=None) -> list:
     results = []
     if not ready():
-        return ["❌ TG kanal ulanmagan"]
+        return ["❌ Supabase ulanmagan"]
+
     ok = await save_tests_stats()
     results.append(f"{'✅' if ok else '❌'} Tests stats")
+
     await _flush_users_list()
     results.append(f"✅ Users: {len(users)} ta")
+
     await flush_dirty_user_stats()
     results.append("✅ User stats")
+
     await save_leaderboard()
     results.append("✅ Leaderboard")
+
     if settings:
         ok = await save_settings(settings)
         results.append(f"{'✅' if ok else '❌'} Settings")
+
     if daily_data:
-        from datetime import date as _date
-        today = str(_date.today())
-        mid   = await upload_backup(daily_data, f"{today}_manual")
-        results.append(f"{'✅' if mid else '❌'} Backup: {len(daily_data)} user")
+        today = str(date.today())
+        ok = await upload_backup(daily_data, f"{today}_manual")
+        results.append(f"{'✅' if ok else '❌'} Backup: {len(daily_data)} user")
+
     return results
 
-def get_index_info():
+
+def get_index_info() -> dict:
+    from utils import ram_cache as ram
     return {
-        "tests_count":       len(_index.get("tests_meta", [])),
-        "cached_tests":      len(_tests_cache),
-        "index_chunks":      len(_meta.get("index_chunks", [])),
-        "user_list_chunks":  len(_meta.get("users_list_chunks", [])),
-        "user_stats_chunks": len(_meta.get("user_stats_chunks", [])),
-        "backups":           len(_meta.get("backups", {})),
-        "can_pin":           _can_pin,
-        "stats_dirty":       _stats_dirty,
-        "users_dirty":       _users_dirty,
-        "index_dirty":       _index_dirty,
+        "tests_count":  len(ram.get_all_tests_meta()),
+        "cached_tests": len(_tests_cache),
+        "backend":      "supabase",
+        "ready":        _ready,
+        "stats_dirty":  _stats_dirty,
+        "users_dirty":  _users_dirty,
     }
-
-
-# ══════════════════════════════════════════════════════════════
-# YORDAMCHILAR
-# ══════════════════════════════════════════════════════════════
-
-async def _pin_msg(msg_id: int):
-    global _can_pin
-    if not _can_pin: return
-    try:
-        await _bot.pin_chat_message(_cid, msg_id, disable_notification=True)
-    except:
-        _can_pin = False
-
-
-async def _download_doc(msg_id):
-    try:
-        fwd = await _bot.forward_message(_cid, _cid, int(msg_id))
-        doc = getattr(fwd, "document", None)
-        try:
-            await _bot.delete_message(_cid, fwd.message_id)
-        except: pass
-        if doc:
-            return await _read_file(doc.file_id)
-    except Exception as e:
-        log.error(f"download_doc {msg_id}: {e}")
-    return {}
-
-
-async def _read_file(file_id):
-    try:
-        f   = await _bot.get_file(file_id)
-        buf = io.BytesIO()
-        await _bot.download_file(f.file_path, destination=buf)
-        buf.seek(0)
-        return json.loads(buf.read().decode())
-    except Exception as e:
-        log.error(f"read_file: {e}")
-        return {}
-
-
-def _buf(data, name):
-    from aiogram.types import BufferedInputFile
-    raw = json.dumps(data, ensure_ascii=False, default=str, separators=(",", ":")).encode()
-    return BufferedInputFile(raw, filename=name)

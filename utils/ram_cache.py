@@ -781,3 +781,59 @@ def remove_known_group(chat_id: int):
 
 def set_known_groups(d: dict):
     _set("known_groups", d)
+
+
+# ══ LIVE SESSION MONITOR ════════════════════════════════════════
+import time as _time
+
+def live_start(uid: int, test: dict, mode: str = "inline",
+               chat_id: int = None, chat_title: str = None):
+    live = _get("_live_sessions", {})
+    live[str(uid)] = {
+        "uid":        str(uid),
+        "test_id":    test.get("test_id", ""),
+        "title":      test.get("title", "?"),
+        "mode":       mode,
+        "chat_id":    str(chat_id or uid),
+        "chat_title": chat_title or "Shaxsiy",
+        "started_at": _time.time(),
+        "idx":        0,
+        "total":      len(test.get("questions", [])),
+    }
+    _set("_live_sessions", live)
+
+def live_update(uid: int, idx: int):
+    live = _get("_live_sessions", {})
+    s = live.get(str(uid))
+    if s:
+        s["idx"] = idx
+        _set("_live_sessions", live)
+
+def live_end(uid: int):
+    live = _get("_live_sessions", {})
+    live.pop(str(uid), None)
+    _set("_live_sessions", live)
+
+def get_live_sessions() -> list:
+    now  = _time.time()
+    live = _get("_live_sessions", {})
+    result = []
+    stale  = []
+    for uid_str, s in live.items():
+        elapsed = int(now - s["started_at"])
+        if elapsed > 7200:
+            stale.append(uid_str)
+            continue
+        m, sec = divmod(elapsed, 60)
+        result.append({**s, "elapsed": f"{m}:{sec:02d}"})
+    if stale:
+        for u in stale:
+            live.pop(u, None)
+        _set("_live_sessions", live)
+    return result
+
+def get_live_by_test() -> dict:
+    by_test = {}
+    for s in get_live_sessions():
+        by_test.setdefault(s["test_id"], []).append(s)
+    return by_test

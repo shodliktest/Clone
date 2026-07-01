@@ -38,9 +38,23 @@ C_STARTED    = colors.HexColor("#FEF3C7")   # boshlagan (sariq ochiq)
 PAGE_W, PAGE_H = A4
 MARGIN = 18 * mm
 
-# ── Shrift: Helvetica (har doim mavjud, Unicode emas lekin OK) ──
-FONT_REG  = "Helvetica"
-FONT_BOLD = "Helvetica-Bold"
+# ── Shrift: DejaVuSans (Unicode, o'zbek/kirill to'liq qo'llab-quvvatlaydi) ──
+import os as _os
+
+_FONT_PATHS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+]
+
+def _register_fonts():
+    try:
+        pdfmetrics.registerFont(TTFont("DejaVuSans",     _FONT_PATHS[0]))
+        pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", _FONT_PATHS[1]))
+        return "DejaVuSans", "DejaVuSans-Bold"
+    except Exception:
+        return "Helvetica", "Helvetica-Bold"
+
+FONT_REG, FONT_BOLD = _register_fonts()
 
 # ── Baholar tizimi ───────────────────────────────────────────────
 def _grade(pct: float) -> tuple[str, object]:
