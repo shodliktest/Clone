@@ -27,6 +27,15 @@ def init_client(url: str, key: str):
     from supabase import create_client
     _client = create_client(url, key)
     log.info("Supabase client tayyor")
+
+    # ── AVTOMATIK JADVALLARNI TEKSHIRISH VA YARATISH ──
+    try:
+        _client.rpc("create_missing_tables", {}).execute()
+        log.info("✅ Jadvallar avtomatik tekshirildi va yetishmaydiganlari yaratildi.")
+    except Exception as e:
+        log.warning(f"⚠️ Jadvallarni avto-yaratish RPC xatosi (SQL Editor'ga kod yozilganini tekshiring): {e}")
+    # ──────────────────────────────────────────────────
+
     return _client
 
 
