@@ -1,4 +1,4 @@
-"""⚙️ KONFIGURATSIYA — Firebase yo'q, faqat Telegram"""
+"""⚙️ KONFIGURATSIYA — Supabase (Postgres) asosiy baza"""
 import os
 
 def _s(key, default=None):
@@ -17,7 +17,12 @@ ADMIN_IDS:           list = [int(x.strip()) for x in _raw.split(",") if x.strip(
 ADMIN_PASSWORD:      str  = _s("ADMIN_PASSWORD", "admin123")
 ADMIN_USERNAME:      str  = _s("ADMIN_USERNAME", "Shodlikai")
 
-# Yopiq Telegram kanal — bot shu kanalga admin (post + pin huquqi)
+# ── Supabase — asosiy ma'lumotlar bazasi ────────────────────────
+SUPABASE_URL: str = _s("SUPABASE_URL", "")
+SUPABASE_KEY: str = _s("SUPABASE_KEY", "")   # service_role kalit (Project Settings → API)
+
+# ── Eski Telegram Storage Channel — endi ISHLATILMAYDI,
+#    lekin orqaga moslik (eski kodlar import qilsa xato bermasligi) uchun qoldirildi
 STORAGE_CHANNEL_ID:  int  = int(_s("STORAGE_CHANNEL_ID", "0"))
 
 # Streamlit app URL — sayt bilan integratsiya uchun
@@ -27,7 +32,6 @@ STREAMLIT_URL: str = _s("STREAMLIT_URL", "https://quizmakerbot-hwttylmp5igdczywe
 GITHUB_PAGES_URL: str = _s("GITHUB_PAGES_URL", "https://shodliktest.github.io/TestPro")
 
 # Test Baza Guruhi — har yangi test shu guruhga e'lon qilinadi
-# Guruh ID ini @userinfobot dan oling va Streamlit secrets ga qo'shing
 BAZA_GROUP_ID: int = int(_s("BAZA_GROUP_ID", "0"))
 
 PASSING_SCORE = 60
@@ -44,3 +48,4 @@ DIFFICULTY_LEVELS = {
     "hard":   "🔴 Qiyin",
     "expert": "⚡ Ekspert",
 }
+

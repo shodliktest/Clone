@@ -228,6 +228,26 @@ log = logging.getLogger(__name__)
 UTC = timezone.utc
 
 
+
+# ── LOOP HEALTH — real-time monitoring ───────────────────────────
+import time as _time
+
+_LOOP_HEALTH: dict = {}   # loop_name → {last_beat, status, errors, started_at}
+
+def _beat(name: str, status: str = "ok", error: str = ""):
+    """Loop o'z yurak urishi (heartbeat) ni yozadi"""
+    _LOOP_HEALTH[name] = {
+        "last_beat":  _time.time(),
+        "status":     status,
+        "error":      error,
+        "started_at": _LOOP_HEALTH.get(name, {}).get("started_at", _time.time()),
+        "errors":     _LOOP_HEALTH.get(name, {}).get("errors", 0) + (1 if error else 0),
+    }
+
+def get_loop_health() -> dict:
+    return dict(_LOOP_HEALTH)
+
+
 async def main():
     from handlers.inline_mode import router as r_inline
     from handlers.poll_router import router as r_poll_router
@@ -243,8 +263,6 @@ async def main():
     from handlers.referral        import router as r_referral
     from handlers.group_scheduler import router as r_scheduler
     from handlers.photo_upload    import router as r_photo
-    from handlers.coins_menu      import router as r_coins
-    from handlers.ai_resolve      import router as r_aisolve
 
     # Xavfsizlik sozlamasi (dinamik)
     from utils.ram_cache import is_protect_content
@@ -278,25 +296,25 @@ async def main():
     dp.include_router(r_referral)
     dp.include_router(r_scheduler)
     dp.include_router(r_photo)
-    dp.include_router(r_coins)
-    dp.include_router(r_aisolve)
     dp.include_router(webauth.router)
     dp.include_router(web_cmd.router)
-    # TG DB boshlash
-    if STORAGE_CHANNEL_ID:
+    # TG DB (Supabase) boshlash
+    from config import SUPABASE_URL, SUPABASE_KEY
+    if SUPABASE_URL and SUPABASE_KEY:
         from utils import tg_db
-        log.info("TG DB initsializatsiya...")
+        log.info("Supabase DB initsializatsiya...")
         await tg_db.init(bot, STORAGE_CHANNEL_ID)
         from utils import ram_cache as ram
-        # Faqat META yuklanadi — savollar yuklanmaydi (lazy load)
         tests = await tg_db.get_tests()
-        if tests: ram.set_tests(tests)   # set_tests endi faqat meta saqlaydi
+        if tests: ram.set_tests(tests)
         users = await tg_db.get_users()
         if users: ram.set_users(users)
         settings = await tg_db.get_settings_tg()
         if settings: ram.set_all_settings(settings)
         log.info(f"✅ Yuklandi: {ram.stats()['tests']} test meta, {ram.stats()['users']} user (savollar lazy)")
         _blocked_mod.load()
+    else:
+        log.error("❌ SUPABASE_URL / SUPABASE_KEY sozlanmagan — bot ma'lumotlarsiz ishga tushadi!")
 
     # Background tasklar — to'g'ri bekor qilish uchun saqlaymiz
     _bg_tasks = [
@@ -350,13 +368,16 @@ async def _midnight_flush_loop(bot):
     3. RAM daily tozalanmaydi — testlar va users doim qoladi
     """
     flushed_date = None
+    _beat("midnight_flush", "ok")
     while True:
         try:
             await asyncio.sleep(60)
+            _beat("midnight_flush", "ok")
             now   = datetime.now(UTC)
             today = date.today()
             if now.hour == 0 and now.minute < 5 and flushed_date != today:
                 flushed_date = today
+                _beat("midnight_flush", "running")
                 log.info("🌙 Midnight flush boshlanmoqda...")
                 from utils import tg_db, ram_cache as ram
 
@@ -384,9 +405,11 @@ async def _midnight_flush_loop(bot):
                             f"👥 {len(users)} user | 💾 {len(daily)} kunlik yozuv"
                         )
                     except Exception: pass
+                _beat("midnight_flush", "ok")
         except asyncio.CancelledError:
             break
         except Exception as e:
+            _beat("midnight_flush", "error", str(e))
             log.error(f"Flush loop xato: {e}")
 
 
@@ -402,20 +425,164 @@ async def _users_auto_flush_loop(bot):
 async def _web_sync_watchdog():
     """
     web_sync_loop ni kuzatib turadi.
-    Agar loop to'xtab qolsa — qayta ishga tushiradi.
+    - Loop to'xtab qolsa → qayta ishga tushiradi
+    - 15 daqiqa heartbeat kelmasa → o'ldiradi va qayta boshlaydi
+    - Holat _LOOP_HEALTH ga yoziladi
     """
     from utils import tg_db
+    _beat("web_sync", "starting")
+    HEARTBEAT_TIMEOUT = 900  # 15 daqiqa
+
     while True:
         try:
-            task = asyncio.create_task(tg_db.web_sync_loop())
-            await task
-            log.warning("⚠️ web_sync_loop tugadi — 10s dan keyin qayta boshlanadi")
+            _beat("web_sync", "running")
+            task = asyncio.create_task(_web_sync_with_beat(tg_db))
+            # Heartbeat kuzatuvchi
+            while not task.done():
+                await asyncio.sleep(60)
+                h = _LOOP_HEALTH.get("web_sync", {})
+                last = h.get("last_beat", _time.time())
+                if _time.time() - last > HEARTBEAT_TIMEOUT:
+                    log.warning("⚠️ web_sync_loop javob bermayapti — majburan qayta boshlanadi")
+                    _beat("web_sync", "timeout", "Heartbeat timeout")
+                    task.cancel()
+                    try: await task
+                    except: pass
+                    break
+
+            if not task.cancelled():
+                log.warning("⚠️ web_sync_loop tugadi — 10s dan keyin qayta boshlanadi")
+            _beat("web_sync", "restarting")
             await asyncio.sleep(10)
+
         except asyncio.CancelledError:
             break
         except Exception as e:
+            _beat("web_sync", "error", str(e))
             log.error(f"web_sync_watchdog xato: {e} — 30s dan keyin qayta boshlanadi")
             await asyncio.sleep(30)
+
+
+async def _web_sync_with_beat(tg_db):
+    """web_sync_loop — heartbeat bilan o'ralgan versiya"""
+    from utils import tg_db as _tg
+    _beat("web_sync", "running")
+    consecutive_errors = 0
+    last_sig           = None
+
+    while True:
+        try:
+            await asyncio.sleep(60)
+            _beat("web_sync", "ok")  # ← har daqiqada yurak urishi
+
+            if not _tg.ready():
+                continue
+
+            from utils import ram_cache as ram
+
+            try:
+                chat = await asyncio.wait_for(_tg._bot.get_chat(_tg._cid), timeout=10)
+                pin  = getattr(chat, "pinned_message", None)
+                if not pin:
+                    continue
+                doc     = getattr(pin, "document", None)
+                doc_uid = getattr(doc, "file_unique_id", None) if doc else None
+                cur_sig = (pin.message_id, doc_uid, getattr(pin, "edit_date", None))
+            except Exception as e:
+                _beat("web_sync", "warn", f"get_chat: {e}")
+                consecutive_errors += 1
+                continue
+
+            if cur_sig == last_sig:
+                continue
+            last_sig = cur_sig
+
+            try:
+                new_meta = await asyncio.wait_for(_tg._read_pinned_index(), timeout=20)
+            except asyncio.TimeoutError:
+                _beat("web_sync", "warn", "read_pinned timeout")
+                consecutive_errors += 1
+                continue
+            if not new_meta:
+                continue
+            consecutive_errors = 0
+
+            new_metas    = []
+            new_test_ids = {}
+            for ch in new_meta.get("index_chunks", []):
+                fid  = ch.get("fid")
+                mid  = ch.get("msg_id")
+                data = {}
+                if fid:  data = await _tg._read_file(fid)
+                if not data and mid: data = await _tg._download_doc(mid)
+                for m in data.get("tests_meta", []):
+                    if not any(x.get("test_id") == m.get("test_id") for x in new_metas):
+                        new_metas.append(m)
+                for k, v in data.items():
+                    if k.startswith("test_"):
+                        new_test_ids[k] = v
+
+            if "tests_meta" in new_meta and "index_chunks" not in new_meta:
+                new_metas    = new_meta.get("tests_meta", [])
+                new_test_ids = {k: v for k, v in new_meta.items() if k.startswith("test_")}
+
+            ram_ids = {t.get("test_id") for t in ram.get_all_tests_meta()}
+            added = updated = 0
+            for meta in new_metas:
+                tid = meta.get("test_id")
+                if not tid: continue
+                new_msg_id  = new_test_ids.get(f"test_{tid}")
+                old_msg_id  = _tg._index.get(f"test_{tid}")
+                msg_changed = new_msg_id and str(new_msg_id) != str(old_msg_id or "")
+                if tid not in ram_ids:
+                    clean = {k: v for k, v in meta.items() if k != "questions"}
+                    ram.add_test_meta(clean)
+                    if not any(m.get("test_id") == tid for m in _tg._index.get("tests_meta", [])):
+                        _tg._index.setdefault("tests_meta", []).insert(0, clean)
+                    if new_msg_id:
+                        _tg._index[f"test_{tid}"] = new_msg_id
+                    added += 1
+                    if meta.get("source", "") in ("web", "web_split"):
+                        asyncio.create_task(_tg._notify_web_test(meta, tid))
+                elif msg_changed:
+                    old_meta = next((m for m in ram.get_all_tests_meta() if m.get("test_id") == tid), {})
+                    old_qc   = old_meta.get("question_count", 0)
+                    _tg._tests_cache.pop(tid, None)
+                    ram.invalidate_cached_questions(tid)
+                    _tg._index[f"test_{tid}"] = new_msg_id
+                    _tg._index.pop(f"fid_{old_msg_id}", None)
+                    clean = {k: v for k, v in meta.items() if k != "questions"}
+                    ram.update_test_meta(tid, clean)
+                    updated += 1
+                    new_qc = meta.get("question_count", 0)
+                    asyncio.create_task(_tg._notify_updated_test(meta, tid, old_qc, new_qc))
+
+            if added or updated:
+                log.info(f"Web sync: {added} yangi, {updated} yangilangan test")
+                _tg.mark_index_dirty()
+                try:
+                    await _tg._save_index()
+                    try:
+                        chat2 = await _tg._bot.get_chat(_tg._cid)
+                        pin2  = getattr(chat2, "pinned_message", None)
+                        if pin2:
+                            doc2 = getattr(pin2, "document", None)
+                            uid2 = getattr(doc2, "file_unique_id", None) if doc2 else None
+                            last_sig = (pin2.message_id, uid2, getattr(pin2, "edit_date", None))
+                    except Exception: pass
+                except Exception as _se:
+                    log.warning(f"Web sync: index saqlashda xato: {_se}")
+
+        except asyncio.CancelledError:
+            _beat("web_sync", "cancelled")
+            break
+        except Exception as e:
+            consecutive_errors += 1
+            _beat("web_sync", "error", str(e))
+            log.error(f"web_sync_loop: {e}")
+            if consecutive_errors >= 5:
+                await asyncio.sleep(900)
+                consecutive_errors = 0
 
 
 # ── CACHE CLEANUP — har 30 daqiqada ──────────────────────────
@@ -435,7 +602,7 @@ async def _cache_cleanup_loop():
             removed = ram.clear_expired_cache()
             if removed:
                 for tid in removed:
-                    tg_db._tests_cache.pop(tid, None)
+                    tg_db._tests_cache.pop(tid, None)  # noqa: SLF001 — internal cache, intentional
                 log.info(f"🧹 Cache: {len(removed)} test RAMdan o'chirildi")
             ana = ram.clear_expired_analysis()
             if ana:
@@ -525,8 +692,6 @@ async def _main_no_signals():
     from handlers.referral        import router as r_referral
     from handlers.group_scheduler import router as r_scheduler
     from handlers.photo_upload    import router as r_photo
-    from handlers.coins_menu      import router as r_coins
-    from handlers.ai_resolve      import router as r_aisolve
 
     # Xavfsizlik sozlamasi
     from utils.ram_cache import is_protect_content
@@ -561,8 +726,6 @@ async def _main_no_signals():
     dp.include_router(r_referral)
     dp.include_router(r_scheduler)
     dp.include_router(r_photo)
-    dp.include_router(r_coins)
-    dp.include_router(r_aisolve)
     dp.include_router(webauth.router)
     dp.include_router(web_cmd.router)
 
@@ -604,7 +767,8 @@ async def _main_no_signals():
 
     dp.include_router(_baza_router)
 
-    if STORAGE_CHANNEL_ID:
+    from config import SUPABASE_URL, SUPABASE_KEY
+    if SUPABASE_URL and SUPABASE_KEY:
         from utils import tg_db
         await tg_db.init(bot, STORAGE_CHANNEL_ID)
         from utils import ram_cache as ram
@@ -617,6 +781,9 @@ async def _main_no_signals():
         if settings: ram.set_all_settings(settings)
         log.info(f"✅ Yuklandi: {ram.stats()['tests']} test meta, {ram.stats()['users']} user")
         _blocked_mod.load()
+    else:
+        from utils import tg_db   # auto_flush_loop pastda kerak bo'ladi, lekin ready()=False bo'ladi
+        log.error("❌ SUPABASE_URL / SUPABASE_KEY sozlanmagan!")
 
     # Startup da bot admin bo'lgan guruhlarni aniqlash
     asyncio.create_task(_scan_groups_on_startup(bot))
