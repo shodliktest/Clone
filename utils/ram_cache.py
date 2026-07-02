@@ -394,12 +394,14 @@ def save_result_to_ram(user_id, test_id, result, via_link=False):
     # ── Stats (lazy cache) ──
     stats = get_user_stats_cache(uid_str) or {}
     e     = stats.get(test_id, {
-        "attempts":   0,
-        "all_pcts":   [],
-        "best_score": 0.0,
-        "avg_score":  0.0,
-        "last_at":    now_str,
-        "passed":     False,
+        "attempts":     0,
+        "all_pcts":     [],
+        "best_score":   0.0,
+        "avg_score":    0.0,
+        "last_at":      now_str,
+        "passed":       False,   # oxirgi urinish holati (moslik uchun saqlanadi)
+        "ever_passed":  False,   # HECH BO'LMASA bir marta o'tdimi (hech qachon False'ga qaytmaydi)
+        "ever_completed": False, # HECH BO'LMASA bir marta oxirigacha yetdimi
     })
     pct   = float(result.get("percentage", 0))
     att   = e["attempts"] + 1
@@ -407,14 +409,22 @@ def save_result_to_ram(user_id, test_id, result, via_link=False):
     best  = max(e["best_score"], pct)
     avg   = round(sum(all_p) / len(all_p), 1)
     ps    = float(result.get("passing_score", 60))
+    this_passed    = pct >= ps
+    # "Oxirigacha yechdimi" — javob bergan savollar soni jami savolga teng bo'lsa
+    total_q   = int(result.get("total", 0) or result.get("total_questions", 0) or 0)
+    answered  = int(result.get("correct", 0)) + int(result.get("wrong", 0)) \
+                if "correct" in result and "wrong" in result else total_q
+    this_completed = (total_q > 0 and answered >= total_q) or bool(result.get("completed", True))
 
     stats[test_id] = {
-        "attempts":   att,
-        "all_pcts":   all_p,
-        "best_score": best,
-        "avg_score":  avg,
-        "last_at":    now_str,
-        "passed":     pct >= ps,
+        "attempts":       att,
+        "all_pcts":       all_p,
+        "best_score":     best,
+        "avg_score":      avg,
+        "last_at":        now_str,
+        "passed":         this_passed,                                   # oxirgi urinish
+        "ever_passed":    e.get("ever_passed", False) or this_passed,     # bir marta o'tsa — abadiy True
+        "ever_completed": e.get("ever_completed", False) or this_completed,
     }
     set_user_stats_cache(uid_str, stats, dirty=True)
 
@@ -452,14 +462,16 @@ def get_user_results(uid):
     history = []
     for tid, e in stats.items():
         history.append({
-            "test_id":      tid,
-            "result_id":    f"{uid}_{tid}",
-            "last_pct":     e["all_pcts"][-1] if e["all_pcts"] else 0,
-            "best_pct":     e["best_score"],
-            "attempts":     e["attempts"],
-            "all_pcts":     e["all_pcts"],
-            "passed":       e["passed"],
-            "completed_at": e["last_at"],
+            "test_id":         tid,
+            "result_id":       f"{uid}_{tid}",
+            "last_pct":        e["all_pcts"][-1] if e["all_pcts"] else 0,
+            "best_pct":        e["best_score"],
+            "attempts":        e["attempts"],
+            "all_pcts":        e["all_pcts"],
+            "passed":          e["passed"],
+            "ever_passed":     e.get("ever_passed", e.get("passed", False)),
+            "ever_completed":  e.get("ever_completed", True),
+            "completed_at":    e["last_at"],
         })
     history.sort(key=lambda x: x.get("completed_at", ""), reverse=True)
     return history

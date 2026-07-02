@@ -244,7 +244,12 @@ async def get_tests():
 
 
 async def save_test_full(test: dict) -> bool:
-    """Test (meta + savollar) ni Postgres ga to'liq saqlaydi (upsert)."""
+    """
+    Test (meta + savollar) ni Postgres ga to'liq saqlaydi (upsert).
+
+    Test tahrirlansa (yoki qayta yuklansa), eski holat 100% almashadi —
+    versiya tarixi saqlanmaydi, faqat "joriy" holat bazada turadi.
+    """
     if not ready():
         return False
     tid = test.get("test_id", "")
@@ -414,6 +419,57 @@ async def _flush_users_list():
 # ══════════════════════════════════════════════════════════════
 # USER STATS (kim qaysi testni yechgan)
 # ══════════════════════════════════════════════════════════════
+
+async def write_user_stats_now(tg_id: int, stats_data: dict) -> bool:
+    """
+    Bitta foydalanuvchining statistikasini DARHOL Supabase'ga yozadi
+    (5 daqiqalik flush kutmasdan). save_result() har test yakunlanganda
+    shu funksiyani chaqiradi — shu tufayli bot istalgan payt qayta
+    ishga tushsa ham, "kim nechta urinish qildi / eng yaxshi ball /
+    o'tdimi" kabi ma'lumotlar hech qachon yo'qolmaydi.
+    """
+    if not ready():
+        return False
+    try:
+        await sb.upsert("user_stats", {"tg_id": int(tg_id), "data": stats_data},
+                         on_conflict="tg_id")
+        from utils import ram_cache as ram
+        ram.clear_stats_dirty(str(tg_id))
+        return True
+    except Exception as e:
+        log.error(f"write_user_stats_now({tg_id}): {e}")
+        return False
+
+
+async def write_test_stats_now(test_id: str, solve_count: int, avg_score: float) -> bool:
+    """Bitta testning solve_count/avg_score'ini darhol yozadi."""
+    if not ready():
+        return False
+    try:
+        await sb.update("tests", "test_id", test_id, {
+            "solve_count": solve_count,
+            "avg_score":   float(avg_score or 0),
+        })
+        return True
+    except Exception as e:
+        log.error(f"write_test_stats_now({test_id}): {e}")
+        return False
+
+
+async def write_user_now(tg_id: int, user_data: dict) -> bool:
+    """Bitta foydalanuvchi profilini (total_tests, avg_score, ...) darhol yozadi."""
+    if not ready():
+        return False
+    try:
+        d = dict(user_data)
+        is_blocked = bool(d.pop("is_blocked", False))
+        await sb.upsert("users", {"tg_id": int(tg_id), "data": d, "is_blocked": is_blocked},
+                         on_conflict="tg_id")
+        return True
+    except Exception as e:
+        log.error(f"write_user_now({tg_id}): {e}")
+        return False
+
 
 async def flush_dirty_user_stats():
     if not ready():
@@ -935,7 +991,7 @@ async def upload_backup(daily_data, date_str) -> bool:
     if not ready():
         return False
     try:
-        r_count = sum(len(v.get("by_test", {})) for v in daily_data.values())
+        r_count = sum(len(v) for v in daily_data.values() if isinstance(v, dict))
         await sb.upsert("backups", {
             "date_str": date_str,
             "data": {"users": len(daily_data), "results": r_count, "data": daily_data},

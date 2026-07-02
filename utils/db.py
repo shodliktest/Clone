@@ -1,10 +1,38 @@
 """DB — CRUD operatsiyalar"""
-import uuid, logging
+import uuid, logging, asyncio
 from datetime import datetime, timezone
 from utils import ram_cache as ram
 
 log = logging.getLogger(__name__)
 UTC = timezone.utc
+
+
+def _fire_and_forget_user_write(tg_id):
+    """
+    RAM'dagi foydalanuvchini DARHOL Supabase'ga background'da yozadi —
+    chaqiruvchi funksiya kutmaydi (await shart emas), lekin yozuv
+    milliseкundlar ichida boshlanadi. Shu tufayli update_user() sinxron
+    qolaveradi (7+ chaqiruvchi joyni async qilish shart emas), lekin
+    "faqat RAM'da turib 5 daqiqa kutish" muammosi yo'qoladi.
+
+    Agar hech qanday asyncio event loop ishlamayotgan bo'lsa (masalan
+    skript kontekstida), jim o'tkazib yuboriladi — xato bermaydi.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            async def _write():
+                try:
+                    from utils import tg_db
+                    u = ram.get_user(tg_id)
+                    if u:
+                        await tg_db.write_user_now(int(tg_id), u)
+                except Exception as e:
+                    log.warning(f"_fire_and_forget_user_write({tg_id}): {e}")
+            loop.create_task(_write())
+    except RuntimeError:
+        # Event loop yo'q — dirty flag orqali keyingi flush'da yoziladi
+        pass
 
 
 # ══ USERS ══════════════════════════════════════════════════════
@@ -28,17 +56,30 @@ async def get_or_create_user(tg_id, name, username=None):
         "_just_created": True,
     }
     ram.upsert_user(tg_id, user)
-    # Yangi user — dirty flag, auto_flush da yoziladi
-    ram.mark_users_dirty()
+    # DARHOL Supabase'ga ham yoziladi (bu funksiya async, to'g'ridan await qilamiz)
     from utils import tg_db
-    tg_db.mark_users_dirty_tg()
+    try:
+        await tg_db.write_user_now(int(tg_id), user)
+    except Exception as e:
+        log.warning(f"get_or_create_user: darhol yozishda xato: {e}")
+        ram.mark_users_dirty()
+        tg_db.mark_users_dirty_tg()
     return user
 
-def update_user(tg_id, data):
+def update_user(tg_id, data, _skip_immediate_write=False):
     user = ram.get_user(tg_id) or {}
     user.update(data)
     user["last_active"] = str(datetime.now(UTC))
     ram.upsert_user(tg_id, user)
+    # DARHOL background'da Supabase'ga yozish (rol, blok, referal,
+    # statistika o'zgarishlari — hech biri bot o'chsa yo'qolmasin).
+    # _skip_immediate_write=True bo'lsa (masalan save_result ichida,
+    # u allaqachon o'zi kafolatlangan await yozuv qiladi) — ortiqcha
+    # ikkilanmasin deb background yozuv o'tkazib yuboriladi.
+    if not _skip_immediate_write:
+        _fire_and_forget_user_write(tg_id)
+    from utils import tg_db
+    tg_db.mark_users_dirty_tg()  # fallback — agar background yozuv sekinlasa/tushib qolsa
 
 def block_user(tg_id, blocked=True):
     update_user(tg_id, {"is_blocked": blocked})
@@ -131,6 +172,23 @@ async def create_test(creator_id, data, creator_name="", creator_username=""):
         ok = await tg_db.save_test_full(test)
         if ok:
             log.info(f"Yangi test TG ga yuborildi: {tid}")
+
+            # ── Fayl-tanish: agar bu test fayldan yaratilgan bo'lsa,
+            #    uning hashini ro'yxatga olamiz — keyingi safar xuddi
+            #    shu fayl yuklansa, bot uni tanib qayta parse qilmaydi.
+            file_hash = data.get("_source_file_hash", "")
+            file_name = data.get("_source_file_name", "")
+            file_size = data.get("_source_file_size", 0)
+            if file_hash:
+                try:
+                    from utils import file_fingerprint as fp
+                    await fp.register_fingerprint(
+                        file_hash=file_hash, test_id=tid,
+                        file_name=file_name, uploaded_by=creator_id,
+                        file_size=file_size,
+                    )
+                except Exception as _fp_e:
+                    log.warning(f"fingerprint ro'yxatga olish xato: {_fp_e}")
     return tid
 
 async def delete_test(tid):
@@ -163,6 +221,18 @@ def pause_test(tid, paused: bool):
     ram.update_test_meta(tid, {"is_paused": paused})
     from utils import tg_db
     tg_db.mark_stats_dirty()
+    # Darhol yozish — pauza holati bot o'chganda yo'qolmasin
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            async def _write():
+                try:
+                    await tg_db.update_test_meta_tg(tid, {"is_paused": paused})
+                except Exception as e:
+                    log.warning(f"pause_test darhol yozish xato: {e}")
+            loop.create_task(_write())
+    except RuntimeError:
+        pass
 
 def get_all_tests_admin():
     """Admin uchun — o'chirilganlarni ham ko'rsatadi"""
@@ -171,12 +241,17 @@ def get_all_tests_admin():
 
 # ══ NATIJALAR ══════════════════════════════════════════════════
 
-def save_result(user_id, test_id, result, via_link=False):
+async def save_result(user_id, test_id, result, via_link=False):
     # Test yechildi — last_access yangilanadi (48h TTL uzayadi)
     ram.touch_test_access(test_id)
     """
-    Natija RAMga saqlanadi (TG ga YUKLANMAYDI).
-    TG upload faqat: midnight flush yoki admin buyruq.
+    Natija RAMga DARHOL saqlanadi VA Supabase'ga ham DARHOL yoziladi
+    (avvalgi versiyada faqat RAM'da turib, 5 daqiqada bir marta yoki
+    tungi flush'da bazaga tushardi — bot shu oraliqda qayta ishga
+    tushsa yoki qulasa, o'sha natijalar yo'qolib qolardi).
+
+    Endi: RAM cache hali ham bor (tezkor o'qish uchun), lekin
+    ma'lumot yo'qolmasligi endi Supabase yozuviga bog'liq, RAM'ga emas.
     """
     rid = ram.save_result_to_ram(user_id, test_id, result, via_link=via_link)
 
@@ -199,11 +274,36 @@ def save_result(user_id, test_id, result, via_link=False):
             "total_tests": tt,
             "total_score": ts,
             "avg_score":   round(ts / tt, 1),
-        })
-    # Dirty flag — 5 daqiqada TG ga yuklanadi
+        }, _skip_immediate_write=True)  # pastda kafolatlangan await yozuv bor
+
+    # ── DARHOL Supabase'ga yozish (RAM emas, asosiy manba) ──
     from utils import tg_db
-    tg_db.mark_stats_dirty()
-    tg_db.mark_users_dirty_tg()
+    try:
+        uid_str = str(user_id)
+        stats   = ram.get_user_stats_cache(uid_str) or {}
+        await tg_db.write_user_stats_now(int(user_id), stats)
+    except Exception as e:
+        log.error(f"save_result: user_stats darhol yozishda xato: {e}")
+        # RAM'da baribir bor, keyingi flush urinib ko'radi
+        tg_db.mark_stats_dirty()
+
+    try:
+        if meta:
+            await tg_db.write_test_stats_now(
+                test_id, meta.get("solve_count", 0), meta.get("avg_score", 0)
+            )
+    except Exception as e:
+        log.error(f"save_result: test stats darhol yozishda xato: {e}")
+        tg_db.mark_stats_dirty()
+
+    try:
+        u = ram.get_user(user_id)
+        if u:
+            await tg_db.write_user_now(int(user_id), u)
+    except Exception as e:
+        log.error(f"save_result: user darhol yozishda xato: {e}")
+        tg_db.mark_users_dirty_tg()
+
     return rid
 
 def get_user_results(user_id):
