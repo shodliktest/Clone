@@ -7,9 +7,20 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
 
 from utils.parser import parse_file, check_images_in_file
+from utils import file_fingerprint as fp
 from utils.states import CreateTest
 from utils.db import create_test
 from keyboards.keyboards import subject_kb, difficulty_kb, visibility_kb, main_kb, test_created_kb
+
+
+async def bump_fingerprint_seen_safe(file_hash: str):
+    """fp.bump_fingerprint_seen() ni xatoni yutib chaqiradi — asosiy oqim to'xtamasin."""
+    if not file_hash:
+        return
+    try:
+        await fp.bump_fingerprint_seen(file_hash)
+    except Exception:
+        pass
 
 def _get_user_subjects(uid):
     from utils.ram_cache import get_user_custom_subjects
@@ -539,6 +550,56 @@ async def upload_file(message: Message, state: FSMContext):
             tmp_path = tmp.name
         await message.bot.download_file(file.file_path, tmp_path)
 
+        # ── Fayl-tanish: bu fayl avval yuklanganmi? ──
+        # Xuddi shu fayl (bayt darajasida bir xil) allaqachon test
+        # sifatida saqlangan bo'lsa, qayta parse qilmasdan taklif qilamiz.
+        try:
+            file_hash = fp.compute_file_hash(tmp_path)
+            existing  = await fp.find_existing_by_hash(file_hash)
+        except Exception as _fp_e:
+            log.warning(f"fingerprint tekshiruvi xato (davom etamiz): {_fp_e}")
+            file_hash, existing = "", {}
+
+        if existing:
+            await bump_fingerprint_seen_safe(file_hash)
+            await state.update_data(
+                _pending_fp_hash=file_hash,
+                _pending_fp_name=doc.file_name,
+                _pending_fp_size=doc.file_size or 0,
+                _pending_fp_tmp_path=tmp_path,   # "qaytadan yaratish" tanlansa kerak bo'ladi
+            )
+            b = InlineKeyboardBuilder()
+            b.row(InlineKeyboardButton(
+                text="✅ Ha, shu testni ishlataman",
+                callback_data=f"fp_use_{existing['test_id']}"
+            ))
+            b.row(InlineKeyboardButton(
+                text="🔄 Yo'q, qaytadan yarataman",
+                callback_data="fp_reparse"
+            ))
+            await status.edit_text(
+                f"📎 <b>Bu fayl avval yuklangan!</b>\n\n"
+                f"🆔 Test: <code>{existing['test_id']}</code>\n"
+                f"📝 {existing.get('title') or '(nomsiz)'}\n"
+                f"📋 {existing['question_count']} ta savol\n"
+                f"🔁 Bu fayl {existing.get('upload_count', 1)} marta ko'rilgan\n\n"
+                f"Qayta tahlil qilmasdan, mavjud testdan foydalanaymi?",
+                reply_markup=b.as_markup()
+            )
+            # tmp_path ATAYLAB o'chirilmaydi — "qaytadan yaratish" bosilsa kerak bo'ladi.
+            # Agar foydalanuvchi hech narsa bosmasa, eski vaqtinchalik fayllar
+            # bot serverida qolib ketmasligi uchun quyidagi tozalash vazifasi
+            # (_cleanup_stale_tmp_files) bot.py da davriy ishga tushiriladi.
+            return
+
+        # Yangi fayl (avval ko'rilmagan) — hashini state'da saqlaymiz,
+        # test yaratilganda shu hash bilan ro'yxatga olinadi
+        await state.update_data(
+            _source_file_hash=file_hash,
+            _source_file_name=doc.file_name,
+            _source_file_size=doc.file_size or 0,
+        )
+
         questions = parse_file(tmp_path)
         # Rasmli savollar uchun tmp_path ni state da saqlaymiz
         has_img_qs = any(q.get("_has_image") for q in questions)
@@ -618,6 +679,146 @@ async def upload_file(message: Message, state: FSMContext):
 
     except Exception as e:
         log.error(f"upload_file xato: {e}", exc_info=True)
+        await status.edit_text("❌ Faylni o\'qishda xatolik. Boshqa fayl yoki formatni sinab ko\'ring.")
+
+
+@router.callback_query(F.data.startswith("fp_use_"), CreateTest.upload_file)
+async def fp_use_existing(callback: CallbackQuery, state: FSMContext):
+    """
+    Fayl-tanish: foydalanuvchi "Ha, shu testni ishlataman" tugmasini bosdi.
+    Qayta parse qilinmaydi — mavjud testga havola beriladi.
+    """
+    tid = callback.data.replace("fp_use_", "", 1)
+    await callback.answer("✅ Mavjud testdan foydalanilmoqda...")
+
+    d = await state.get_data()
+    tmp_path = d.get("_pending_fp_tmp_path")
+    if tmp_path and os.path.exists(tmp_path):
+        try: os.remove(tmp_path)
+        except Exception: pass
+    await state.clear()
+
+    from utils.tg_db import get_test_full
+    test = await get_test_full(tid)
+    if not test:
+        return await callback.message.edit_text(
+            "❌ Test topilmadi (o\'chirilgan bo\'lishi mumkin). Iltimos faylni qaytadan yuboring."
+        )
+
+    bu   = (await callback.bot.me()).username
+    link = f"https://t.me/{bu}?start={tid}"
+    qc   = test.get("question_count") or len(test.get("questions", []))
+    await callback.message.edit_text(
+        f"✅ <b>Mavjud test ulandi!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 <b>{test.get('title', 'Nomsiz')}</b>\n"
+        f"📋 {qc} ta savol\n"
+        f"🆔 <code>{tid}</code>\n\n"
+        f"🔗 Havola: {link}",
+        parse_mode="HTML",
+        reply_markup=test_created_kb(tid, bu)
+    )
+
+
+@router.callback_query(F.data == "fp_reparse", CreateTest.upload_file)
+async def fp_force_reparse(callback: CallbackQuery, state: FSMContext):
+    """
+    Fayl-tanish: foydalanuvchi "Yo'q, qaytadan yarataman" tugmasini bosdi.
+    Saqlab qo'yilgan vaqtinchalik fayl qayta parse qilinadi.
+    """
+    await callback.answer("🔄 Qaytadan tahlil qilinmoqda...")
+    d = await state.get_data()
+    tmp_path  = d.get("_pending_fp_tmp_path")
+    file_name = d.get("_pending_fp_name", "fayl")
+    file_size = d.get("_pending_fp_size", 0)
+    file_hash = d.get("_pending_fp_hash", "")
+
+    if not tmp_path or not os.path.exists(tmp_path):
+        return await callback.message.edit_text(
+            "❌ Vaqtinchalik fayl topilmadi (muddati o\'tgan bo\'lishi mumkin).\n"
+            "Iltimos faylni qaytadan yuboring."
+        )
+
+    status = callback.message
+    await status.edit_text("⏳ Fayl qaytadan tahlil qilinmoqda...")
+
+    try:
+        # Hash "yangi manba" sifatida saqlanadi — yangi test yaratilsa,
+        # shu fayl endi UNGA bog'lanadi (eski test o'zgarishsiz qoladi)
+        await state.update_data(
+            _source_file_hash=file_hash,
+            _source_file_name=file_name,
+            _source_file_size=file_size,
+        )
+
+        questions = parse_file(tmp_path)
+        has_img_qs = any(q.get("_has_image") for q in questions)
+        if has_img_qs:
+            await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
+        else:
+            await state.update_data(_file_name=file_name)
+            try: os.remove(tmp_path)
+            except Exception: pass
+
+        if not questions:
+            return await status.edit_text(
+                "❌ <b>Savollar topilmadi!</b>\n\n"
+                "Namunani ko\'rish uchun turni qaytadan tanlang.",
+                parse_mode="HTML"
+            )
+
+        total    = len(questions)
+        unmarked = sum(1 for q in questions if not q.get("_marked"))
+
+        img_count = sum(1 for q in questions if q.get("_img_bytes"))
+        img_in_file = 0
+        try:
+            if os.path.exists(tmp_path):
+                _ii = check_images_in_file(tmp_path)
+                img_in_file = _ii.get("count", 0)
+        except Exception:
+            img_in_file = img_count
+
+        if img_count > 0:
+            await status.edit_text(
+                f"🖼 <b>{img_count} ta rasm test bilan ulanmoqda...</b>\n"
+                f"<i>Iltimos kuting</i>",
+                parse_mode="HTML"
+            )
+            questions = await _upload_images_to_channel(callback.bot, questions)
+        elif img_in_file > 0:
+            log.info(f"Faylda {img_in_file} rasm bor, savolga bog\'lanmadi")
+
+        await state.update_data(questions=questions, _file_id=None)
+        await state.set_state(CreateTest.upload_file)
+
+        if unmarked > 0:
+            b = InlineKeyboardBuilder()
+            b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
+            b.button(text="🤖 AI bilan yechish",   callback_data="uj_ai")
+            b.button(text="📨 Adminga murojaat",   callback_data="uj_admin")
+            b.button(text="▶️ Shundayicha davom",  callback_data="uj_skip")
+            b.adjust(1)
+            img_line = ""
+            if img_count > 0:
+                img_line = f"🖼 Rasmli: <b>{img_count}</b> ta (test bilan ulandi)\n"
+            elif img_in_file > 0:
+                img_line = f"⚠️ Faylda {img_in_file} rasm bor, lekin bog\'lanmadi\n"
+            await status.edit_text(
+                f"📋 <b>{total} TA SAVOL TOPILDI</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
+                f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n"
+                + img_line +
+                f"\n<i>To\'g\'ri javob aniqlanmagan. Nima qilamiz?</i>",
+                parse_mode="HTML",
+                reply_markup=b.as_markup()
+            )
+        else:
+            await _ask_poll_time(status, state, total)
+
+    except Exception as e:
+        log.error(f"fp_force_reparse xato: {e}", exc_info=True)
         await status.edit_text("❌ Faylni o\'qishda xatolik. Boshqa fayl yoki formatni sinab ko\'ring.")
 
 
@@ -1980,6 +2181,10 @@ async def _do_save_test(callback: CallbackQuery, state: FSMContext):
         "passing_score": d.get("passing_score", 60),
         "max_attempts":  d.get("max_attempts", 0),
         "questions":     clean_qs,
+        # Fayl-tanish uchun — agar shu test fayldan yaratilgan bo'lsa
+        "_source_file_hash": d.get("_source_file_hash", ""),
+        "_source_file_name": d.get("_source_file_name", ""),
+        "_source_file_size": d.get("_source_file_size", 0),
     }
     tid  = await create_test(
         callback.from_user.id, td,

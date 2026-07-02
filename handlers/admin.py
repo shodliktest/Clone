@@ -17,6 +17,7 @@ from utils.states import AdminPanel
 
 log    = logging.getLogger(__name__)
 router = Router()
+_forward_mode_users: set[int] = set()
 UTC    = timezone.utc
 
 def is_admin(uid): return uid in ADMIN_IDS
@@ -94,7 +95,6 @@ async def admin_stats(callback: CallbackQuery):
     try: await callback.message.edit_text(text, reply_markup=b.as_markup())
     except TelegramBadRequest: await callback.message.answer(text, reply_markup=b.as_markup())
 
-_forward_mode_users = set()  # Forward rejimdagi adminlarni saqlash uchun to'plam
 
 # ══ USERLAR ════════════════════════════════════════════════════
 @router.callback_query(F.data == "admin_users")

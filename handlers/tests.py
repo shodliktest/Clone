@@ -1302,7 +1302,7 @@ async def _finish_inline(bot, cid, state, d):
     tid = test.get("test_id", "")
 
     try:
-        rid = save_result(uid, tid, scored, via_link=via_link)
+        rid = await save_result(uid, tid, scored, via_link=via_link)
     except Exception as e:
         log.error(f"_finish_inline save_result xato: {e}")
         rid = f"{uid}_{tid}"

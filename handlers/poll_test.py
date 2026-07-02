@@ -575,7 +575,7 @@ async def _finish_poll(bot, cid, state, d):
         "partial":       d.get("is_partial", False),
     })
     tid = test.get("test_id", "")
-    rid = save_result(uid, tid, scored, via_link=via_link)
+    rid = await save_result(uid, tid, scored, via_link=via_link)
     await state.clear()
 
     daily   = get_daily()

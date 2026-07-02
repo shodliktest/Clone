@@ -866,7 +866,7 @@ async def _show_group_leaderboard(
         })
         try:
             import inspect as _ins
-            _sr = save_result(int(uid_str), tid, {**scored, "mode": f"group_{mode}"})
+            _sr = await save_result(int(uid_str), tid, {**scored, "mode": f"group_{mode}"})
             if _ins.isawaitable(_sr):
                 await _sr
         except Exception as e:
@@ -920,6 +920,16 @@ async def _show_group_leaderboard(
             scored_entry.get("correct", 0),
             scored_entry.get("total", len(qs)),
         )
+        # Darhol background'da Supabase'ga ham yozamiz — bot o'chsa
+        # kunlik guruh reytingi yo'qolib qolmasin
+        try:
+            import asyncio as _aio
+            from utils import tg_db as _tgdb
+            loop = _aio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_tgdb.save_group_leaderboard())
+        except Exception:
+            pass
 
     # ── Rasm + caption + tugmalar ──
     try:
