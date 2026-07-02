@@ -35,7 +35,7 @@ FORMAT J — Markersiz, ketma-ket (to'g'ri javob aniqlanmaydi, PDF/TXT):
   Variant 4
   (natija: _marked=False, correct="" — bot AI/Seryalik/Admin so'raydi)
 """
-import re, logging, os, subprocess, tempfile
+import re, logging, os, tempfile
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -106,12 +106,13 @@ def check_images_in_file(path: str) -> dict:
 def parse_file(path: str) -> list:
     ext = Path(path).suffix.lower()
     try:
-        # .doc → .docx konvertatsiya
+        # .doc → matn/docx konvertatsiya (sof Python, LibreOffice yo'q)
         if ext == ".doc":
-            path = _convert_doc(path)
-            if not path:
+            converted = _convert_doc(path)
+            if not converted:
                 return []
-            ext = ".docx"
+            path = converted
+            ext = Path(path).suffix.lower()  # .docx yoki .txt bo'lishi mumkin
 
         if ext == ".docx":
             return _parse_docx(path)
@@ -130,50 +131,53 @@ def parse_file(path: str) -> list:
 
 def _convert_doc(path: str) -> str:
     """
-    .doc → .docx konvertatsiya.
-    1. LibreOffice (mavjud bo'lsa)
-    2. python-docx2txt (fallback)
-    3. antiword (fallback)
+    .doc (eski Word format) dan matn ajratish — LibreOffice YO'Q,
+    faqat sof Python kutubxonalari orqali:
+      1. docx2txt — .doc faylni to'g'ridan-to'g'ri o'qishga urinadi
+      2. python-docx — ba'zi ".doc" fayllar aslida .docx bo'ladi
+      3. mammoth — .doc/.docx dan HTML/matn ajratish (agar o'rnatilgan bo'lsa)
+
+    Natija — vaqtinchalik .txt fayl yo'li, uni keyin _parse_txt() o'qiydi.
     """
     outdir = tempfile.mkdtemp()
 
-    # 1. LibreOffice — eng yaxshi natija
-    try:
-        r = subprocess.run(
-            ["libreoffice", "--headless", "--convert-to", "docx",
-             path, "--outdir", outdir],
-            capture_output=True, timeout=60
-        )
-        new = os.path.join(outdir, Path(path).stem + ".docx")
-        if os.path.exists(new) and os.path.getsize(new) > 100:
-            log.info(f"DOC → DOCX (LibreOffice): {Path(path).name}")
-            return new
-    except Exception as e:
-        log.warning(f"LibreOffice yo'q yoki xato: {e}")
-
-    # 2. python-docx to'g'ridan o'qib ko'ramiz (ba'zi .doc lar ishlaydi)
+    # 1. Ba'zi ".doc" fayllar aslida .docx (kengaytma noto'g'ri qo'yilgan)
     try:
         import docx as _docx
-        _docx.Document(path)  # Agar ishlasa — .doc aslida .docx ekan
+        _docx.Document(path)
         log.info(f"DOC to'g'ridan DOCX sifatida o'qildi: {Path(path).name}")
         return path
     except Exception:
         pass
 
-    # 3. Matn sifatida o'qish (oxirgi fallback)
+    # 2. docx2txt — eng ishonchli sof-Python yechim eski .doc uchun
     try:
         import docx2txt
         txt = docx2txt.process(path)
-        if txt and len(txt) > 50:
+        if txt and len(txt.strip()) > 50:
             txt_path = os.path.join(outdir, Path(path).stem + ".txt")
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(txt)
             log.info(f"DOC → TXT (docx2txt): {Path(path).name}")
             return txt_path
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"docx2txt xato: {e}")
 
-    log.error(f"DOC convert qilinmadi: {path}")
+    # 3. mammoth — muqobil sof-Python .doc/.docx o'quvchi
+    try:
+        import mammoth
+        with open(path, "rb") as f:
+            result = mammoth.extract_raw_text(f)
+        if result.value and len(result.value.strip()) > 50:
+            txt_path = os.path.join(outdir, Path(path).stem + ".txt")
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(result.value)
+            log.info(f"DOC → TXT (mammoth): {Path(path).name}")
+            return txt_path
+    except Exception as e:
+        log.warning(f"mammoth xato: {e}")
+
+    log.error(f"DOC o'qilmadi (eski .doc formati juda eski/buzilgan bo'lishi mumkin): {path}")
     return ""
 
 
@@ -1964,67 +1968,10 @@ def _parse_pdf_with_images(path: str) -> list:
 
     return questions
 
-def _pdf_via_docx(path: str) -> list:
-    """
-    PDF ni LibreOffice bilan DOCX ga aylantiradi,
-    keyin DOCX rasm parserini (_parse_docx_with_images) ishlatadi.
-
-    LibreOffice rasm-matn joylashuvini PyMuPDF dan yaxshiroq saqlaydi.
-    """
-    import subprocess, tempfile, os
-    from pathlib import Path
-
-    out_dir = tempfile.mkdtemp(prefix="pdf2docx_")
-    try:
-        # LibreOffice bilan PDF → DOCX
-        subprocess.run(
-            ["libreoffice", "--headless", "--infilter=writer_pdf_import",
-             "--convert-to", "docx", path, "--outdir", out_dir],
-            check=True, timeout=120,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        # Yaratilgan DOCX ni topamiz
-        docx_files = list(Path(out_dir).glob("*.docx"))
-        if not docx_files:
-            log.warning("PDF→DOCX: DOCX yaratilmadi")
-            return []
-
-        docx_path = str(docx_files[0])
-        log.info(f"PDF→DOCX muvaffaqiyatli: {Path(docx_path).name}")
-
-        # DOCX rasm parserini ishlatamiz
-        try:
-            from docx import Document
-            doc = Document(docx_path)
-            q = _parse_docx_with_images(doc)
-            if q:
-                return q
-            # Rasmli topilmasa — oddiy DOCX parser
-            return _parse_docx(docx_path)
-        except Exception as e:
-            if 'NULL' in str(e):
-                return _parse_docx_via_zip(docx_path)
-            log.warning(f"PDF→DOCX parse xato: {e}")
-            return []
-
-    except subprocess.TimeoutExpired:
-        log.warning("PDF→DOCX: timeout (120s)")
-        return []
-    except FileNotFoundError:
-        log.warning("PDF→DOCX: LibreOffice topilmadi")
-        return []
-    except Exception as e:
-        log.warning(f"PDF→DOCX xato: {e}")
-        return []
-    finally:
-        # Vaqtinchalik papkani tozalaymiz (DOCX o'qilgandan keyin)
-        # Lekin _img_bytes allaqachon xotirada, fayl kerak emas
-        try:
-            import shutil
-            shutil.rmtree(out_dir, ignore_errors=True)
-        except Exception:
-            pass
-
+# NOTE: _pdf_via_docx() (LibreOffice orqali PDF→DOCX) olib tashlandi —
+# hech qayerda chaqirilmasdi (dead code) va PyMuPDF asosidagi
+# _attach_pdf_images() PDF rasmlarini allaqachon sof Python bilan
+# to'g'ridan-to'g'ri PDF'dan ajratib, savollarga biriktiradi.
 
 # ═══════════════════════════════════════════════════════════
 # UNIVERSAL RASM BIRIKTIRISH (barcha PDF formatlar uchun)
