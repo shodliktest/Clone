@@ -10,3 +10,5 @@ lxml>=4.9.0
 PyMuPDF>=1.23.0
 reportlab>=4.0.0
 supabase>=2.7.0
+docx2txt>=0.8
+mammoth>=1.7.0
