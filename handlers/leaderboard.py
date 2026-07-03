@@ -145,9 +145,9 @@ async def lb_tests_list(callback: CallbackQuery):
 
 
 async def _show_test_lb(msg, tid, edit=False):
-    from utils.ram_cache import get_all_solvers_for_test
+    from utils.db import get_test_solvers_full
     meta    = get_test_meta(tid)
-    solvers = get_all_solvers_for_test(tid)
+    solvers = await get_test_solvers_full(tid)
 
     title  = meta.get("title", "Test") if meta else tid
     medals = ["🥇","🥈","🥉"]

@@ -10,7 +10,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 from utils.db import (get_user, get_my_tests, get_user_results,
                       get_analysis, get_test_full, get_test_stats_for_user,
-                      pause_test, get_test_solvers)
+                      pause_test, get_test_solvers, get_test_solvers_full)
 from utils.states import AllowedUsersState, EditTestTitle, SplitTestSt
 from utils.ram_cache import get_test_by_id, get_test_meta, get_test_meta_any
 from keyboards.keyboards import main_kb, analysis_kb, mytest_settings_kb, CAT_ICONS, get_cat_icon
@@ -1244,7 +1244,7 @@ async def test_solvers_cb(callback: CallbackQuery):
     if uid != meta.get("creator_id") and uid not in ADMIN_IDS:
         return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
 
-    solvers = get_test_solvers(tid)
+    solvers = await get_test_solvers_full(tid)
     finished  = [s for s in solvers if s.get("attempts", 0) > 0]
     started   = [s for s in solvers if s.get("attempts", 0) == 0]
 
@@ -1318,7 +1318,7 @@ async def solver_detail_cb(callback: CallbackQuery):
     from config import ADMIN_IDS
     if viewer != meta.get("creator_id") and viewer not in ADMIN_IDS:
         return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
-    solvers = get_test_solvers(tid)
+    solvers = await get_test_solvers_full(tid)
     sv      = next((s for s in solvers if s["uid"]==uid_str), None)
     if not sv:
         return await callback.answer("Topilmadi.", show_alert=True)
@@ -1357,7 +1357,7 @@ async def solvers_pdf_cb(callback: CallbackQuery):
     if uid != meta.get("creator_id") and uid not in ADMIN_IDS:
         return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
 
-    solvers = get_test_solvers(tid)
+    solvers = await get_test_solvers_full(tid)
     try:
         from utils.pdf_report import generate_solvers_pdf
         bot_info  = await callback.bot.me()
