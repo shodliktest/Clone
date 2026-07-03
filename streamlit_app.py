@@ -42,247 +42,29 @@ if _api_action == "public_tests":
         _json_response({"ok": False, "error": str(e)})
 
 elif _api_action == "test":
-    # Bitta test to'liq (savollar bilan)
-    # Bot va Streamlit alohida jarayon — RAM share qilinmaydi
-    # Shuning uchun HTTP orqali TG dan yuklab olamiz
+    # Bitta test: questions bilan to'liq.
+    # Supabase orqali to'g'ridan-to'g'ri o'qiladi — bot va Streamlit
+    # bir xil bazaga ulanadi, Telegram HTTP aylanma yo'l shart emas.
     tid = _qp.get("id", "").strip().upper()
     if not tid:
         _json_response({"ok": False, "error": "id parametri kerak"})
     try:
-        import os, requests
-        from utils import tg_db, ram_cache as ram
+        from utils import ram_cache as ram
+        from utils import supabase_db_sync as sdb
 
-        # 1. Streamlit RAM cache (bot yozganda to'ldiriladi)
+        # 1. RAM cache (bot va Streamlit bir xil prosessda bo'lsa tezkor)
         cached = ram.get_cached_questions(tid)
         if cached and cached.get("questions"):
             _json_response({"ok": True, "test": cached})
 
-        # 2. tg_db._index dan msg_id va fid olish (bot RAM)
-        bot_token = os.environ.get("BOT_TOKEN", "")
-        channel_id = os.environ.get("STORAGE_CHANNEL_ID", "")
-
-        test_data = None
-
-        if bot_token:
-            # tg_db._index — agar bot thread ishlayotgan bo'lsa
-            idx_data = getattr(tg_db, "_index", {})
-            msg_id = idx_data.get(f"test_{tid}")
-            fid    = idx_data.get(f"fid_{msg_id}") if msg_id else None
-
-            # fid orqali HTTP yuklab olish
-            if fid:
-                try:
-                    gf = requests.get(
-                        f"https://api.telegram.org/bot{bot_token}/getFile",
-                        params={"file_id": fid}, timeout=8
-                    ).json()
-                    fp = (gf.get("result") or {}).get("file_path")
-                    if fp:
-                        raw = requests.get(
-                            f"https://api.telegram.org/file/bot{bot_token}/{fp}",
-                            timeout=15
-                        )
-                        if raw.ok:
-                            try:
-                                test_data = raw.json()
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-            # fid ishlamasa yoki yo'q bo'lsa — forward orqali
-            if not test_data and msg_id and channel_id:
-                try:
-                    fwd = requests.post(
-                        f"https://api.telegram.org/bot{bot_token}/forwardMessage",
-                        json={"chat_id": channel_id,
-                              "from_chat_id": channel_id,
-                              "message_id": int(msg_id)},
-                        timeout=15
-                    ).json()
-                    doc = (fwd.get("result") or {}).get("document")
-                    if doc:
-                        fwd_mid = fwd["result"]["message_id"]
-                        # O'chiramiz
-                        requests.post(
-                            f"https://api.telegram.org/bot{bot_token}/deleteMessage",
-                            json={"chat_id": channel_id,
-                                  "message_id": fwd_mid}, timeout=5
-                        )
-                        gf2 = requests.get(
-                            f"https://api.telegram.org/bot{bot_token}/getFile",
-                            params={"file_id": doc["file_id"]}, timeout=8
-                        ).json()
-                        fp2 = (gf2.get("result") or {}).get("file_path")
-                        if fp2:
-                            raw2 = requests.get(
-                                f"https://api.telegram.org/file/bot{bot_token}/{fp2}",
-                                timeout=15
-                            )
-                            if raw2.ok:
-                                try:
-                                    test_data = raw2.json()
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
-
-            # Hali ham yo'q — pinned index dan qidiramiz
-            if not test_data and channel_id:
-                try:
-                    chat = requests.get(
-                        f"https://api.telegram.org/bot{bot_token}/getChat",
-                        params={"chat_id": channel_id}, timeout=8
-                    ).json()
-                    pin = (chat.get("result") or {}).get("pinned_message")
-                    if pin and pin.get("document"):
-                        gfp = requests.get(
-                            f"https://api.telegram.org/bot{bot_token}/getFile",
-                            params={"file_id": pin["document"]["file_id"]},
-                            timeout=8
-                        ).json()
-                        fpp = (gfp.get("result") or {}).get("file_path")
-                        if fpp:
-                            idx_raw = requests.get(
-                                f"https://api.telegram.org/file/bot{bot_token}/{fpp}",
-                                timeout=10
-                            )
-                            if idx_raw.ok:
-                                idx_json = idx_raw.json()
-                                # ── PROXY (web) format: test_TID to'g'ridan pinned index ichida ──
-                                # Web orqali yaratilgan/bo'lingan testlar shu formatda saqlanadi
-                                if not test_data:
-                                    p_mid = idx_json.get(f"test_{tid}")
-                                    p_fid = idx_json.get(f"fid_{p_mid}") if p_mid else None
-                                    if p_fid:
-                                        try:
-                                            gpf = requests.get(
-                                                f"https://api.telegram.org/bot{bot_token}/getFile",
-                                                params={"file_id": p_fid}, timeout=8
-                                            ).json()
-                                            ppf = (gpf.get("result") or {}).get("file_path")
-                                            if ppf:
-                                                rpf = requests.get(
-                                                    f"https://api.telegram.org/file/bot{bot_token}/{ppf}",
-                                                    timeout=15
-                                                )
-                                                if rpf.ok:
-                                                    try: test_data = rpf.json()
-                                                    except Exception: pass
-                                        except Exception:
-                                            pass
-                                    # fid ishlamasa — forward orqali
-                                    if not test_data and p_mid:
-                                        try:
-                                            fwdp = requests.post(
-                                                f"https://api.telegram.org/bot{bot_token}/forwardMessage",
-                                                json={"chat_id": channel_id,
-                                                      "from_chat_id": channel_id,
-                                                      "message_id": int(p_mid)},
-                                                timeout=15
-                                            ).json()
-                                            docp = (fwdp.get("result") or {}).get("document")
-                                            if docp:
-                                                requests.post(
-                                                    f"https://api.telegram.org/bot{bot_token}/deleteMessage",
-                                                    json={"chat_id": channel_id,
-                                                          "message_id": fwdp["result"]["message_id"]},
-                                                    timeout=5
-                                                )
-                                                gfp2 = requests.get(
-                                                    f"https://api.telegram.org/bot{bot_token}/getFile",
-                                                    params={"file_id": docp["file_id"]}, timeout=8
-                                                ).json()
-                                                fpp2 = (gfp2.get("result") or {}).get("file_path")
-                                                if fpp2:
-                                                    rpf2 = requests.get(
-                                                        f"https://api.telegram.org/file/bot{bot_token}/{fpp2}",
-                                                        timeout=15
-                                                    )
-                                                    if rpf2.ok:
-                                                        try: test_data = rpf2.json()
-                                                        except Exception: pass
-                                        except Exception:
-                                            pass
-                                # Chunklardan test_TID topish
-                                for chunk_info in (idx_json.get("index_chunks") or []):
-                                    chunk_fid = chunk_info.get("fid")
-                                    if not chunk_fid: continue
-                                    try:
-                                        gfc = requests.get(
-                                            f"https://api.telegram.org/bot{bot_token}/getFile",
-                                            params={"file_id": chunk_fid}, timeout=6
-                                        ).json()
-                                        fpc = (gfc.get("result") or {}).get("file_path")
-                                        if not fpc: continue
-                                        chunk_data = requests.get(
-                                            f"https://api.telegram.org/file/bot{bot_token}/{fpc}",
-                                            timeout=10
-                                        ).json()
-                                        c_msg_id = chunk_data.get(f"test_{tid}")
-                                        if c_msg_id:
-                                            c_fid = chunk_data.get(f"fid_{c_msg_id}")
-                                            if c_fid:
-                                                gff = requests.get(
-                                                    f"https://api.telegram.org/bot{bot_token}/getFile",
-                                                    params={"file_id": c_fid}, timeout=6
-                                                ).json()
-                                                pfp = (gff.get("result") or {}).get("file_path")
-                                                if pfp:
-                                                    rf = requests.get(
-                                                        f"https://api.telegram.org/file/bot{bot_token}/{pfp}",
-                                                        timeout=15
-                                                    )
-                                                    if rf.ok:
-                                                        try:
-                                                            test_data = rf.json()
-                                                        except Exception:
-                                                            pass
-                                            if not test_data and c_msg_id:
-                                                # forward orqali
-                                                fwd2 = requests.post(
-                                                    f"https://api.telegram.org/bot{bot_token}/forwardMessage",
-                                                    json={"chat_id": channel_id,
-                                                          "from_chat_id": channel_id,
-                                                          "message_id": int(c_msg_id)},
-                                                    timeout=15
-                                                ).json()
-                                                doc2 = (fwd2.get("result") or {}).get("document")
-                                                if doc2:
-                                                    fwd2_mid = fwd2["result"]["message_id"]
-                                                    requests.post(
-                                                        f"https://api.telegram.org/bot{bot_token}/deleteMessage",
-                                                        json={"chat_id": channel_id,
-                                                              "message_id": fwd2_mid}, timeout=5
-                                                    )
-                                                    gf3 = requests.get(
-                                                        f"https://api.telegram.org/bot{bot_token}/getFile",
-                                                        params={"file_id": doc2["file_id"]},
-                                                        timeout=8
-                                                    ).json()
-                                                    fp3 = (gf3.get("result") or {}).get("file_path")
-                                                    if fp3:
-                                                        rf3 = requests.get(
-                                                            f"https://api.telegram.org/file/bot{bot_token}/{fp3}",
-                                                            timeout=15
-                                                        )
-                                                        if rf3.ok:
-                                                            try:
-                                                                test_data = rf3.json()
-                                                            except Exception:
-                                                                pass
-                                    except Exception:
-                                        pass
-                                    if test_data:
-                                        break
-                except Exception:
-                    pass
+        # 2. To'g'ridan-to'g'ri Supabase'dan (sinxron, Streamlit uchun)
+        test_data = sdb.get_test_full_sync(tid)
 
         if test_data and test_data.get("questions"):
             ram.cache_questions(tid, test_data)
             _json_response({"ok": True, "test": test_data})
 
-        # Meta bilan javob
+        # Meta bilan javob (savollar topilmasa ham)
         meta = ram.get_test_meta_any(tid) or {}
         if meta:
             _json_response({"ok": True, "test": meta, "meta_only": True})
@@ -405,7 +187,8 @@ elif _api_action == "ram_update":
                     + "\u2139\ufe0f Yangilangan test keyingi yechishdan kuchga kiradi."
                 )
                 async def _send():
-                    await tg_db._bot.send_message(creator_id, txt)
+                    _b = await tg_db.get_or_create_bot()
+                    if _b: await _b.send_message(creator_id, txt)
                 try:
                     asyncio.run(_send())
                 except RuntimeError:
@@ -444,7 +227,8 @@ elif _api_action == "ram_split":
 
         async def _do_split():
             from keyboards.keyboards import test_created_kb
-            bu = (await tg_db._bot.get_me()).username
+            _b = await tg_db.get_or_create_bot()
+            bu = (await _b.get_me()).username if _b else ""
             created = []
 
             for part in parts:
@@ -475,10 +259,11 @@ elif _api_action == "ram_split":
                         + "\U0001f447 Boshlash usulini tanlang:"
                     )
                     try:
-                        await tg_db._bot.send_message(
-                            creator_id, txt,
-                            reply_markup=test_created_kb(tid, bu)
-                        )
+                        if _b:
+                            await _b.send_message(
+                                creator_id, txt,
+                                reply_markup=test_created_kb(tid, bu)
+                            )
                     except Exception:
                         pass
 
@@ -1164,26 +949,37 @@ elif menu == "👥 Userlar":
 
 # ══ BACKUP ════════════════════════════════════════════════
 elif menu == "🔄 Backup":
-    from config import STORAGE_CHANNEL_ID
+    from config import SUPABASE_URL, SUPABASE_KEY
     from utils.ram_cache import get_daily, clear_daily, stats
     from utils import tg_db
 
     st.markdown("## 🔄 Kunlik Backup")
 
-    if not STORAGE_CHANNEL_ID:
-        st.error("⚠️ STORAGE_CHANNEL_ID sozlanmagan! secrets.toml tekshiring.")
-        st.code('STORAGE_CHANNEL_ID = "-1003776515681"'); st.stop()
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        st.error("⚠️ SUPABASE_URL / SUPABASE_KEY sozlanmagan! secrets.toml tekshiring.")
+        st.code('SUPABASE_URL = "https://xxxx.supabase.co"\nSUPABASE_KEY = "eyJ..."'); st.stop()
 
     daily = get_daily()
     s     = stats()
     total = s["daily_r"]
-    dates = tg_db.get_backup_dates()
+
+    from utils import supabase_db_sync as sdb
+    def _get_backup_dates_sync():
+        client = sdb._get_client()
+        if not client:
+            return []
+        try:
+            res = client.table("backups").select("date_str").execute()
+            return sorted([r["date_str"] for r in (res.data or [])], reverse=True)
+        except Exception:
+            return []
+    dates = _get_backup_dates_sync()
 
     # Status kartalar
     c1, c2, c3 = st.columns(3)
-    c1.metric("RAM dagi natijalar",  total,      help="Kanalga yuborilmagan")
-    c2.metric("Saqlangan backuplar", len(dates),  help="Telegram kanalda")
-    c3.metric("Kanal ID",            str(STORAGE_CHANNEL_ID))
+    c1.metric("RAM dagi natijalar",  total,      help="Bazaga yuborilmagan")
+    c2.metric("Saqlangan backuplar", len(dates),  help="Supabase'da")
+    c3.metric("Baza turi",           "Supabase")
 
     st.markdown("---")
 
@@ -1201,25 +997,19 @@ elif menu == "🔄 Backup":
         </div>
         """, unsafe_allow_html=True)
 
-        if st.button("💾 Kanalga yuborish", use_container_width=True, type="primary"):
+        if st.button("💾 Bazaga yuborish", use_container_width=True, type="primary"):
             if not daily:
                 st.warning("📭 RAM da natija yo'q.")
             else:
                 with st.spinner("Yuklanmoqda..."):
-                    import asyncio
-                    async def do_flush():
-                        return await tg_db.upload_backup(daily, str(date.today()))
-                    try:
-                        loop = asyncio.new_event_loop()
-                        mid  = loop.run_until_complete(do_flush()); loop.close()
-                        if mid:
-                            clear_daily()
-                            st.success(f"✅ Backup yuborildi! msg_id = {mid}")
-                            st.balloons()
-                        else:
-                            st.error("❌ Xato. Bot kanal huquqlarini tekshiring.")
-                    except Exception as e:
-                        st.error(f"❌ {e}")
+                    from utils import supabase_db_sync as sdb
+                    ok = sdb.upload_backup_sync(daily, str(date.today()))
+                    if ok:
+                        clear_daily()
+                        st.success("✅ Backup Supabase'ga saqlandi!")
+                        st.balloons()
+                    else:
+                        st.error("❌ Xato. SUPABASE_URL / SUPABASE_KEY tekshiring.")
 
     with col_r:
         st.markdown("#### 📅 Backup tarixi")

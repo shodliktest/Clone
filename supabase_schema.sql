@@ -41,7 +41,7 @@ create index if not exists idx_users_blocked on users(is_blocked);
 -- ─── USER STATS (kim, qaysi testni qachon yechgan) ─────────────
 create table if not exists user_stats (
     tg_id           bigint primary key references users(tg_id) on delete cascade,
-    data            jsonb not null default '{}'::jsonb,   -- {by_test:{tid:{attempts,best_score,...}}}
+    data            jsonb not null default '{}'::jsonb,   -- {tid: {attempts,best_score,avg_score,all_pcts,passed,ever_passed,ever_completed,last_at}}
     updated_at      timestamptz not null default now()
 );
 
@@ -80,6 +80,23 @@ create table if not exists backups (
     created_at      timestamptz not null default now()
 );
 
+-- ─── FILE_FINGERPRINTS (yuklangan fayllarni tanish — qayta parse qilmaslik) ──
+-- Fayl mazmuni bo'yicha SHA-256 hash. Xuddi shu fayl (yoki bir xil savollar
+-- to'plami) qayta yuklansa, bot buni tanib "bu fayl allaqachon test №X
+-- sifatida saqlangan, o'shani ishlataymi?" deb so'raydi — AI/parse qayta
+-- ishlamaydi, vaqt va resurs tejaladi.
+create table if not exists file_fingerprints (
+    file_hash       text primary key,      -- sha256(fayl matni / normalized savollar)
+    test_id         text not null references tests(test_id) on delete cascade,
+    original_name   text,                  -- birinchi yuklangan fayl nomi
+    uploaded_by     bigint,                -- birinchi yuklagan tg_id
+    file_size       integer,
+    upload_count    integer not null default 1,   -- necha marta shu fayl "qaytadan" yuklangan
+    created_at      timestamptz not null default now(),
+    last_seen_at    timestamptz not null default now()
+);
+create index if not exists idx_fingerprints_test on file_fingerprints(test_id);
+
 -- ─── OTP (Web App login kodlari) ────────────────────────────────
 create table if not exists otp_codes (
     code            text primary key,
@@ -113,16 +130,32 @@ create trigger trg_user_stats_updated before update on user_stats
 
 -- ─── Row Level Security — botdan service_role kalit bilan kirilgani
 --     uchun RLS ni o'chirib qo'yamiz (faqat backend kirishi mumkin) ─
-alter table tests         disable row level security;
-alter table users         disable row level security;
-alter table user_stats    disable row level security;
-alter table app_settings  disable row level security;
-alter table known_groups  disable row level security;
-alter table leaderboard   disable row level security;
-alter table backups       disable row level security;
-alter table otp_codes     disable row level security;
+alter table tests             disable row level security;
+alter table users             disable row level security;
+alter table user_stats        disable row level security;
+alter table app_settings      disable row level security;
+alter table known_groups      disable row level security;
+alter table leaderboard       disable row level security;
+alter table backups           disable row level security;
+alter table otp_codes         disable row level security;
+alter table file_fingerprints disable row level security;
+
+-- ════════════════════════════════════════════════════════════════
+-- PostgREST SXEMA KESHINI YANGILASH
+-- ════════════════════════════════════════════════════════════════
+-- Yangi jadval yaratilgandan keyin, Supabase'ning REST API qatlami
+-- (PostgREST) eski sxema xotirasida qolib ketishi mumkin — bu
+-- "Could not find table 'public.tests'" kabi xatoga sabab bo'ladi.
+-- Quyidagi buyruq PostgREST'ga "sxema o'zgardi, qayta o'qi" deb signal
+-- beradi. Odatda 1-2 soniyada ta'sir qiladi.
+notify pgrst, 'reload schema';
 
 -- ════════════════════════════════════════════════════════════════
 -- TAYYOR. Endi Streamlit secrets.toml ga SUPABASE_URL va
 -- SUPABASE_KEY (service_role) qo'shing va botni qayta ishga tushiring.
+--
+-- Ushbu skriptni necha marta ishga tushirsangiz ham xavfsiz:
+--   • "create table if not exists" — mavjud jadvalga TEGMAYDI
+--   • "create index if not exists" — mavjud indeksga TEGMAYDI
+--   • Ustundagi mavjud MA'LUMOT hech qachon o'chirilmaydi/yozilmaydi
 -- ════════════════════════════════════════════════════════════════
