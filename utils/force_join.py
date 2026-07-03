@@ -5,15 +5,17 @@ Admin panel orqali boshqariladi:
   - Kanal/guruh qo'shish va o'chirish
   - Tekshirishni yoqish/o'chirish
   - Har bir user /start bosganda tekshiriladi
-  - RAM cache da saqlanadi, TG kanalga backup
+  - Supabase (app_settings jadvali) da saqlanadi — bot qayta ishga
+    tushsa yoki qulasa ham, sozlamalar YO'QOLMAYDI.
 """
 import logging
+import asyncio
 from typing import Optional
 from aiogram.types import Message, CallbackQuery
 
 log = logging.getLogger(__name__)
 
-# ── RAM da saqlash ──────────────────────────────────────────
+# ── RAM da tezkor cache (har so'rovda Supabase'ga bormaslik uchun) ──
 _force_channels: list = []   # [{"id": -100xxx, "title": "...", "invite": "...", "type": "channel"}]
 _force_enabled:  bool = False
 
@@ -26,6 +28,7 @@ def is_force_enabled() -> bool:
 def set_force_enabled(val: bool):
     global _force_enabled
     _force_enabled = val
+    _save()
 
 def add_channel(ch_id: int, title: str, invite: str = "", ch_type: str = "channel") -> bool:
     """Kanal/guruh ro'yxatga qo'shish"""
@@ -51,18 +54,46 @@ def remove_channel(ch_id: int) -> bool:
         return True
     return False
 
-# ── TG kanalga saqlash (bot restart da yo'qolmasin) ─────────
+# ── Supabase'ga saqlash (bot restart/crash bo'lsa ham yo'qolmasin) ──
 def _save():
-    """RAM cache orqali saqlash"""
+    """
+    RAM'ni darhol yangilaydi va Supabase'ga background'da yozadi.
+    Sinxron funksiya bo'lgani uchun (chaqiruvchilar await qilmaydi),
+    yozuv fire-and-forget task orqali amalga oshadi — lekin
+    milliseкundlar ichida boshlanadi, foydalanuvchi kutmaydi.
+    """
     try:
-        from utils import ram_cache as ram
-        ram._set("force_join_channels", list(_force_channels))
-        ram._set("force_join_enabled",  _force_enabled)
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_save_async())
+        else:
+            log.warning("force_join _save: event loop ishlamayapti, saqlanmadi")
+    except RuntimeError:
+        log.warning("force_join _save: event loop topilmadi")
     except Exception as e:
         log.warning(f"force_join save: {e}")
 
+async def _save_async():
+    """app_settings jadvalidagi 'force_join' kalitiga yozadi."""
+    try:
+        from utils import tg_db
+        if not tg_db.ready():
+            return
+        current = await tg_db.get_settings_tg()
+        current["force_join"] = {
+            "channels": _force_channels,
+            "enabled":  _force_enabled,
+        }
+        await tg_db.save_settings(current)
+    except Exception as e:
+        log.warning(f"force_join _save_async: {e}")
+
 def load_from_cache():
-    """Bot start da RAM cache dan yuklash"""
+    """
+    Bot start da RAM cache'dan yuklash (agar shu jarayon ichida
+    allaqachon yuklangan bo'lsa — masalan ikkinchi marta chaqirilganda).
+    Haqiqiy manba — Supabase, uni load_from_db() orqali yuklang.
+    """
     global _force_channels, _force_enabled
     try:
         from utils import ram_cache as ram
@@ -70,9 +101,33 @@ def load_from_cache():
         if chs: _force_channels = chs
         en = ram._get("force_join_enabled")
         if en is not None: _force_enabled = bool(en)
-        log.info(f"Force join yuklandi: {len(_force_channels)} kanal, enabled={_force_enabled}")
+        log.info(f"Force join (RAM cache): {len(_force_channels)} kanal, enabled={_force_enabled}")
     except Exception as e:
-        log.warning(f"force_join load: {e}")
+        log.warning(f"force_join load (RAM): {e}")
+
+async def load_from_db():
+    """
+    Bot start da Supabase'dan haqiqiy yuklash — bot necha marta
+    o'chib-yonsa ham, majburiy obuna sozlamalari saqlanib qoladi.
+    bot.py da tg_db.init() dan KEYIN chaqirilishi kerak.
+    """
+    global _force_channels, _force_enabled
+    try:
+        from utils import tg_db
+        if not tg_db.ready():
+            log.warning("force_join load_from_db: Supabase hali tayyor emas")
+            return
+        settings = await tg_db.get_settings_tg()
+        fj = settings.get("force_join") or {}
+        _force_channels = fj.get("channels", [])
+        _force_enabled  = bool(fj.get("enabled", False))
+        # RAM cache'ga ham yozib qo'yamiz (moslik uchun)
+        from utils import ram_cache as ram
+        ram._set("force_join_channels", list(_force_channels))
+        ram._set("force_join_enabled",  _force_enabled)
+        log.info(f"Force join (Supabase'dan): {len(_force_channels)} kanal, enabled={_force_enabled}")
+    except Exception as e:
+        log.warning(f"force_join load_from_db: {e}")
 
 # ── Asosiy tekshiruv ────────────────────────────────────────
 async def check_user_joined(bot, user_id: int) -> list:
