@@ -906,7 +906,7 @@ async def adm_backups(callback: CallbackQuery):
     await callback.answer()
     if not is_admin(callback.from_user.id): return
     from utils import tg_db
-    dates = tg_db.get_backup_dates()
+    dates = await tg_db.get_backup_dates_async()
     info  = tg_db.get_index_info()
     text  = (
         f"🗂 <b>BACKUPLAR</b>\n"
