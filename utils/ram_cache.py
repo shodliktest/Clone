@@ -461,17 +461,18 @@ def get_user_results(uid):
     stats   = get_user_stats_cache(str(uid)) or {}
     history = []
     for tid, e in stats.items():
+        all_pcts = e.get("all_pcts", [])
         history.append({
             "test_id":         tid,
             "result_id":       f"{uid}_{tid}",
-            "last_pct":        e["all_pcts"][-1] if e["all_pcts"] else 0,
-            "best_pct":        e["best_score"],
-            "attempts":        e["attempts"],
-            "all_pcts":        e["all_pcts"],
-            "passed":          e["passed"],
+            "last_pct":        all_pcts[-1] if all_pcts else 0,
+            "best_pct":        e.get("best_score", 0.0),
+            "attempts":        e.get("attempts", 0),
+            "all_pcts":        all_pcts,
+            "passed":          e.get("passed", False),
             "ever_passed":     e.get("ever_passed", e.get("passed", False)),
             "ever_completed":  e.get("ever_completed", True),
-            "completed_at":    e["last_at"],
+            "completed_at":    e.get("last_at", ""),
         })
     history.sort(key=lambda x: x.get("completed_at", ""), reverse=True)
     return history
