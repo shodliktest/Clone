@@ -1,4 +1,6 @@
 
+import os
+import tempfile
 from aiogram import BaseMiddleware
 from aiogram.types import Message, CallbackQuery
 from aiogram.exceptions import TelegramBadRequest
@@ -304,9 +306,13 @@ async def main():
         from utils import tg_db
         log.info("Supabase DB initsializatsiya...")
         await tg_db.init(bot, STORAGE_CHANNEL_ID)
+        # DIQQAT: tg_db.init() ICHIDA _load_tests_meta_to_ram() allaqachon
+        # to'g'ri question_count bilan RAM'ni to'ldiradi. Bu yerda yana
+        # ram.set_tests(await tg_db.get_tests()) chaqirish XATO edi —
+        # get_tests() faqat META (savollarsiz) qaytaradi, set_tests() esa
+        # "questions" maydoni borligini kutib, uni 0 deb qayta yozib
+        # qo'yardi. Shu sabab savol soni har doim 0 ko'rinardi.
         from utils import ram_cache as ram
-        tests = await tg_db.get_tests()
-        if tests: ram.set_tests(tests)
         users = await tg_db.get_users()
         if users: ram.set_users(users)
         settings = await tg_db.get_settings_tg()
@@ -610,6 +616,26 @@ async def _cache_cleanup_loop():
             sts = ram.clear_expired_stats()
             if sts:
                 log.info(f"🧹 Stats: {sts} ta user stats RAMdan o'chirildi")
+
+            # ── Eskirgan vaqtinchalik fayllar (fingerprint uchun saqlangan,
+            #    lekin foydalanuvchi hech qanday tugma bosmagan bo'lishi mumkin) ──
+            try:
+                import glob, time as _time
+                cutoff = _time.time() - 3600  # 1 soatdan eski
+                removed_tmp = 0
+                exts = (".txt", ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".xlsm")
+                for fpath in glob.glob(os.path.join(tempfile.gettempdir(), "tmp*")):
+                    try:
+                        if (os.path.isfile(fpath) and fpath.lower().endswith(exts)
+                                and os.path.getmtime(fpath) < cutoff):
+                            os.remove(fpath)
+                            removed_tmp += 1
+                    except Exception:
+                        pass
+                if removed_tmp:
+                    log.info(f"🧹 Vaqtinchalik fayllar: {removed_tmp} ta o'chirildi")
+            except Exception as e:
+                log.warning(f"Tmp fayl tozalashda xato: {e}")
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -771,16 +797,27 @@ async def _main_no_signals():
     if SUPABASE_URL and SUPABASE_KEY:
         from utils import tg_db
         await tg_db.init(bot, STORAGE_CHANNEL_ID)
+        # DIQQAT: tg_db.init() ICHIDA _load_tests_meta_to_ram() allaqachon
+        # to'g'ri question_count bilan RAM'ni to'ldiradi. Quyidagi
+        # ram.set_tests(await tg_db.get_tests()) chaqiruvi XATO edi —
+        # get_tests() faqat META (savollarsiz) qaytaradi, set_tests() esa
+        # "questions" maydoni borligini kutib, uni 0 deb qayta yozib
+        # qo'yardi. Aynan shu sabab admin panelda "savol soni 0" va
+        # "nechta test" ko'rsatkichlari noto'g'ri chiqardi.
         from utils import ram_cache as ram
-        # Faqat META yuklanadi — savollar lazy load
-        tests = await tg_db.get_tests()
-        if tests: ram.set_tests(tests)
         users = await tg_db.get_users()
         if users: ram.set_users(users)
         settings = await tg_db.get_settings_tg()
         if settings: ram.set_all_settings(settings)
         log.info(f"✅ Yuklandi: {ram.stats()['tests']} test meta, {ram.stats()['users']} user")
         _blocked_mod.load()
+
+        # Force join — Supabase'dan yuklash
+        try:
+            from utils.force_join import load_from_db
+            await load_from_db()
+        except Exception as _fje:
+            log.warning(f"force_join load: {_fje}")
     else:
         from utils import tg_db   # auto_flush_loop pastda kerak bo'ladi, lekin ready()=False bo'ladi
         log.error("❌ SUPABASE_URL / SUPABASE_KEY sozlanmagan!")
@@ -801,10 +838,10 @@ async def _main_no_signals():
                 f"📅 {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC")
         except Exception: pass
 
-    # Force join keshdan yuklash
+    # Force join — Supabase'dan yuklash (bot restart bo'lsa ham saqlangan holat qaytadi)
     try:
-        from utils.force_join import load_from_cache
-        load_from_cache()
+        from utils.force_join import load_from_db
+        await load_from_db()
     except Exception as _fje:
         log.warning(f"force_join load: {_fje}")
 
