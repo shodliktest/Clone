@@ -518,9 +518,11 @@ def clear_expired_analysis():
         log.info(f"RAM: {removed} user tahlili o'chirildi (2 soat TTL)")
     return removed
 
-def get_all_solvers_for_test(tid):
-    """Test boshlagan barcha userlar — stats cache dan.
-    attempts==0 (faqat start bosgan) ham qo'shiladi, eng oxirida ko'rsatiladi.
+def get_all_solvers_for_test_ram_only(tid):
+    """
+    Faqat RAM cache'dan (eski, ichki foydalanish uchun qoldirilgan).
+    TO'LIQ RO'YXAT uchun get_test_solvers_full() (utils/db.py) dan
+    foydalaning — u Supabase'dan o'qiydi va hech qachon eskirmaydi.
     """
     users  = get_users()
     result = []
@@ -547,6 +549,9 @@ def get_all_solvers_for_test(tid):
     # Avval tugatganlar (yuqori ball), keyin 0-natijalilar
     result.sort(key=lambda x: (x["attempts"] > 0, x["best_score"]), reverse=True)
     return result
+
+# Moslik uchun eski nom ham ishlaydi (RAM-only, ichki foydalanish uchun)
+get_all_solvers_for_test = get_all_solvers_for_test_ram_only
 
 
 # ══ GLOBAL LEADERBOARD (top 20) ═══════════════════════════════

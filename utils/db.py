@@ -316,8 +316,67 @@ def get_test_stats_for_user(user_id, test_id):
     return ram.get_test_entry(user_id, test_id)
 
 def get_test_solvers(test_id):
-    """Test yechgan barcha userlar — creator/admin uchun"""
+    """
+    Test yechgan userlar — RAM cache'dan (TEZKOR, lekin faqat oxirgi
+    2 soat ichida faol bo'lgan userlarni ko'rsatadi — chunki RAM stats
+    2 soat TTL bilan avtomatik tozalanadi, va bot restart bo'lsa RAM
+    butunlay bo'shaydi).
+
+    TO'LIQ va DOIMIY ro'yxat uchun get_test_solvers_full() (async,
+    Supabase'dan o'qiydi) ishlatilsin — admin panel shu funksiyaga
+    o'tkazildi.
+    """
     return ram.get_all_solvers_for_test(test_id)
+
+
+async def get_test_solvers_full(test_id):
+    """
+    Test yechgan BARCHA userlarni Supabase'dan (user_stats jadvali)
+    to'g'ridan-to'g'ri o'qiydi. Bot qancha marta o'chib-yonmasin, RAM
+    TTL tugagan bo'lsin — bu funksiya har doim TO'LIQ va TO'G'RI
+    natija beradi, chunki manba RAM emas, doimiy ma'lumotlar bazasi.
+
+    Katta foydalanuvchi bazasida ancha so'rov (barcha user_stats
+    o'qiladi va Python'da filtrlanadi) — lekin to'g'rilik ustunroq,
+    va natija RAM'ga keshlanadi keyingi tezkor o'qishlar uchun.
+    """
+    from utils import tg_db, supabase_client as sb
+    if not tg_db.ready():
+        # Supabase yo'q — RAM fallback
+        return ram.get_all_solvers_for_test(test_id)
+
+    try:
+        rows = await sb.select("user_stats", columns="tg_id,data")
+    except Exception as e:
+        log.error(f"get_test_solvers_full({test_id}): {e}")
+        return ram.get_all_solvers_for_test(test_id)
+
+    users  = ram.get_users()
+    result = []
+    for r in rows:
+        tg_id = r.get("tg_id")
+        data  = r.get("data") or {}
+        entry = data.get(str(test_id)) or data.get(test_id)
+        if not entry:
+            continue
+        uid_str = str(tg_id)
+        user    = users.get(uid_str, {})
+        result.append({
+            "uid":            uid_str,
+            "name":           user.get("name", f"User {uid_str}"),
+            "username":       user.get("username", ""),
+            "attempts":       entry.get("attempts", 0),
+            "all_pcts":       entry.get("all_pcts", []),
+            "best_score":     entry.get("best_score", 0.0),
+            "avg_score":      entry.get("avg_score", 0.0),
+            "last_at":        entry.get("last_at", ""),
+            "passed":         entry.get("passed", False),
+            "ever_passed":    entry.get("ever_passed", entry.get("passed", False)),
+            "ever_completed": entry.get("ever_completed", True),
+            "started":        entry.get("attempts", 0) > 0,
+        })
+    result.sort(key=lambda x: (x["attempts"] > 0, x["best_score"]), reverse=True)
+    return result
 
 def get_leaderboard(limit=20):
     users = [u for u in get_all_users() if u.get("total_tests", 0) > 0]
