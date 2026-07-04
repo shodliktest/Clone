@@ -191,6 +191,76 @@ async def create_test(creator_id, data, creator_name="", creator_username=""):
                     log.warning(f"fingerprint ro'yxatga olish xato: {_fp_e}")
     return tid
 
+
+def validate_json_test(data: dict) -> tuple[bool, str]:
+    """
+    Tayyor JSON test obyektini tekshiradi (masalan bot avval eksport
+    qilgan yoki boshqa joydan tayyor holda kelgan test).
+    Qaytaradi: (ok: bool, xato_matni: str)
+    """
+    if not isinstance(data, dict):
+        return False, "JSON obyekt (dict) bo'lishi kerak"
+    qs = data.get("questions")
+    if not isinstance(qs, list) or not qs:
+        return False, "'questions' ro'yxati topilmadi yoki bo'sh"
+    for i, q in enumerate(qs, 1):
+        if not isinstance(q, dict):
+            return False, f"{i}-savol obyekt emas"
+        if not (q.get("question") or "").strip():
+            return False, f"{i}-savolda 'question' matni yo'q"
+        qtype = q.get("type", "multiple_choice")
+        if qtype in ("multiple_choice", "multi_select"):
+            opts = q.get("options") or []
+            if not opts:
+                return False, f"{i}-savolda 'options' yo'q"
+            if not (q.get("correct") or "").strip():
+                return False, f"{i}-savolda 'correct' javob ko'rsatilmagan"
+    return True, ""
+
+
+async def import_test_from_json(creator_id, data: dict,
+                                 creator_name="", creator_username="",
+                                 keep_category=True, keep_title=True):
+    """
+    Tayyor JSON test obyektini (masalan avval eksport qilingan yoki
+    boshqa manbadan tayyor holda kelgan test) to'g'ridan-to'g'ri
+    Supabase/TG bazaga import qiladi — parser ishlatilmaydi, chunki
+    format allaqachon botning ichki tuzilishiga mos.
+
+    data — JSON dan o'qilgan dict, quyidagi maydonlarni ixtiyoriy
+    o'z ichiga olishi mumkin: title, category, difficulty, visibility,
+    time_limit, poll_time, passing_score, max_attempts, ref_required,
+    ref_count, questions (majburiy).
+
+    Asl fayldagi test_id/creator/solve_count/avg_score kabi maydonlar
+    E'TIBORGA OLINMAYDI — create_test() har doim yangi test_id va
+    toza statistika bilan boshlaydi (mavjud create_test() logikasi
+    qayta ishlatiladi, dublikat kod yozilmaydi).
+    """
+    ok, err = validate_json_test(data)
+    if not ok:
+        raise ValueError(err)
+
+    td = {
+        "title":         data.get("title", "Nomsiz") if keep_title else "Nomsiz",
+        "category":      data.get("category", "Boshqa") if keep_category else "Boshqa",
+        "difficulty":    data.get("difficulty", "medium"),
+        "visibility":    data.get("visibility", "private"),
+        "time_limit":    data.get("time_limit", 0),
+        "poll_time":     data.get("poll_time", 30),
+        "passing_score": data.get("passing_score", 60),
+        "max_attempts":  data.get("max_attempts", 0),
+        "ref_required":  data.get("ref_required", False),
+        "ref_count":     data.get("ref_count", 0),
+        "questions":     data.get("questions", []),
+    }
+    tid = await create_test(
+        creator_id, td,
+        creator_name=creator_name, creator_username=creator_username,
+    )
+    return tid
+
+
 async def delete_test(tid):
     """
     ADMIN o'chirganda — butunlay o'chiriladi.

@@ -32,6 +32,7 @@ class AdminPanel(StatesGroup):
     group_broadcast   = State()
     fj_add            = State()
     find_test         = State()  # Kod orqali test qidirish
+    waiting_json      = State()  # /import_json — tayyor JSON test fayllari kutilmoqda
 
 class ContactAdmin(StatesGroup):
     waiting_message = State()
