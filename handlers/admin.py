@@ -284,9 +284,55 @@ async def adm_deleted_tests(callback: CallbackQuery):
     if page < total-1:
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm_deleted_{page+1}"))
     if nav: b.row(*nav)
+    if tests:
+        b.row(InlineKeyboardButton(
+            text=f"🗑 Barchasini butunlay tozalash ({len(tests)})",
+            callback_data="purge_ghost_all"
+        ))
     b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_back_to_cats"))
     try: await callback.message.edit_text(text, reply_markup=b.as_markup())
     except TelegramBadRequest: await callback.message.answer(text, reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data == "purge_ghost_all")
+async def purge_ghost_all_confirm(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    count = sum(1 for t in ram.get_all_tests_meta() if not t.get("is_active", True))
+    if count == 0:
+        return await callback.answer("Tozalanadigan test yo'q.", show_alert=True)
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="✅ Ha, tozalash", callback_data="purge_ghost_all_yes"),
+        InlineKeyboardButton(text="❌ Yo'q", callback_data="adm_deleted_0"),
+    )
+    try:
+        await callback.message.edit_text(
+            f"⚠️ <b>BARCHASINI BUTUNLAY TOZALASH</b>\n\n"
+            f"🗑 {count} ta avval o'chirilgan (Supabase'da osilib qolgan) test "
+            f"<b>butunlay tozalanadi</b>.\n"
+            f"Bu testlar allaqachon avval o'chirilgan, backup ham saqlangan bo'lishi kerak.\n\n"
+            f"Bu amalni qaytarib bo'lmaydi!",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+
+
+@router.callback_query(F.data == "purge_ghost_all_yes")
+async def purge_ghost_all_exec(callback: CallbackQuery):
+    await callback.answer("⏳ Tozalanmoqda...")
+    if not is_admin(callback.from_user.id): return
+    from utils.db import purge_ghost_tests
+    count = await purge_ghost_tests()
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Fanlar", callback_data="adm_back_to_cats"))
+    try:
+        await callback.message.edit_text(
+            f"✅ <b>{count} ta</b> test Supabase'dan butunlay tozalandi.\n"
+            f"Bazada endi bu testlardan iz qolmadi.",
+            reply_markup=b.as_markup()
+        )
+    except: pass
 
 async def _show_admin_test_cats(msg, edit=False):
     tests = ram.get_all_tests_meta()
