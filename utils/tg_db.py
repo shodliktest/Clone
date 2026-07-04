@@ -95,6 +95,24 @@ def ready():
     return _ready
 
 
+async def get_storage_stats() -> dict | None:
+    """
+    Supabase (Postgres) bazasining umumiy va jadval-jadval hajmini
+    qaytaradi (bayt). get_storage_stats() SQL funksiyasi Supabase'da
+    oldindan yaratilgan bo'lishi kerak (fix_storage_stats.sql orqali).
+    Hali yaratilmagan yoki boshqa xato bo'lsa — None qaytaradi (xato
+    ko'tarmaydi), shunda admin panel baribir RAM statistikasini
+    ko'rsata oladi, faqat Supabase blokini o'tkazib yuboradi.
+    """
+    if not ready():
+        return None
+    try:
+        return await sb.rpc("get_storage_stats")
+    except Exception as e:
+        log.warning(f"get_storage_stats: RPC hali sozlanmagan yoki xato: {e}")
+        return None
+
+
 def mark_stats_dirty():
     global _stats_dirty
     _stats_dirty = True

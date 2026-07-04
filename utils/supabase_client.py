@@ -126,3 +126,12 @@ async def count(table: str, filters: dict | None = None) -> int:
         return q.limit(1).execute()
     res = await _run(_do)
     return res.count or 0
+
+
+async def rpc(fn_name: str, params: dict | None = None):
+    """Postgres funksiyasini (RPC) chaqiradi — masalan get_storage_stats().
+    Funksiya Supabase'da oldindan SQL orqali yaratilgan bo'lishi kerak."""
+    def _do():
+        return get_client().rpc(fn_name, params or {}).execute()
+    res = await _run(_do)
+    return res.data
