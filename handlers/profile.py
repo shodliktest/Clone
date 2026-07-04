@@ -1143,7 +1143,7 @@ async def admin_forward_mode(callback: CallbackQuery, state: FSMContext):
     except Exception: pass
 
 # ── Test o'chirish (faqat mening testlarim dan) ━━━━━━━━━━━━━━━━━━━━━━━━
-@router.callback_query(F.data.startswith("del_mytest_"))
+@router.callback_query(F.data.startswith("del_mytest_") & ~F.data.startswith("del_mytest_ok_"))
 async def del_mytest_confirm(callback: CallbackQuery):
     tid  = callback.data[11:]
     uid  = callback.from_user.id
