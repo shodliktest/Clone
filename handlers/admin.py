@@ -549,11 +549,57 @@ async def admin_deleted_tests(callback: CallbackQuery):
             text=f"📂 {cat} ({len(cats[cat])})",
             callback_data=f"del_cat_{cat[:30]}"
         ))
+    b.row(InlineKeyboardButton(
+        text=f"🗑 Barchasini butunlay o'chirish ({len(deleted)})",
+        callback_data="purge_all_deleted"
+    ))
     b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
     try:
         await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup())
     except TelegramBadRequest:
         await callback.message.answer("\n".join(lines), reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data == "purge_all_deleted")
+async def purge_all_deleted_confirm(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    count = len(ram.get_deleted_tests())
+    if count == 0:
+        return await callback.answer("O'chirilgan test yo'q.", show_alert=True)
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="✅ Ha, barchasini o'chirish", callback_data="purge_all_deleted_yes"),
+        InlineKeyboardButton(text="❌ Yo'q", callback_data="admin_deleted_tests"),
+    )
+    try:
+        await callback.message.edit_text(
+            f"⚠️ <b>BARCHASINI BUTUNLAY O'CHIRISH</b>\n\n"
+            f"🗑 {count} ta o'chirilgan test bazadan, RAMdan, Supabase'dan "
+            f"<b>butunlay tozalanadi</b>.\n"
+            f"Har biri uchun backup TG kanalda saqlanadi.\n\n"
+            f"Bu amalni qaytarib bo'lmaydi!",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+
+
+@router.callback_query(F.data == "purge_all_deleted_yes")
+async def purge_all_deleted_exec(callback: CallbackQuery):
+    await callback.answer("⏳ Tozalanmoqda...")
+    if not is_admin(callback.from_user.id): return
+    from utils.db import purge_all_deleted_tests
+    count = await purge_all_deleted_tests()
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+    try:
+        await callback.message.edit_text(
+            f"✅ <b>{count} ta</b> o'chirilgan test butunlay tozalandi.\n"
+            f"🗑 Baza, RAM, Supabase — tozalandi.\n"
+            f"💾 Backuplar TG kanalda saqlanadi.",
+            reply_markup=b.as_markup()
+        )
+    except: pass
 
 
 @router.callback_query(F.data.startswith("del_cat_"))
