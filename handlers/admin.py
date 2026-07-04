@@ -63,6 +63,14 @@ async def _show_admin(ev, edit=False):
         await target.answer(text, reply_markup=admin_kb())
 
 
+# Supabase Free tarif bazasi hajmi chegarasi (MB). Agar keyinchalik
+# Pro tarifga o'tilsa, shu yerni yangilash kifoya (Pro = 8192 MB).
+SUPABASE_DB_LIMIT_MB = 500
+
+def _fmt_mb(bytes_val: int) -> float:
+    return round((bytes_val or 0) / 1024 / 1024, 1)
+
+
 # ══ STATISTIKA ════════════════════════════════════════════════
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: CallbackQuery):
@@ -88,8 +96,41 @@ async def admin_stats(callback: CallbackQuery):
         f"🧠 <b>RAM holati:</b>\n"
         f"  💾 {st.get('mb',0)} MB / {st.get('limit_mb',450)} MB ({st.get('pct',0)}%)\n"
         f"  📦 Cached testlar: <b>{st.get('cached_q',0)} ta</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━"
     )
+
+    from utils import tg_db
+    storage = await tg_db.get_storage_stats()
+    if storage:
+        total_mb  = _fmt_mb(storage.get("total_bytes", 0))
+        pct       = round(total_mb / SUPABASE_DB_LIMIT_MB * 100, 1)
+        by_table  = {t["table_name"]: t for t in storage.get("tables", [])}
+        tests_row = by_table.get("tests")
+        text += (
+            f"\n🗄 <b>Supabase (baza) holati:</b>\n"
+            f"  💾 {total_mb} MB / {SUPABASE_DB_LIMIT_MB} MB ({pct}%)\n"
+        )
+        if tests_row:
+            tests_mb = _fmt_mb(tests_row.get("total_bytes", 0))
+            text += f"  📋 <code>tests</code> jadvali: <b>{tests_mb} MB</b> ({len(tests)} ta test)\n"
+            if tests and tests_row.get("total_bytes"):
+                avg_bytes_per_test = tests_row["total_bytes"] / len(tests)
+                remaining_bytes    = max(SUPABASE_DB_LIMIT_MB * 1024 * 1024 - storage.get("total_bytes", 0), 0)
+                approx_more        = int(remaining_bytes / avg_bytes_per_test)
+                text += f"  ➕ Taxminan yana <b>~{approx_more:,}</b> ta test sig'adi\n".replace(",", " ")
+        # Eng katta 3 ta jadval (tests dan tashqari) — qaerga joy ketayotganini ko'rish uchun
+        others = [t for t in storage.get("tables", []) if t["table_name"] != "tests"][:3]
+        if others:
+            text += "  <i>Boshqa yiriklari:</i> " + ", ".join(
+                f"{t['table_name']} ({_fmt_mb(t['total_bytes'])} MB)" for t in others
+            ) + "\n"
+    else:
+        text += (
+            f"\n🗄 <b>Supabase holati:</b> <i>sozlanmagan</i>\n"
+            f"  ⚙️ Yoqish uchun <code>fix_storage_stats.sql</code> ni\n"
+            f"  Supabase SQL Editor'da bir marta ishga tushiring.\n"
+        )
+
+    text += "━━━━━━━━━━━━━━━━━━━━━━━━"
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_panel"))
     try: await callback.message.edit_text(text, reply_markup=b.as_markup())
