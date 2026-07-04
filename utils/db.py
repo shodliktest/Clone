@@ -287,6 +287,27 @@ async def creator_delete_test(tid):
     if tg_db.ready():
         await tg_db.update_test_meta_tg(tid, {"is_deleted": True})
 
+
+async def purge_all_deleted_tests() -> int:
+    """
+    ADMIN: yaratuvchi tomonidan soft-delete qilingan (is_deleted=True)
+    BARCHA testlarni butunlay tozalaydi — bazadan, RAMdan, TG/Supabase'dan.
+    Har biri uchun backup TG kanalda saqlanadi (delete_test() ichida).
+    Supabase bazasi to'lib qolmasligi uchun ishlatiladi.
+    Qaytaradi: nechta test o'chirilgani (int).
+    """
+    deleted_tests = ram.get_deleted_tests()
+    tids = [t.get("test_id") for t in deleted_tests if t.get("test_id")]
+    count = 0
+    for tid in tids:
+        try:
+            await delete_test(tid)
+            count += 1
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"purge_all_deleted_tests xato ({tid}): {e}")
+    return count
+
 def pause_test(tid, paused: bool):
     ram.update_test_meta(tid, {"is_paused": paused})
     from utils import tg_db
