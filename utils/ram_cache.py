@@ -38,6 +38,39 @@ NOTIFS  = ["off", "on"]
 
 MAX_ANALYSIS_PER_USER = 30   # Max 30 test tahlil per user
 
+# ── Har bir "user -> test" statistika yozuvining standart shakli ──
+# Ba'zi eski/qo'lda kiritilgan yozuvlar (Supabase user_stats.data ichida)
+# boshqa formatda bo'lishi mumkin (masalan list, yoki ba'zi maydonlari
+# yo'q dict). _normalize_stat_entry() har doim to'liq, xavfsiz dict
+# qaytaradi — shu orqali pastki barcha funksiyalar (get_user_results,
+# get_test_entry, save_result_to_ram va h.k.) hech qachon KeyError yoki
+# AttributeError olmaydi, formatidan qat'i nazar.
+_DEFAULT_STAT_ENTRY = {
+    "attempts":        0,
+    "all_pcts":        [],
+    "best_score":      0.0,
+    "avg_score":       0.0,
+    "last_at":         "",
+    "passed":          False,
+    "ever_passed":     False,
+    "ever_completed":  False,
+}
+
+def _normalize_stat_entry(e):
+    """Har qanday (eski/buzuq/to'liqsiz) yozuvni joriy standart shaklga
+    keltiradi. Dict bo'lmasa — toza default qaytaradi. Dict bo'lsa —
+    yetishmagan maydonlarni default bilan to'ldiradi, mavjudlarini saqlaydi."""
+    if not isinstance(e, dict):
+        return dict(_DEFAULT_STAT_ENTRY)
+    out = dict(_DEFAULT_STAT_ENTRY)
+    out.update(e)
+    return out
+
+def normalize_stat_entry(e):
+    """_normalize_stat_entry ning ochiq (public) nusxasi — boshqa modullar
+    (masalan utils/db.py) tomonidan ishlatish uchun."""
+    return _normalize_stat_entry(e)
+
 
 def _delete(k):
     with _lck: _RAM.pop(k, None)
@@ -322,12 +355,15 @@ def clear_users_dirty(): _set("users_dirty", False)
 def _stats_key(uid): return f"stats_{uid}"
 
 def get_user_stats_cache(uid):
-    """User stats RAMda bormi — bor bo'lsa qaytaradi"""
+    """User stats RAMda bormi — bor bo'lsa qaytaradi (har bir yozuv normallashtirilgan holda, eski/buzuq formatlardan himoyalangan)"""
     e = _get(_stats_key(str(uid)))
     if not e: return None
     e["last_access"] = datetime.now(UTC)
     _set(_stats_key(str(uid)), e)
-    return e.get("data", {})
+    raw = e.get("data", {})
+    if not isinstance(raw, dict):
+        return {}
+    return {tid: _normalize_stat_entry(v) for tid, v in raw.items()}
 
 def set_user_stats_cache(uid, data, dirty=False):
     """User stats ni RAMga yozish"""
@@ -393,20 +429,14 @@ def save_result_to_ram(user_id, test_id, result, via_link=False):
 
     # ── Stats (lazy cache) ──
     stats = get_user_stats_cache(uid_str) or {}
-    e     = stats.get(test_id, {
-        "attempts":     0,
-        "all_pcts":     [],
-        "best_score":   0.0,
-        "avg_score":    0.0,
-        "last_at":      now_str,
-        "passed":       False,   # oxirgi urinish holati (moslik uchun saqlanadi)
-        "ever_passed":  False,   # HECH BO'LMASA bir marta o'tdimi (hech qachon False'ga qaytmaydi)
-        "ever_completed": False, # HECH BO'LMASA bir marta oxirigacha yetdimi
-    })
+    e     = stats.get(test_id)
+    if not isinstance(e, dict):
+        e = dict(_DEFAULT_STAT_ENTRY)
+        e["last_at"] = now_str
     pct   = float(result.get("percentage", 0))
-    att   = e["attempts"] + 1
-    all_p = e["all_pcts"] + [pct]
-    best  = max(e["best_score"], pct)
+    att   = e.get("attempts", 0) + 1
+    all_p = e.get("all_pcts", []) + [pct]
+    best  = max(e.get("best_score", 0.0), pct)
     avg   = round(sum(all_p) / len(all_p), 1)
     ps    = float(result.get("passing_score", 60))
     this_passed    = pct >= ps
@@ -461,6 +491,9 @@ def get_user_results(uid):
     stats   = get_user_stats_cache(str(uid)) or {}
     history = []
     for tid, e in stats.items():
+        if not isinstance(e, dict):
+            log.warning(f"get_user_results: uid={uid} tid={tid} — buzuq yozuv (dict emas: {type(e).__name__}), o'tkazib yuborildi")
+            continue
         all_pcts = e.get("all_pcts", [])
         history.append({
             "test_id":         tid,
@@ -479,7 +512,8 @@ def get_user_results(uid):
 
 def get_test_entry(uid, tid):
     stats = get_user_stats_cache(str(uid)) or {}
-    return stats.get(tid, {})
+    e = stats.get(tid, {})
+    return e if isinstance(e, dict) else {}
 
 def get_user_stat(uid, tid):
     return get_test_entry(uid, tid)
@@ -533,19 +567,20 @@ def get_all_solvers_for_test_ram_only(tid):
         uid_str = key[6:]
         e       = _get(key, {})
         entry   = e.get("data", {}).get(tid)
-        if not entry:
+        if entry is None:
             continue
+        entry = _normalize_stat_entry(entry)
         user = users.get(uid_str, {})
         result.append({
             "uid":        uid_str,
             "name":       user.get("name", f"User {uid_str}"),
             "username":   user.get("username", ""),
-            "attempts":   entry.get("attempts", 0),
-            "all_pcts":   entry.get("all_pcts", []),
-            "best_score": entry.get("best_score", 0.0),
-            "avg_score":  entry.get("avg_score", 0.0),
-            "last_at":    entry.get("last_at", ""),
-            "started":    entry.get("started", False),
+            "attempts":   entry["attempts"],
+            "all_pcts":   entry["all_pcts"],
+            "best_score": entry["best_score"],
+            "avg_score":  entry["avg_score"],
+            "last_at":    entry["last_at"],
+            "started":    entry.get("started", entry["attempts"] > 0),
         })
     # Avval tugatganlar (yuqori ball), keyin 0-natijalilar
     result.sort(key=lambda x: (x["attempts"] > 0, x["best_score"]), reverse=True)
@@ -575,7 +610,11 @@ def update_global_leaderboard():
         e       = _get(key, {})
         data    = e.get("data", {})
         if not data: continue
-        all_scores = [v["best_score"] for v in data.values() if v.get("attempts", 0) > 0]
+        all_scores = []
+        for v in data.values():
+            ns = _normalize_stat_entry(v)
+            if ns["attempts"] > 0:
+                all_scores.append(ns["best_score"])
         if not all_scores: continue
         avg   = round(sum(all_scores) / len(all_scores), 1)
         total = len(all_scores)
@@ -650,12 +689,13 @@ def get_daily():
         data    = e.get("data", {})
         by_test = {}
         for tid, s in data.items():
+            s = _normalize_stat_entry(s)
             by_test[tid] = {
                 "attempts":      s["attempts"],
                 "all_pcts":      s["all_pcts"],
                 "best_score":    s["best_score"],
                 "avg_score":     s["avg_score"],
-                "last_at":       s.get("last_at", ""),
+                "last_at":       s["last_at"],
                 "last_analysis": [],
                 "last_result":   {},
                 "first_result":  None,

@@ -426,24 +426,27 @@ async def get_test_solvers_full(test_id):
     for r in rows:
         tg_id = r.get("tg_id")
         data  = r.get("data") or {}
-        entry = data.get(str(test_id)) or data.get(test_id)
-        if not entry:
+        entry = data.get(str(test_id))
+        if entry is None:
+            entry = data.get(test_id)
+        if entry is None:
             continue
+        entry   = ram.normalize_stat_entry(entry)
         uid_str = str(tg_id)
         user    = users.get(uid_str, {})
         result.append({
             "uid":            uid_str,
             "name":           user.get("name", f"User {uid_str}"),
             "username":       user.get("username", ""),
-            "attempts":       entry.get("attempts", 0),
-            "all_pcts":       entry.get("all_pcts", []),
-            "best_score":     entry.get("best_score", 0.0),
-            "avg_score":      entry.get("avg_score", 0.0),
-            "last_at":        entry.get("last_at", ""),
-            "passed":         entry.get("passed", False),
-            "ever_passed":    entry.get("ever_passed", entry.get("passed", False)),
+            "attempts":       entry["attempts"],
+            "all_pcts":       entry["all_pcts"],
+            "best_score":     entry["best_score"],
+            "avg_score":      entry["avg_score"],
+            "last_at":        entry["last_at"],
+            "passed":         entry["passed"],
+            "ever_passed":    entry["ever_passed"] or entry["passed"],
             "ever_completed": entry.get("ever_completed", True),
-            "started":        entry.get("attempts", 0) > 0,
+            "started":        entry["attempts"] > 0,
         })
     result.sort(key=lambda x: (x["attempts"] > 0, x["best_score"]), reverse=True)
     return result
