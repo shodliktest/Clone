@@ -167,9 +167,12 @@ def get_test_meta_any(tid):
                  if t.get("test_id") == tid), {})
 
 def get_deleted_tests():
-    """Yaratuvchi o'chirgan testlar (admin ko'rishi uchun)"""
+    """Foydalanuvchilarga ko'rinmaydigan BARCHA testlar (admin ko'rishi uchun):
+    - yaratuvchi o'chirgan (is_deleted=True)
+    - avval admin tomonidan o'chirilgan-u bazada qolib ketgan (is_active=False)
+    """
     return [t for t in _get("tests_meta", [])
-            if t.get("is_deleted", False) and t.get("is_active", True)]
+            if t.get("is_deleted", False) or not t.get("is_active", True)]
 
 def add_test_meta(meta):
     m = [x for x in _get("tests_meta", []) if x.get("test_id") != meta.get("test_id")]
