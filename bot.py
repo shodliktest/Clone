@@ -42,57 +42,62 @@ class ForceJoinMiddleware(BaseMiddleware):
     SKIP_COMMANDS  = {"/start"}
 
     async def __call__(self, handler, event, data):
+        blocked = False
         try:
             from utils.force_join import (
                 is_force_enabled, check_user_joined, send_join_request
             )
             from config import ADMIN_IDS
 
-            if not is_force_enabled():
-                return await handler(event, data)
+            if is_force_enabled():
+                # Chat turini aniqlash - GURUHDA ISHLAMAYDI
+                chat_type  = "private"
+                uid        = None
+                skip_check = False
 
-            # Chat turini aniqlash - GURUHDA ISHLAMAYDI
-            chat_type = "private"
-            uid       = None
+                if isinstance(event, Message):
+                    chat_type = event.chat.type if event.chat else "private"
+                    uid       = event.from_user.id if event.from_user else None
+                    # /start o'zi tekshiradi
+                    if event.text and event.text.startswith("/start"):
+                        skip_check = True
+                elif isinstance(event, CallbackQuery):
+                    chat_type = (event.message.chat.type
+                                 if event.message and event.message.chat
+                                 else "private")
+                    uid       = event.from_user.id if event.from_user else None
+                    if event.data in self.SKIP_CALLBACKS:
+                        skip_check = True
 
-            if isinstance(event, Message):
-                chat_type = event.chat.type if event.chat else "private"
-                uid       = event.from_user.id if event.from_user else None
-                # /start o'zi tekshiradi
-                if event.text and event.text.startswith("/start"):
-                    return await handler(event, data)
-            elif isinstance(event, CallbackQuery):
-                chat_type = (event.message.chat.type
-                             if event.message and event.message.chat
-                             else "private")
-                uid       = event.from_user.id if event.from_user else None
-                if event.data in self.SKIP_CALLBACKS:
-                    return await handler(event, data)
+                # GURUH — tekshirmasdan o'tkazish / Admin tekshirilmaydi
+                if chat_type in ("group", "supergroup", "channel"):
+                    skip_check = True
+                elif uid and uid in ADMIN_IDS:
+                    skip_check = True
 
-            # GURUH — tekshirmasdan o'tkazish
-            if chat_type in ("group", "supergroup", "channel"):
-                return await handler(event, data)
-
-            # Admin tekshirilmaydi
-            if uid and uid in ADMIN_IDS:
-                return await handler(event, data)
-
-            # Private chatda tekshirish
-            if uid:
-                not_joined = await check_user_joined(event.bot, uid)
-                if not_joined:
-                    await send_join_request(event, not_joined, event.bot)
-                    if isinstance(event, CallbackQuery):
-                        await event.answer(
-                            "❌ Avval kanallarga a'zo bo'ling!",
-                            show_alert=True
-                        )
-                    return   # Bloklaymiz
+                # Private chatda tekshirish
+                if not skip_check and uid:
+                    not_joined = await check_user_joined(event.bot, uid)
+                    if not_joined:
+                        await send_join_request(event, not_joined, event.bot)
+                        if isinstance(event, CallbackQuery):
+                            await event.answer(
+                                "❌ Avval kanallarga a'zo bo'ling!",
+                                show_alert=True
+                            )
+                        blocked = True   # Bloklaymiz — handler chaqirilmaydi
 
         except Exception as _fje:
             import logging
-            logging.getLogger(__name__).warning(f"ForceJoinMiddleware: {_fje}")
+            logging.getLogger(__name__).warning(f"ForceJoinMiddleware tekshiruvida xato (o'tkazib yuborildi): {_fje}")
+            # Tekshiruvning o'zi xato bersa ham foydalanuvchini bloklamaymiz.
 
+        if blocked:
+            return
+        # Handler MUTLAQO SHU YERDA, FAQAT BIR MARTA chaqiriladi — try/except
+        # tashqarisida, shunday qilib pastki handlerning haqiqiy xatosi
+        # (masalan tests.py/ram_cache.py bug) shu yerda yutilib qolmaydi
+        # va handler ikki marta ishga tushmaydi.
         return await handler(event, data)
 
 
