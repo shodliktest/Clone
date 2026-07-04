@@ -308,6 +308,34 @@ async def purge_all_deleted_tests() -> int:
             logging.getLogger(__name__).error(f"purge_all_deleted_tests xato ({tid}): {e}")
     return count
 
+
+async def purge_ghost_tests() -> int:
+    """
+    ESKI XATO OQIBATINI TOZALASH: avvalgi delete_test_tg() faqat
+    is_active=False deb belgilab qo'yar edi, Supabase qatorini
+    o'chirmas edi. Shu sababli "butunlay o'chirilgan" deb hisoblangan
+    testlar bazada "arvoh" bo'lib qolgan va bot qayta ishga tushganda
+    RAMga qayta yuklanaverardi.
+
+    Bu funksiya hozircha is_active=False holida "osilib qolgan"
+    BARCHA testlarni Supabase'dan va RAMdan butunlay tozalaydi.
+    Qaytaradi: nechta test tozalanganini (int).
+    """
+    from utils import tg_db
+    ghosts = [t for t in ram.get_all_tests_meta() if not t.get("is_active", True)]
+    tids = [t.get("test_id") for t in ghosts if t.get("test_id")]
+    count = 0
+    for tid in tids:
+        try:
+            ram.delete_test_from_ram(tid)
+            if tg_db.ready():
+                await tg_db.delete_test_tg(tid)
+            count += 1
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"purge_ghost_tests xato ({tid}): {e}")
+    return count
+
 def pause_test(tid, paused: bool):
     ram.update_test_meta(tid, {"is_paused": paused})
     from utils import tg_db

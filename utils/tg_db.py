@@ -326,17 +326,22 @@ async def save_deleted_test_backup(test: dict):
 
 
 async def delete_test_tg(tid: str):
-    """Testni 'soft delete' qiladi (is_active=False) — ma'lumot bazada qoladi."""
+    """Testni Supabase'dan BUTUNLAY o'chiradi (qator butunlay olib tashlanadi).
+
+    Eski versiya faqat is_active=False deb belgilar edi — qator bazada
+    abadiy qolib, Supabase to'lib qolishiga sabab bo'lardi. Endi qator
+    haqiqatda DELETE qilinadi.
+    """
     if not ready():
         return
     try:
-        await sb.update("tests", "test_id", tid, {"is_active": False})
+        await sb.delete("tests", "test_id", tid)
     except Exception as e:
         log.error(f"delete_test_tg({tid}): {e}")
 
     _tests_cache.pop(tid, None)
     from utils import ram_cache as ram
-    ram.update_test_meta(tid, {"is_active": False})
+    ram.delete_test_from_ram(tid)
     mark_stats_dirty()
 
 
