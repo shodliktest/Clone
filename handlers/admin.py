@@ -718,9 +718,10 @@ async def admin_restore_test(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     tid = callback.data[12:]
     from utils import tg_db
-    ram.update_test_meta(tid, {"is_deleted": False})
+    updates = {"is_deleted": False, "is_active": True}
+    ram.update_test_meta(tid, updates)
     if tg_db.ready():
-        await tg_db.update_test_meta_tg(tid, {"is_deleted": False})
+        await tg_db.update_test_meta_tg(tid, updates)
     meta = ram.get_test_meta_any(tid) or {}
     try:
         await callback.message.edit_text(
