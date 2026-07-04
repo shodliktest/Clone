@@ -1063,6 +1063,20 @@ async def exit_forward_mode_cb(callback: CallbackQuery):
     except TelegramBadRequest: pass
 
 
+@router.message(Command("done"), AdminPanel.waiting_json)
+async def import_json_done(message: Message, state: FSMContext):
+    d = await state.get_data()
+    n = d.get("_import_json_count", 0)
+    await state.clear()
+    await message.answer(f"✅ <b>Import yakunlandi.</b>\n\n📋 Jami saqlangan: <b>{n}</b> ta test.")
+
+
+@router.message(Command("cancel"), AdminPanel.waiting_json)
+async def import_json_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ JSON import bekor qilindi.")
+
+
 @router.message(Command("cancel"))
 async def cancel_forward(message: Message):
     uid = message.from_user.id
@@ -1901,3 +1915,89 @@ async def adm_find_page_cb(callback: CallbackQuery):
         edit=True,
         uid=uid
     )
+
+
+# ══ JSON IMPORT — tayyor test JSON fayllarini bazaga yuklash ═══
+#
+# Format: bitta JSON = bitta test, quyidagi kabi tuzilish bilan:
+#   {"title": "...", "category": "...", "questions": [
+#       {"type": "multiple_choice", "question": "...", "options": [...],
+#        "correct": "...", "explanation": "...", "accepted_answers": [],
+#        "points": 1}, ...
+#   ], ...}
+# (bot avval eksport qilgan yoki shu tuzilishga mos har qanday JSON)
+#
+# /import_json bosilgach admin bir nechta .json faylni birma-bir
+# yuboradi — har biri alohida test sifatida darhol saqlanadi.
+# /done yoki /cancel bilan rejimdan chiqiladi.
+
+@router.message(Command("import_json"))
+async def cmd_import_json(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.set_state(AdminPanel.waiting_json)
+    await state.update_data(_import_json_count=0)
+    await message.answer(
+        "📥 <b>JSON import rejimi</b>\n\n"
+        "Tayyor test JSON fayllarini birma-bir yuboring —\n"
+        "har biri alohida test sifatida <b>darhol</b> saqlanadi.\n\n"
+        "📌 Har bir fayl <code>questions</code> ro'yxatini o'z ichiga\n"
+        "olishi kerak (bot ichki formatiga mos).\n\n"
+        "✅ Tugatgach: /done\n"
+        "❌ Bekor qilish: /cancel"
+    )
+
+
+@router.message(F.document, AdminPanel.waiting_json)
+async def import_json_file(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    doc = message.document
+    if not doc.file_name.lower().endswith(".json"):
+        return await message.answer("❌ Faqat <b>.json</b> fayllar qabul qilinadi. (/done — tugatish)")
+
+    status = await message.answer(f"⏳ <code>{doc.file_name}</code> tahlil qilinmoqda...")
+    try:
+        file_obj = await message.bot.get_file(doc.file_id)
+        buf = await message.bot.download_file(file_obj.file_path)
+        raw = buf.read().decode("utf-8")
+    except Exception as e:
+        return await status.edit_text(f"❌ Faylni yuklab bo'lmadi: {e}")
+
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        return await status.edit_text(f"❌ JSON formatida xato:\n<code>{e}</code>")
+
+    from utils.db import import_test_from_json, validate_json_test
+    ok, err = validate_json_test(data)
+    if not ok:
+        return await status.edit_text(
+            f"❌ <b>{doc.file_name}</b> — noto'g'ri format:\n<code>{err}</code>"
+        )
+
+    try:
+        tid = await import_test_from_json(
+            message.from_user.id, data,
+            creator_name=message.from_user.full_name or "",
+            creator_username=message.from_user.username or "",
+        )
+    except Exception as e:
+        log.error(f"import_json_file xato: {e}", exc_info=True)
+        return await status.edit_text(f"❌ Saqlashda xato:\n<code>{e}</code>")
+
+    d = await state.get_data()
+    n = d.get("_import_json_count", 0) + 1
+    await state.update_data(_import_json_count=n)
+
+    qc = len(data.get("questions", []))
+    bu = (await message.bot.me()).username
+    await status.edit_text(
+        f"✅ <b>{n}-test saqlandi!</b>\n\n"
+        f"📝 {data.get('title', 'Nomsiz')}\n"
+        f"🆔 <code>{tid}</code>\n"
+        f"📋 {qc} ta savol\n"
+        f"🔗 <code>https://t.me/{bu}?start={tid}</code>\n\n"
+        f"➡️ Keyingi JSON faylni yuboring, yoki /done"
+    )
+
