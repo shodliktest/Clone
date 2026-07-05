@@ -1774,10 +1774,7 @@ async def adm_loop_restart_cb(callback: CallbackQuery):
                 except: pass
                 break
 
-        # web_sync_watchdog restart qilish (o'zi ichidan web_sync ni qaytadan boshlaydi)
-        if loop_name == "web_sync_watchdog":
-            asyncio.create_task(_bot_mod._web_sync_watchdog(), name="web_sync_watchdog")
-        elif loop_name == "auto_flush":
+        if loop_name == "auto_flush":
             from utils import tg_db
             asyncio.create_task(tg_db.auto_flush_loop(), name="auto_flush")
         elif loop_name == "midnight_flush":
@@ -1786,7 +1783,7 @@ async def adm_loop_restart_cb(callback: CallbackQuery):
             asyncio.create_task(_bot_mod._cache_cleanup_loop(), name="cache_cleanup")
 
         if hasattr(_bot_mod, "_beat"):
-            _bot_mod._beat(loop_name.replace("_watchdog", "").replace("web_sync_", "web_sync"), "restarted")
+            _bot_mod._beat(loop_name, "restarted")
 
     except Exception as e:
         await callback.message.answer(f"❌ Restart xatosi: {e}")
@@ -1818,8 +1815,7 @@ async def _show_loops(ev, edit=False):
     }
 
     LOOP_LABELS = {
-        "web_sync":     "🔄 Web Sync",
-        "auto_flush":   "💾 Auto Flush",
+        "auto_flush":     "💾 Supabase Auto Flush",
         "midnight_flush": "🌙 Midnight Flush",
         "cache_cleanup":  "🧹 Cache Cleanup",
     }
@@ -1828,7 +1824,7 @@ async def _show_loops(ev, edit=False):
     b = InlineKeyboardBuilder()
 
     # Barcha looplar
-    loop_keys = ["web_sync", "auto_flush", "midnight_flush", "cache_cleanup"]
+    loop_keys = ["auto_flush", "midnight_flush", "cache_cleanup"]
     for key in loop_keys:
         h     = health.get(key, {})
         label = LOOP_LABELS.get(key, key)
@@ -1856,10 +1852,9 @@ async def _show_loops(ev, edit=False):
         )
         # Qayta boshlash tugmasi faqat muammoli looplarda
         if status in ("error", "timeout", "cancelled", "unknown"):
-            watchdog_key = "web_sync_watchdog" if key == "web_sync" else key
             b.row(InlineKeyboardButton(
                 text=f"♻️ {label} restart",
-                callback_data=f"adm_loop_restart_{watchdog_key}"
+                callback_data=f"adm_loop_restart_{key}"
             ))
 
     # asyncio task holati
@@ -1868,7 +1863,7 @@ async def _show_loops(ev, edit=False):
     task_names = {t.get_name() for t in tasks if not t.done()}
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"⚙️ Aktiv tasklar: <b>{len(tasks)}</b>")
-    for expected in ["web_sync_watchdog", "auto_flush", "midnight_flush", "cache_cleanup"]:
+    for expected in ["auto_flush", "midnight_flush", "cache_cleanup"]:
         exists = expected in task_names
         lines.append(f"  {'✅' if exists else '❌'} {expected}")
 

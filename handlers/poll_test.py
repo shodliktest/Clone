@@ -285,6 +285,10 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
         "is_demo": is_demo,
     })
 
+    # Live monitor uchun (ilgari faqat inline rejim ro'yxatga olinardi)
+    from utils.ram_cache import live_start
+    live_start(uid, test, mode="poll", chat_id=chat_id)
+
     try:
         title_txt = f"📝 <b>{test.get('title','?')}</b>"
         if is_demo:
@@ -323,6 +327,10 @@ async def _send_poll(bot, cid, state):
         return
     q  = qs[idx]
     pt = d.get("pt", 30)
+
+    from utils.ram_cache import live_update
+    live_update(d.get("uid", cid), idx)
+
 
     opts = []
     for opt in q.get("options", []):
@@ -508,6 +516,8 @@ async def cancel_poll(callback: CallbackQuery, state: FSMContext):
         d["is_partial"] = True
         await _finish_poll(callback.bot, cid, state, d)
     else:
+        from utils.ram_cache import live_end
+        live_end(uid)
         await state.clear()
         await callback.bot.send_message(
             cid, "❌ <b>Test to'xtatildi.</b>",
@@ -558,6 +568,9 @@ async def _finish_poll(bot, cid, state, d):
     elapsed  = int(time.time() - d.get("t0", time.time()))
     uid      = d.get("uid", cid)
     via_link = d.get("via_link", False)
+
+    from utils.ram_cache import live_end
+    live_end(uid)
     is_demo  = d.get("is_demo", False)
     _cancel_timer(cid)
 
