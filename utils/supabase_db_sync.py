@@ -11,7 +11,10 @@ bazasiga ikkita mustaqil yo'l bilan kirishadi — bu eng oddiy va eng
 ishonchli arxitektura.
 """
 
+import logging
 import streamlit as st
+
+log = logging.getLogger("supabase_db_sync")
 
 
 @st.cache_resource
@@ -23,12 +26,35 @@ def _get_client():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+def _run_with_retry(fn, what: str):
+    """
+    Streamlit serveri uzoq vaqt (soatlab) ishlab turadi, va @st.cache_resource
+    bilan keshlangan Supabase klientining ichidagi HTTP ulanishi ba'zan
+    uzoq bo'sh turishdan keyin "stale" bo'lib qoladi — bunda so'rov xato
+    beradi. Ilgari bu xato JIMGINA yutilib, foydalanuvchiga shunchaki
+    "Test topilmadi" ko'rsatilar edi (garchi test Supabase'da bor bo'lsa ham).
+
+    Endi: xato logga chiqadi VA klient keshi tozalanib, BITTA marta
+    yangi klient bilan qayta urinib ko'riladi.
+    """
+    try:
+        return fn()
+    except Exception as e:
+        log.warning(f"{what}: 1-urinish muvaffaqiyatsiz ({e}) — klient yangilanmoqda...")
+        try:
+            _get_client.clear()  # keshlangan (ehtimol stale) klientni tashlaymiz
+            return fn()
+        except Exception as e2:
+            log.error(f"{what}: qayta urinish ham muvaffaqiyatsiz: {e2}")
+            raise
+
+
 def get_test_full_sync(tid: str) -> dict:
     """Bitta testni (meta + savollar) to'g'ridan-to'g'ri Supabase'dan o'qiydi."""
-    client = _get_client()
-    if not client:
-        return {}
-    try:
+    def _do():
+        client = _get_client()
+        if not client:
+            return {}
         res = client.table("tests").select("*").eq("test_id", tid).limit(1).execute()
         rows = res.data or []
         if not rows:
@@ -39,6 +65,8 @@ def get_test_full_sync(tid: str) -> dict:
         full["title"]     = row.get("title", full.get("title", ""))
         full["questions"] = row.get("questions") or []
         return full
+    try:
+        return _run_with_retry(_do, f"get_test_full_sync({tid})")
     except Exception:
         return {}
 
@@ -73,10 +101,10 @@ def save_test_full_sync(test: dict) -> bool:
 
 def get_tests_meta_sync() -> list:
     """Barcha faol testlar ro'yxati (savollarsiz)."""
-    client = _get_client()
-    if not client:
-        return []
-    try:
+    def _do():
+        client = _get_client()
+        if not client:
+            return []
         res = client.table("tests").select(
             "test_id,title,meta,question_count,is_active,is_paused,solve_count,avg_score"
         ).eq("is_active", True).execute()
@@ -95,6 +123,8 @@ def get_tests_meta_sync() -> list:
             })
             out.append(m)
         return out
+    try:
+        return _run_with_retry(_do, "get_tests_meta_sync")
     except Exception:
         return []
 
