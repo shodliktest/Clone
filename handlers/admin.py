@@ -334,6 +334,50 @@ async def purge_ghost_all_exec(callback: CallbackQuery):
         )
     except: pass
 
+
+@router.callback_query(F.data == "purge_user_stats")
+async def purge_user_stats_confirm(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="✅ Ha, tozalash", callback_data="purge_user_stats_yes"),
+        InlineKeyboardButton(text="❌ Yo'q", callback_data="admin_panel"),
+    )
+    try:
+        await callback.message.edit_text(
+            f"⚠️ <b>TAHLIL/TARIXNI BUTUNLAY TOZALASH</b>\n\n"
+            f"🧹 BARCHA foydalanuvchilarning test yechish tarixi, foizlari "
+            f"va tahlillari (<code>user_stats</code>) butunlay o'chiriladi.\n\n"
+            f"✅ <b>Saqlanib qoladi:</b>\n"
+            f"• Testlar va ularning meta ma'lumotlari\n"
+            f"• Testlarning umumiy statistikasi (necha marta yechilgan, o'rtacha ball)\n"
+            f"• Foydalanuvchilar ro'yxati (profil, rol, umumiy hisoblagichlar)\n\n"
+            f"❌ <b>Yo'qoladi:</b>\n"
+            f"• Har bir foydalanuvchining har bir test bo'yicha batafsil tarixi\n"
+            f"• \"Oxirgi tahlil\" ma'lumotlari\n\n"
+            f"Bu amalni qaytarib bo'lmaydi!",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+
+
+@router.callback_query(F.data == "purge_user_stats_yes")
+async def purge_user_stats_exec(callback: CallbackQuery):
+    await callback.answer("⏳ Tozalanmoqda...")
+    if not is_admin(callback.from_user.id): return
+    from utils import tg_db
+    count = await tg_db.purge_all_user_stats()
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+    try:
+        await callback.message.edit_text(
+            f"✅ <b>{count} ta</b> foydalanuvchining tahlil/tarix yozuvi butunlay tozalandi.\n"
+            f"Testlar, test statistikasi va foydalanuvchilar ro'yxati tegilmadi.",
+            reply_markup=b.as_markup()
+        )
+    except: pass
+
 async def _show_admin_test_cats(msg, edit=False):
     tests = ram.get_all_tests_meta()
     cats  = {}
