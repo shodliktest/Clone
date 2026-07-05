@@ -305,7 +305,10 @@ def admin_kb():
     )
     b.row(
         InlineKeyboardButton(text="🔍 Test qidirish", callback_data="adm_find_test"),
-        InlineKeyboardButton(text="🏠 Menyu",         callback_data="main_menu"),
+        InlineKeyboardButton(text="🧹 Tahlil/Tarix tozalash", callback_data="purge_user_stats"),
+    )
+    b.row(
+        InlineKeyboardButton(text="🏠 Menyu", callback_data="main_menu"),
     )
     return b.as_markup()
 
