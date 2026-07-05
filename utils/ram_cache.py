@@ -418,6 +418,21 @@ def clear_expired_stats():
     return removed
 
 
+def clear_all_user_stats() -> int:
+    """
+    Barcha foydalanuvchi tahlil/tarix ma'lumotlarini (stats_* va analysis_*)
+    RAMdan butunlay tozalaydi. Testlar (tests_meta) va foydalanuvchilar
+    ro'yxati (users) ga tegilmaydi — faqat statistika/tahlil keshi tozalanadi.
+    """
+    with _lck:
+        keys = [k for k in list(_RAM) if k.startswith("stats_") or k.startswith("analysis_")]
+        for k in keys:
+            del _RAM[k]
+    if keys:
+        log.info(f"RAM: {len(keys)} ta foydalanuvchi tahlil/tarix yozuvi tozalandi")
+    return len(keys)
+
+
 # ══ NATIJALAR ══════════════════════════════════════════════════
 
 def save_result_to_ram(user_id, test_id, result, via_link=False):

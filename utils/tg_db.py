@@ -191,6 +191,39 @@ async def _load_user_stats_to_ram():
     log.info(f"user_stats yuklandi: {total} ta")
 
 
+async def purge_all_user_stats() -> int:
+    """
+    Foydalanuvchilarning BARCHA tahlil/tarix ma'lumotlarini (user_stats
+    jadvali — har bir foydalanuvchining har bir test bo'yicha urinish
+    tarixi, foizlari va h.k.) Supabase'dan butunlay tozalaydi.
+
+    TEGILMAYDI:
+    - `tests` jadvali (test meta, solve_count, avg_score) — bular testning
+      o'zida saqlanadi, user_stats'ga bog'liq emas.
+    - `users` jadvali (asosiy foydalanuvchilar ro'yxati, rol, is_blocked,
+      total_tests/avg_score kabi umumiy hisoblagichlar).
+
+    Qaytaradi: nechta foydalanuvchi yozuvi Supabase'dan o'chirilgani (int).
+    """
+    from utils import ram_cache as ram
+    count = 0
+    if ready():
+        try:
+            rows = await sb.select("user_stats", columns="tg_id")
+            tg_ids = [r["tg_id"] for r in rows if r.get("tg_id") is not None]
+            for tg_id in tg_ids:
+                try:
+                    await sb.delete("user_stats", "tg_id", tg_id)
+                    count += 1
+                except Exception as e:
+                    log.error(f"purge_all_user_stats delete({tg_id}): {e}")
+        except Exception as e:
+            log.error(f"purge_all_user_stats select: {e}")
+
+    ram.clear_all_user_stats()
+    return count
+
+
 async def _load_blocked_to_ram():
     from utils import ram_cache as ram
     try:
