@@ -284,8 +284,8 @@ def admin_kb():
         InlineKeyboardButton(text="🗑 O'chirilganlar", callback_data="admin_deleted_tests"),
     )
     b.row(
-        InlineKeyboardButton(text="⚡ RAM → TG", callback_data="adm_flush"),
-        InlineKeyboardButton(text="🔄 TG → RAM", callback_data="adm_refresh"),
+        InlineKeyboardButton(text="⚡ RAM → Supabase", callback_data="adm_flush"),
+        InlineKeyboardButton(text="🔄 Supabase → RAM", callback_data="adm_refresh"),
     )
     b.row(
         InlineKeyboardButton(text="💾 JSON export", callback_data="adm_export_json"),
