@@ -332,7 +332,6 @@ async def main():
         asyncio.create_task(_midnight_flush_loop(bot),      name="midnight_flush"),
         asyncio.create_task(_users_auto_flush_loop(bot),    name="users_flush"),
         asyncio.create_task(_cache_cleanup_loop(),          name="cache_cleanup"),
-        asyncio.create_task(_web_sync_watchdog(),           name="web_sync_watchdog"),
         asyncio.create_task(tg_db.auto_flush_loop(),        name="auto_flush"),
     ]
 
@@ -433,167 +432,18 @@ async def _users_auto_flush_loop(bot):
     pass
 
 
-async def _web_sync_watchdog():
-    """
-    web_sync_loop ni kuzatib turadi.
-    - Loop to'xtab qolsa → qayta ishga tushiradi
-    - 15 daqiqa heartbeat kelmasa → o'ldiradi va qayta boshlaydi
-    - Holat _LOOP_HEALTH ga yoziladi
-    """
-    from utils import tg_db
-    _beat("web_sync", "starting")
-    HEARTBEAT_TIMEOUT = 900  # 15 daqiqa
-
-    while True:
-        try:
-            _beat("web_sync", "running")
-            task = asyncio.create_task(_web_sync_with_beat(tg_db))
-            # Heartbeat kuzatuvchi
-            while not task.done():
-                await asyncio.sleep(60)
-                h = _LOOP_HEALTH.get("web_sync", {})
-                last = h.get("last_beat", _time.time())
-                if _time.time() - last > HEARTBEAT_TIMEOUT:
-                    log.warning("⚠️ web_sync_loop javob bermayapti — majburan qayta boshlanadi")
-                    _beat("web_sync", "timeout", "Heartbeat timeout")
-                    task.cancel()
-                    try: await task
-                    except: pass
-                    break
-
-            if not task.cancelled():
-                log.warning("⚠️ web_sync_loop tugadi — 10s dan keyin qayta boshlanadi")
-            _beat("web_sync", "restarting")
-            await asyncio.sleep(10)
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            _beat("web_sync", "error", str(e))
-            log.error(f"web_sync_watchdog xato: {e} — 30s dan keyin qayta boshlanadi")
-            await asyncio.sleep(30)
-
-
-async def _web_sync_with_beat(tg_db):
-    """web_sync_loop — heartbeat bilan o'ralgan versiya"""
-    from utils import tg_db as _tg
-    _beat("web_sync", "running")
-    consecutive_errors = 0
-    last_sig           = None
-
-    while True:
-        try:
-            await asyncio.sleep(60)
-            _beat("web_sync", "ok")  # ← har daqiqada yurak urishi
-
-            if not _tg.ready():
-                continue
-
-            from utils import ram_cache as ram
-
-            try:
-                chat = await asyncio.wait_for(_tg._bot.get_chat(_tg._cid), timeout=10)
-                pin  = getattr(chat, "pinned_message", None)
-                if not pin:
-                    continue
-                doc     = getattr(pin, "document", None)
-                doc_uid = getattr(doc, "file_unique_id", None) if doc else None
-                cur_sig = (pin.message_id, doc_uid, getattr(pin, "edit_date", None))
-            except Exception as e:
-                _beat("web_sync", "warn", f"get_chat: {e}")
-                consecutive_errors += 1
-                continue
-
-            if cur_sig == last_sig:
-                continue
-            last_sig = cur_sig
-
-            try:
-                new_meta = await asyncio.wait_for(_tg._read_pinned_index(), timeout=20)
-            except asyncio.TimeoutError:
-                _beat("web_sync", "warn", "read_pinned timeout")
-                consecutive_errors += 1
-                continue
-            if not new_meta:
-                continue
-            consecutive_errors = 0
-
-            new_metas    = []
-            new_test_ids = {}
-            for ch in new_meta.get("index_chunks", []):
-                fid  = ch.get("fid")
-                mid  = ch.get("msg_id")
-                data = {}
-                if fid:  data = await _tg._read_file(fid)
-                if not data and mid: data = await _tg._download_doc(mid)
-                for m in data.get("tests_meta", []):
-                    if not any(x.get("test_id") == m.get("test_id") for x in new_metas):
-                        new_metas.append(m)
-                for k, v in data.items():
-                    if k.startswith("test_"):
-                        new_test_ids[k] = v
-
-            if "tests_meta" in new_meta and "index_chunks" not in new_meta:
-                new_metas    = new_meta.get("tests_meta", [])
-                new_test_ids = {k: v for k, v in new_meta.items() if k.startswith("test_")}
-
-            ram_ids = {t.get("test_id") for t in ram.get_all_tests_meta()}
-            added = updated = 0
-            for meta in new_metas:
-                tid = meta.get("test_id")
-                if not tid: continue
-                new_msg_id  = new_test_ids.get(f"test_{tid}")
-                old_msg_id  = _tg._index.get(f"test_{tid}")
-                msg_changed = new_msg_id and str(new_msg_id) != str(old_msg_id or "")
-                if tid not in ram_ids:
-                    clean = {k: v for k, v in meta.items() if k != "questions"}
-                    ram.add_test_meta(clean)
-                    if not any(m.get("test_id") == tid for m in _tg._index.get("tests_meta", [])):
-                        _tg._index.setdefault("tests_meta", []).insert(0, clean)
-                    if new_msg_id:
-                        _tg._index[f"test_{tid}"] = new_msg_id
-                    added += 1
-                    if meta.get("source", "") in ("web", "web_split"):
-                        asyncio.create_task(_tg._notify_web_test(meta, tid))
-                elif msg_changed:
-                    old_meta = next((m for m in ram.get_all_tests_meta() if m.get("test_id") == tid), {})
-                    old_qc   = old_meta.get("question_count", 0)
-                    _tg._tests_cache.pop(tid, None)
-                    ram.invalidate_cached_questions(tid)
-                    _tg._index[f"test_{tid}"] = new_msg_id
-                    _tg._index.pop(f"fid_{old_msg_id}", None)
-                    clean = {k: v for k, v in meta.items() if k != "questions"}
-                    ram.update_test_meta(tid, clean)
-                    updated += 1
-                    new_qc = meta.get("question_count", 0)
-                    asyncio.create_task(_tg._notify_updated_test(meta, tid, old_qc, new_qc))
-
-            if added or updated:
-                log.info(f"Web sync: {added} yangi, {updated} yangilangan test")
-                _tg.mark_index_dirty()
-                try:
-                    await _tg._save_index()
-                    try:
-                        chat2 = await _tg._bot.get_chat(_tg._cid)
-                        pin2  = getattr(chat2, "pinned_message", None)
-                        if pin2:
-                            doc2 = getattr(pin2, "document", None)
-                            uid2 = getattr(doc2, "file_unique_id", None) if doc2 else None
-                            last_sig = (pin2.message_id, uid2, getattr(pin2, "edit_date", None))
-                    except Exception: pass
-                except Exception as _se:
-                    log.warning(f"Web sync: index saqlashda xato: {_se}")
-
-        except asyncio.CancelledError:
-            _beat("web_sync", "cancelled")
-            break
-        except Exception as e:
-            consecutive_errors += 1
-            _beat("web_sync", "error", str(e))
-            log.error(f"web_sync_loop: {e}")
-            if consecutive_errors >= 5:
-                await asyncio.sleep(900)
-                consecutive_errors = 0
+# ── ESKI "web_sync" LOOP OLIB TASHLANDI ──────────────────────
+# Bu loop Supabase'ga o'tishdan OLDINGI arxitekturaga tegishli edi:
+# u Telegram kanalidagi "pinned message"dagi index faylini o'qib,
+# yangi (webdan qo'shilgan) testlarni RAMga qo'shar edi.
+#
+# Supabase'ga o'tgandan keyin bot ham, Streamlit (web) ham BIR XIL
+# "tests" jadvaliga TO'G'RIDAN-TO'G'RI yozadi/o'qiydi — alohida
+# "sinxronlash" bosqichi umuman shart emas. Bu loop esa `_tg._bot`,
+# `_tg._cid`, `_tg._index` kabi ENDI MAVJUD BO'LMAGAN atributlarga
+# murojaat qilar edi va shu sabab har 60 soniyada AttributeError
+# bilan (jimgina, xatoni yutib) muvaffaqiyatsiz tugar edi — hech
+# qachon ishlamagan, faqat log'ni chiqindi bilan to'ldirgan.
 
 
 # ── CACHE CLEANUP — har 30 daqiqada ──────────────────────────
@@ -833,7 +683,6 @@ async def _main_no_signals():
     asyncio.create_task(_midnight_flush_loop(bot))
     asyncio.create_task(_users_auto_flush_loop(bot))
     asyncio.create_task(_cache_cleanup_loop())
-    asyncio.create_task(_web_sync_watchdog())
     asyncio.create_task(tg_db.auto_flush_loop())   # FIX: Streamlit threadida ham
 
     for aid in ADMIN_IDS:
