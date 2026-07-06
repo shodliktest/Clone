@@ -7,7 +7,7 @@ from aiogram.filters import Command, CommandStart
 
 router = Router()
 
-WEBAPP_URL = "https://quizmarkerbotweb.vercel.app"
+WEBAPP_URL = "https://clon-web-nine.vercel.app"
 
 
 def _login_url(user) -> str:

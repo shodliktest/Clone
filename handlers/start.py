@@ -118,6 +118,15 @@ async def cmd_start(message: Message, state: FSMContext):
             await message.answer(welcome, reply_markup=main_kb(uid, chat_type))
             return
 
+        # ── Websaytdan "Kirish"/"Boshlash" tugmasi orqali kelgan link ──
+        # (t.me/bot?start=webapp) — bu haqiqiy test ID emas, oddiy
+        # botni ochish uchun. Ilgari bu keyingi fallback'ga tushib,
+        # "WEBAPP" degan test_id sifatida Supabase'dan qidirilar edi
+        # (har safar muvaffaqiyatsiz, log'ni to'ldirar edi).
+        if param.lower() == "webapp":
+            await message.answer(welcome, reply_markup=main_kb(uid, chat_type))
+            return
+
         # ── DEMO DEEP LINK ━━━━━━━━━━━━━━━━━━━━━━━━
         if param.lower().startswith("demo_"):
             tid  = param[5:].upper()
@@ -194,7 +203,7 @@ async def cmd_start(message: Message, state: FSMContext):
                 try:
                     from handlers.webauth import WEBAPP_URL as _WU
                 except Exception:
-                    _WU = "https://quizmarkerbotweb.vercel.app"
+                    _WU = "https://clon-web-nine.vercel.app"
                 _web_url = f"{_WU}/web_test.html?id={tid}&uid={uid}"
                 title = test.get("title", "?")
                 b = InlineKeyboardBuilder()
