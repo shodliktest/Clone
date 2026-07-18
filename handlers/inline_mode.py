@@ -162,7 +162,7 @@ def _make_result(test: dict, bot_username: str, demo=False) -> InlineQueryResult
         try:
             from handlers.webauth import WEBAPP_URL as _WU
         except Exception:
-            _WU = "https://quizmarkerbotweb.vercel.app"
+            _WU = "https://clon-web-nine.vercel.app"  # eskirgan "quizmarkerbotweb" o'rniga to'g'irlandi
         b = InlineKeyboardBuilder()
         b.row(
             InlineKeyboardButton(text="🌐 Web Test",  url=f"{base}?start=webtest_{tid}"),
