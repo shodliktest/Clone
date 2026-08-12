@@ -185,6 +185,56 @@ def _convert_doc(path: str) -> str:
 #  DOCX PARSER — barcha jadval va paragraf formatlar
 # ═══════════════════════════════════════════════════════════
 
+def _repair_docx_crc(path: str) -> str:
+    """
+    Ba'zi DOCX fayllarda (odatda tashqi tahrirlash/eksport dasturlaridan
+    keyin) ZIP ichidagi rasm qismlarining CRC-32 yozuvi noto'g'ri
+    hisoblangan bo'ladi, garchi baytlarning o'zi butun bo'lsa ham.
+    Python'ning zipfile moduli CRC mos kelmasa BadZipFile chiqaradi va
+    o'qishni butunlay to'xtatadi.
+
+    Bu funksiya ZIP'ni CRC tekshirmasdan, xom offsetlar orqali qayta
+    quradi (kerak bo'lsa DEFLATE'ni qo'lda ochib). Muvaffaqiyatli bo'lsa
+    yangi vaqtinchalik fayl yo'lini qaytaradi, aks holda asl yo'lni.
+    """
+    import zipfile, struct, zlib, tempfile as _tf
+    try:
+        with zipfile.ZipFile(path) as zin:
+            bad = []
+            for info in zin.infolist():
+                try:
+                    zin.read(info.filename)
+                except Exception:
+                    bad.append(info.filename)
+            if not bad:
+                return path  # buzilgan narsa yo'q
+
+        out_fd, out_path = _tf.mkstemp(suffix=".docx")
+        os.close(out_fd)
+        with zipfile.ZipFile(path) as zin, \
+             zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout, \
+             open(path, "rb") as f:
+            for info in zin.infolist():
+                f.seek(info.header_offset)
+                header = f.read(30)
+                fields = struct.unpack('<IHHHHHIIIHH', header)
+                nlen, elen = fields[9], fields[10]
+                f.seek(info.header_offset + 30 + nlen + elen)
+                raw = f.read(info.compress_size)
+                if info.compress_type == zipfile.ZIP_DEFLATED:
+                    try:
+                        raw = zlib.decompressobj(-15).decompress(raw)
+                    except Exception:
+                        pass  # o'z holicha qoldiramiz — o'qib bo'lmasa ham
+                        continue
+                zout.writestr(info.filename, raw)
+        log.warning(f"DOCX CRC-32 buzilgan edi, {len(bad)} ta qism tuzatildi: {Path(path).name}")
+        return out_path
+    except Exception as e:
+        log.warning(f"_repair_docx_crc muvaffaqiyatsiz: {e}")
+        return path
+
+
 def _parse_docx(path: str) -> list:
     try:
         from docx import Document
@@ -193,8 +243,20 @@ def _parse_docx(path: str) -> list:
         if 'NULL' in str(e):
             log.warning(f"DOCX NULL rel, ZIP fallback: {e}")
             return _parse_docx_via_zip(path)
-        log.error(f"DOCX ochilmadi: {e}")
-        return []
+        if 'Bad CRC' in str(e) or 'BadZipFile' in type(e).__name__:
+            log.warning(f"DOCX CRC xatosi, tuzatishga urinamiz: {e}")
+            repaired = _repair_docx_crc(path)
+            if repaired != path:
+                try:
+                    doc = Document(repaired)
+                except Exception as e2:
+                    log.warning(f"Tuzatilgan DOCX ham ochilmadi, ZIP fallback: {e2}")
+                    return _parse_docx_via_zip(repaired)
+            else:
+                return _parse_docx_via_zip(path)
+        else:
+            log.error(f"DOCX ochilmadi: {e}")
+            return []
 
     # FORMAT B ni BIRINCHI tekshiramiz — ==== + # + ++++ eng aniq marker
     single = [t for t in doc.tables if 1 <= len(t.columns) <= 2]
@@ -255,7 +317,17 @@ def _parse_docx(path: str) -> list:
         if q:
             return q
 
-    # FORMAT H: Rasmli savollar
+    # FORMAT H2: Raqamli savollar ("1. Matn?") + rasm savoldan OLDIN
+    # (rasm o'zidan keyingi savolga tegishli), to'g'ri javob "*" bilan
+    if doc.inline_shapes:
+        try:
+            q = _parse_docx_numbered_with_images(doc)
+            if q:
+                return q
+        except Exception as _e:
+            log.warning(f"_parse_docx_numbered_with_images: {_e}")
+
+    # FORMAT H: Rasmli savollar ("#" prefiksli, rasm savoldan keyin)
     if doc.inline_shapes:
         try:
             q = _parse_docx_with_images(doc)
@@ -1749,6 +1821,116 @@ def _parse_docx_with_images(doc) -> list:
         if img_bytes:
             q["_img_bytes"] = img_bytes; q["_img_ext"] = img_ext
         questions.append(q)
+    return questions
+
+
+def _parse_docx_numbered_with_images(doc) -> list:
+    """
+    FORMAT H2: "1. Savol matni?" / "12) Savol matni" uslubidagi
+    raqamli savollar, variantlar A)-H) va to'g'ri javob "*" prefiksi
+    bilan belgilangan (masalan "*D) javob"), rasmlar esa savol
+    matnidan OLDINGI paragraf(lar)da joylashgan.
+
+    MUHIM: manba faylda rasm avval, undan keyin savol matni keladi —
+    ya'ni rasm o'zidan KEYIN kelgan savolga tegishli, undan OLDINGI
+    savolga emas. Shu sababli rasmlarni "keyingi topilgan savolga"
+    bog'laymiz.
+    """
+    import os
+    from docx.oxml.ns import qn as _qn
+
+    LBL = ["A", "B", "C", "D", "E", "F", "G", "H"]
+    Q_RE = re.compile(r'^\d+\s*[.)]\s*\S')
+    OPT_RE = re.compile(r'^\*?\s*([A-Ha-h])\s*[).]\s*(.+)$')
+
+    paras = doc.paragraphs
+    n = len(paras)
+
+    # Har bir paragrafdagi rasmlarni yig'ib olamiz (bir nechta rasm
+    # ketma-ket alohida paragraflarda kelishi ham mumkin).
+    img_map = {}
+    for i, p in enumerate(paras):
+        blips = p._element.findall('.//' + _qn('a:blip'))
+        for blip in blips:
+            rId = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+            if not rId:
+                continue
+            try:
+                part = doc.part.related_parts[rId]
+                pname = str(part.partname)
+                if 'NULL' in pname.upper():
+                    continue
+                img_map.setdefault(i, []).append(
+                    (part.blob, os.path.splitext(pname)[1].lower() or '.png')
+                )
+            except Exception:
+                pass
+
+    if not img_map:
+        return []
+
+    questions = []
+    pending_images = []  # rasm(lar) hali savolga bog'lanmagan
+    i = 0
+    while i < n:
+        if i in img_map:
+            pending_images.extend(img_map[i])
+            i += 1
+            continue
+
+        text = paras[i].text.strip()
+        if not Q_RE.match(text):
+            i += 1
+            continue
+
+        # Savol topildi — hozirgacha to'plangan rasm(lar) shu savolga tegishli
+        q_images = pending_images
+        pending_images = []
+
+        q_text = re.sub(r'^\d+\s*[.)]\s*', '', text).strip()
+        i += 1
+
+        variants = []
+        correct_idx = -1
+        while i < n:
+            if i in img_map:
+                break
+            vt = paras[i].text.strip()
+            if not vt:
+                i += 1
+                continue
+            if Q_RE.match(vt):
+                break
+            m = OPT_RE.match(vt)
+            if not m:
+                i += 1
+                continue
+            is_correct = vt.strip().startswith('*')
+            label, opt_text = m.group(1), m.group(2).strip()
+            if is_correct and correct_idx == -1:
+                correct_idx = len(variants)
+            variants.append(opt_text)
+            i += 1
+
+        if not q_text or len(variants) < 2:
+            continue
+
+        opts = [f"{LBL[k] if k < len(LBL) else k+1}) {v}" for k, v in enumerate(variants)]
+        has_mark = correct_idx >= 0
+        q = {
+            "type": "multiple_choice", "question": q_text,
+            "options": opts, "correct": opts[correct_idx] if has_mark else "",
+            "explanation": "", "accepted_answers": [], "points": 1,
+            "_marked": has_mark, "_has_image": len(q_images) > 0,
+        }
+        if q_images:
+            img_bytes, img_ext = q_images[0]
+            q["_img_bytes"] = img_bytes
+            q["_img_ext"] = img_ext
+            if len(q_images) > 1:
+                q["_extra_images"] = q_images[1:]
+        questions.append(q)
+
     return questions
 
 
