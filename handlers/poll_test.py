@@ -318,6 +318,61 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
 
 # ── Poll yuborish ─────────────────────────────────────────────
 
+async def _resolve_photo_id(bot, state, d, photo_id: str) -> str:
+    """
+    Agar photo_id URL bo'lsa (masalan Supabase Storage link), uni
+    STORAGE_CHANNEL_ID kanaliga bir marta yuklab, Telegram file_id ga
+    aylantiradi — poll rasmlari shu file_id orqali yuboriladi (web
+    testdagi kabi "kuchli" Telegram CDN orqali, URL emas).
+
+    Olingan file_id keyingi safarlar uchun bazadagi (Supabase `tests`
+    jadvali) savol obyektiga QAYTA YOZIB QO'YILADI, shunda bir marta
+    o'girilgach boshqa hech qachon URL orqali qayta yuklanmaydi.
+    """
+    if not photo_id or not str(photo_id).startswith(("http://", "https://")):
+        return photo_id
+
+    from config import STORAGE_CHANNEL_ID
+    if not STORAGE_CHANNEL_ID:
+        log.warning("Poll rasm: photo URL topildi, lekin STORAGE_CHANNEL_ID yo'q — o'girib bo'lmadi")
+        return photo_id
+
+    try:
+        msg = await bot.send_photo(
+            STORAGE_CHANNEL_ID, photo_id,
+            caption="📷 Poll uchun avtomatik o'girildi",
+            disable_notification=True,
+        )
+        if not msg.photo:
+            return photo_id
+        file_id = msg.photo[-1].file_id
+    except Exception as e:
+        log.error(f"Poll rasm URL->file_id o'girishda xato: {e}")
+        return photo_id
+
+    # Bazadagi asl testni topib, xuddi shu URL'ga ega savolni file_id bilan yangilaymiz
+    try:
+        test = d.get("test") or {}
+        tid  = test.get("test_id")
+        if tid:
+            from utils.db import get_test_full as _get_full
+            full_test = await _get_full(tid)
+            changed = False
+            for oq in full_test.get("questions", []):
+                if (oq.get("photo") or oq.get("image")) == photo_id:
+                    oq["photo"] = file_id
+                    oq.pop("image", None)
+                    changed = True
+            if changed:
+                from utils.tg_db import save_test_full
+                await save_test_full(full_test)
+                log.info(f"Poll rasm: {tid} uchun URL file_id ga o'girib, bazaga yozildi")
+    except Exception as e:
+        log.error(f"Poll rasm: bazaga qayta yozishda xato: {e}")
+
+    return file_id
+
+
 async def _send_poll(bot, cid, state):
     d   = await state.get_data()
     qs  = d["qs"]
@@ -367,6 +422,11 @@ async def _send_poll(bot, cid, state):
             qtxt     = qtxt[pm_match.end():].strip()
     if photo_id:
         try:
+            resolved = await _resolve_photo_id(bot, state, d, photo_id)
+            if resolved != photo_id:
+                q["photo"] = resolved      # joriy sessiyada ham keshlanadi
+                await state.update_data(qs=qs)
+                photo_id = resolved
             await bot.send_photo(cid, photo_id)
         except Exception as e:
             log.error(f"Poll rasm xato: {e}")
