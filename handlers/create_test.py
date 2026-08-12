@@ -444,56 +444,20 @@ async def send_sample(callback: CallbackQuery):
 
 async def _upload_images_to_channel(bot, questions: list) -> list:
     """
-    Rasmli savollarning rasmlarini Supabase Storage yoki
-    MEDIA_CHANNEL_ID kanalga yuklaydi.
+    Rasmli savollarning rasmlarini Telegram STORAGE_CHANNEL_ID kanaliga
+    yuklaydi va qaytgan file_id'ni savolga yozadi (q["photo"] = file_id).
 
-    Ustuvorlik tartibi:
-      1. Supabase Storage (SUPABASE_URL bor bo'lsa) — to'g'ridan saqlaydi
-      2. MEDIA_CHANNEL_ID (eski yoki alohida media kanal) — Telegram file_id
-      3. Hech biri yo'q — rasmlar saqlanmaydi (matnli savol qoladi)
+    Supabase Storage ENDI ISHLATILMAYDI — "quiz-images" bucket loyihada
+    yaratilmagan bo'lishi mumkin va shu sabab avval barcha rasmlar
+    404 "Bucket not found" bilan yuklanmay qolgan edi. Rasmlar faqat
+    Telegram orqali, id yordamida saqlanadi/olib kelinadi.
     """
-    from config import SUPABASE_URL, SUPABASE_KEY
+    from config import STORAGE_CHANNEL_ID
     from aiogram.types import BufferedInputFile
 
-    # ── 1. Supabase Storage ──────────────────────────────────────
-    if SUPABASE_URL and SUPABASE_KEY:
-        from utils import supabase_client as sc
-        import base64, mimetypes
-        client = sc.get_client()
-        uploaded = failed = 0
-
-        for idx, q in enumerate(questions):
-            img_bytes = q.get("_img_bytes")
-            if not img_bytes:
-                continue
-            img_ext = q.get("_img_ext", ".png").lstrip(".")
-            fname   = f"quiz_images/q{idx+1}_{int(__import__('time').time())}.{img_ext}"
-            mime    = mimetypes.guess_type(f"f.{img_ext}")[0] or "image/png"
-            try:
-                res = client.storage.from_("quiz-images").upload(
-                    path=fname,
-                    file=img_bytes,
-                    file_options={"content-type": mime, "upsert": "true"},
-                )
-                pub = client.storage.from_("quiz-images").get_public_url(fname)
-                q["photo"]     = pub          # URL sifatida saqlanadi
-                q["photo_url"] = pub
-                uploaded += 1
-            except Exception as e:
-                log.warning(f"Supabase Storage rasm #{idx+1}: {e}")
-                failed += 1
-            finally:
-                q.pop("_img_bytes", None)
-                q.pop("_img_ext", None)
-
-        log.info(f"Rasmlar Supabase'ga: {uploaded} muvaffaqiyatli, {failed} xato")
-        return questions
-
-    # ── 2. MEDIA_CHANNEL_ID (Telegram) ───────────────────────────
-    from config import STORAGE_CHANNEL_ID
-    media_channel = STORAGE_CHANNEL_ID   # eski config moslik uchun saqlanadi
+    media_channel = STORAGE_CHANNEL_ID
     if not media_channel:
-        log.warning("SUPABASE_URL ham, STORAGE_CHANNEL_ID ham yo'q — rasmlar yuklanmadi")
+        log.warning("STORAGE_CHANNEL_ID sozlanmagan — rasmlar yuklanmadi")
         for q in questions:
             q.pop("_img_bytes", None)
             q.pop("_img_ext", None)
@@ -530,7 +494,7 @@ async def _upload_images_to_channel(bot, questions: list) -> list:
                 else:
                     await __import__("asyncio").sleep(2)
 
-    log.info(f"Rasmlar Telegram'ga: {uploaded} muvaffaqiyatli, {failed} xato")
+    log.info(f"Rasmlar Telegram STORAGE_CHANNEL_ID'ga: {uploaded} muvaffaqiyatli, {failed} xato")
     return questions
 
 
