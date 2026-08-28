@@ -442,7 +442,7 @@ async def send_sample(callback: CallbackQuery):
     )
 
 
-async def _upload_images_to_channel(bot, questions: list) -> list:
+async def _upload_images_to_channel(bot, questions: list) -> tuple:
     """
     Rasmli savollarning rasmlarini Telegram STORAGE_CHANNEL_ID kanaliga
     yuklaydi va qaytgan file_id'ni savolga yozadi (q["photo"] = file_id).
@@ -451,19 +451,33 @@ async def _upload_images_to_channel(bot, questions: list) -> list:
     yaratilmagan bo'lishi mumkin va shu sabab avval barcha rasmlar
     404 "Bucket not found" bilan yuklanmay qolgan edi. Rasmlar faqat
     Telegram orqali, id yordamida saqlanadi/olib kelinadi.
+
+    Qaytaradi: (questions, uploaded, failed, total_img) — chaqiruvchi
+    tomon foydalanuvchiga natija haqida xabar bera olishi uchun.
     """
     from config import STORAGE_CHANNEL_ID
     from aiogram.types import BufferedInputFile
+    from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
 
     media_channel = STORAGE_CHANNEL_ID
+    total_img = sum(1 for q in questions if q.get("_img_bytes"))
+
     if not media_channel:
         log.warning("STORAGE_CHANNEL_ID sozlanmagan — rasmlar yuklanmadi")
         for q in questions:
             q.pop("_img_bytes", None)
             q.pop("_img_ext", None)
-        return questions
+        return questions, 0, total_img, total_img
+
+    # Telegram bitta chatga taxminan 1 xabar/soniya limitini qo'yadi.
+    # Har bir yuborishdan oldin shu oraliqni kutamiz — shunda flood control'ga
+    # deyarli hech qachon uchramaymiz (proaktiv throttling).
+    MIN_INTERVAL = 1.1  # soniya, xabarlar orasidagi minimal oraliq
+    MAX_ATTEMPTS = 8    # RetryAfter kelsa ham rasm baribir tushib qolmasin
 
     uploaded = failed = 0
+    last_send_ts = 0.0
+
     for idx, q in enumerate(questions):
         img_bytes = q.get("_img_bytes")
         if not img_bytes:
@@ -471,7 +485,13 @@ async def _upload_images_to_channel(bot, questions: list) -> list:
         img_ext = q.get("_img_ext", ".png").lstrip(".")
         fname   = f"q{idx+1}.{img_ext}"
 
-        for attempt in range(3):
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            # Proaktiv throttling: oldingi yuborishdan beri yetarli vaqt
+            # o'tmagan bo'lsa, kutib turamiz.
+            elapsed = asyncio.get_event_loop().time() - last_send_ts
+            if elapsed < MIN_INTERVAL:
+                await asyncio.sleep(MIN_INTERVAL - elapsed)
+
             try:
                 photo = BufferedInputFile(img_bytes, filename=fname)
                 msg = await bot.send_photo(
@@ -479,23 +499,50 @@ async def _upload_images_to_channel(bot, questions: list) -> list:
                     caption=f"📷 Savol #{idx+1}",
                     disable_notification=True,
                 )
+                last_send_ts = asyncio.get_event_loop().time()
                 if msg.photo:
                     q["photo"] = msg.photo[-1].file_id
                     uploaded += 1
                 q.pop("_img_bytes", None)
                 q.pop("_img_ext", None)
                 break
+
+            except TelegramRetryAfter as e:
+                # Telegram aniq qancha kutish kerakligini aytadi — shuncha
+                # kutamiz va HECH QACHON hisobdan chiqarmaymiz (urinishni
+                # sarflamaymiz, chunki bu bizning xatomiz emas).
+                wait = e.retry_after + 1
+                log.warning(
+                    f"Rasm #{idx+1}: flood control, {wait}s kutilmoqda "
+                    f"(urinish {attempt}/{MAX_ATTEMPTS})"
+                )
+                await asyncio.sleep(wait)
+                last_send_ts = asyncio.get_event_loop().time()
+                continue
+
+            except TelegramNetworkError as e:
+                log.warning(f"Rasm #{idx+1}: tarmoq xatosi, qayta urinilmoqda: {e}")
+                await asyncio.sleep(2 * attempt)
+                continue
+
             except Exception as e:
-                if attempt == 2:
-                    log.error(f"Rasm #{idx+1} yuklanmadi: {e}")
+                if attempt == MAX_ATTEMPTS:
+                    log.error(f"Rasm #{idx+1} yuklanmadi (oxirgi urinish): {e}")
                     q.pop("_img_bytes", None)
                     q.pop("_img_ext", None)
                     failed += 1
                 else:
-                    await __import__("asyncio").sleep(2)
+                    await asyncio.sleep(min(2 * attempt, 10))
+        else:
+            # for-else: MAX_ATTEMPTS marta RetryAfter/NetworkError bo'lib,
+            # baribir break bo'lmagan bo'lsa ham rasmni yo'qotmaymiz.
+            failed += 1
+            q.pop("_img_bytes", None)
+            q.pop("_img_ext", None)
+            log.error(f"Rasm #{idx+1} yuklanmadi: {MAX_ATTEMPTS} urinishdan keyin ham muvaffaqiyatsiz")
 
     log.info(f"Rasmlar Telegram STORAGE_CHANNEL_ID'ga: {uploaded} muvaffaqiyatli, {failed} xato")
-    return questions
+    return questions, uploaded, failed, total_img
 
 
 @router.message(F.document, CreateTest.upload_file)
@@ -603,13 +650,19 @@ async def upload_file(message: Message, state: FSMContext):
         except Exception:
             img_in_file = img_count
 
+        img_upload_summary = ""
         if img_count > 0:
             await status.edit_text(
                 f"🖼 <b>{img_count} ta rasm test bilan ulanmoqda...</b>\n"
                 f"<i>Iltimos kuting</i>",
                 parse_mode="HTML"
             )
-            questions = await _upload_images_to_channel(message.bot, questions)
+            questions, up_ok, up_fail, up_total = await _upload_images_to_channel(message.bot, questions)
+            if up_fail > 0:
+                img_upload_summary = (
+                    f"🖼 Rasmlar: <b>{up_ok}/{up_total}</b> muvaffaqiyatli, "
+                    f"<b>{up_fail}</b> ta xato bo'ldi\n"
+                )
         elif img_in_file > 0:
             log.info(f"Faylda {img_in_file} rasm bor, savolga bog'lanmadi")
 
@@ -633,12 +686,14 @@ async def upload_file(message: Message, state: FSMContext):
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
                 f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n"
-                + img_line +
+                + img_line + img_upload_summary +
                 f"\n<i>To\'g\'ri javob aniqlanmagan. Nima qilamiz?</i>",
                 parse_mode="HTML",
                 reply_markup=b.as_markup()
             )
         else:
+            if img_upload_summary:
+                await status.edit_text(img_upload_summary, parse_mode="HTML")
             await _ask_poll_time(status, state, total)
 
     except Exception as e:
@@ -743,13 +798,19 @@ async def fp_force_reparse(callback: CallbackQuery, state: FSMContext):
         except Exception:
             img_in_file = img_count
 
+        img_upload_summary = ""
         if img_count > 0:
             await status.edit_text(
                 f"🖼 <b>{img_count} ta rasm test bilan ulanmoqda...</b>\n"
                 f"<i>Iltimos kuting</i>",
                 parse_mode="HTML"
             )
-            questions = await _upload_images_to_channel(callback.bot, questions)
+            questions, up_ok, up_fail, up_total = await _upload_images_to_channel(callback.bot, questions)
+            if up_fail > 0:
+                img_upload_summary = (
+                    f"🖼 Rasmlar: <b>{up_ok}/{up_total}</b> muvaffaqiyatli, "
+                    f"<b>{up_fail}</b> ta xato bo'ldi\n"
+                )
         elif img_in_file > 0:
             log.info(f"Faylda {img_in_file} rasm bor, savolga bog\'lanmadi")
 
@@ -773,12 +834,14 @@ async def fp_force_reparse(callback: CallbackQuery, state: FSMContext):
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
                 f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n"
-                + img_line +
+                + img_line + img_upload_summary +
                 f"\n<i>To\'g\'ri javob aniqlanmagan. Nima qilamiz?</i>",
                 parse_mode="HTML",
                 reply_markup=b.as_markup()
             )
         else:
+            if img_upload_summary:
+                await status.edit_text(img_upload_summary, parse_mode="HTML")
             await _ask_poll_time(status, state, total)
 
     except Exception as e:
@@ -2359,9 +2422,15 @@ async def reupload_file(message: Message, state: FSMContext):
 
         # Rasmlarni TG kanalga yuklaymiz
         img_count = sum(1 for q in questions if q.get("_img_bytes"))
+        img_upload_summary = ""
         if img_count > 0:
             await status.edit_text(f"🖼 {img_count} ta rasm yuklanmoqda...")
-            questions = await _upload_images_to_channel(message.bot, questions)
+            questions, up_ok, up_fail, up_total = await _upload_images_to_channel(message.bot, questions)
+            if up_fail > 0:
+                img_upload_summary = (
+                    f"🖼 Rasmlar: <b>{up_ok}/{up_total}</b> muvaffaqiyatli, "
+                    f"<b>{up_fail}</b> ta xato bo'ldi\n"
+                )
 
         try: os.remove(tmp_path)
         except Exception: pass
@@ -2394,6 +2463,7 @@ async def reupload_file(message: Message, state: FSMContext):
             f"📊 Yangi savollar: <b>{total}</b> ta\n"
             f"✅ Belgilangan: <b>{marked}</b> ta\n"
             + (f"🖼 Rasmli: <b>{img_count}</b> ta\n" if img_count else "")
+            + img_upload_summary
             + f"\n<i>Test nomi va sozlamalari saqlanди.</i>",
             parse_mode="HTML"
         )
