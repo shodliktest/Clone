@@ -127,6 +127,26 @@ _poll_progress: dict = {}  # {uid: progress_msg_id}
 _poll_count:    dict = {}  # {uid: savol soni}
 _pending_photo: dict = {}  # {uid: file_id} — waiting_polls'da oxirgi kelgan, hali quiz'ga bog'lanmagan rasm
 
+# aiogram handle_as_tasks=True bilan har bir update ALOHIDA asyncio.Task
+# sifatida, bir-biriga nisbatan PARALLEL ishga tushadi. Foydalanuvchi
+# QuizBot'dan bir nechta xabarni (rasm, poll, rasm, poll...) tez ketma-ket
+# forward qilganda, ularning handlerlari deyarli bir vaqtda ishlab
+# ketishi mumkin — natijada _pending_photo bir-birining ustidan yozilib
+# yoki "questions" ro'yxati eskirib qolishi (lost update) mumkin edi.
+# Shuning uchun bitta foydalanuvchining waiting_polls xabarlarini
+# QAT'IY KETMA-KET ishlashga majburlaymiz — boshqa foydalanuvchilarga
+# ta'sir qilmaydi.
+_poll_locks: dict = {}  # {uid: asyncio.Lock}
+
+
+def _get_poll_lock(uid: int) -> asyncio.Lock:
+    lock = _poll_locks.get(uid)
+    if lock is None:
+        lock = asyncio.Lock()
+        _poll_locks[uid] = lock
+    return lock
+
+
 # Matn (chat orqali)
 _text_debounce: dict = {}  # {uid: asyncio.Task}
 _text_progress: dict = {}  # {uid: progress_msg_id}
@@ -1896,10 +1916,15 @@ async def catch_poll_photo(message: Message, state: FSMContext):
     """
     QuizBot forward oqimida rasm avval, undan keyin tegishli quiz keladi.
     Rasmni saqlab qolamiz — keyingi catch_poll shu rasmni savolga bog'laydi.
+
+    Lock bilan o'ralgan: ketma-ket forward qilingan rasm+poll juftliklari
+    aiogram tomonidan parallel (concurrent task) ishlanganda ham,
+    _pending_photo bir-birining ustidan yozilib ketmasligi uchun.
     """
     uid = message.from_user.id
-    # Eng katta o'lchamdagi versiyasini olamiz
-    _pending_photo[uid] = message.photo[-1].file_id
+    async with _get_poll_lock(uid):
+        # Eng katta o'lchamdagi versiyasini olamiz
+        _pending_photo[uid] = message.photo[-1].file_id
     await _del(message.bot, message.chat.id, message.message_id)
 
 
@@ -1918,29 +1943,31 @@ async def catch_poll(message: Message, state: FSMContext):
     clean_q = _re.sub(r"^\[\d+/\d+\]\s*", "", p.question).strip()
 
     uid = message.from_user.id
-    # Bevosita oldin rasm kelgan bo'lsa — shu savolga biriktiramiz
-    photo_id = _pending_photo.pop(uid, None)
+    async with _get_poll_lock(uid):
+        # Bevosita oldin rasm kelgan bo'lsa — shu savolga biriktiramiz
+        photo_id = _pending_photo.pop(uid, None)
 
-    d  = await state.get_data()
-    qs = d.get("questions", [])
-    new_q = {
-        "type":        "multiple_choice",
-        "question":    clean_q,
-        "options":     opts,
-        "correct":     opts[p.correct_option_id],
-        "explanation": p.explanation or "",
-        "points":      1
-    }
-    if photo_id:
-        new_q["photo"] = photo_id
-    qs.append(new_q)
-    await state.update_data(questions=qs)
+        d  = await state.get_data()
+        qs = d.get("questions", [])
+        new_q = {
+            "type":        "multiple_choice",
+            "question":    clean_q,
+            "options":     opts,
+            "correct":     opts[p.correct_option_id],
+            "explanation": p.explanation or "",
+            "points":      1
+        }
+        if photo_id:
+            new_q["photo"] = photo_id
+        qs.append(new_q)
+        await state.update_data(questions=qs)
+        count = len(qs)
 
     # Poll xabarini o'chirish
     await _del(message.bot, message.chat.id, message.message_id)
 
     # Debounce: 0.8s kutib, oxirgi sanoq bilan bitta progress xabar yuboradi
-    _poll_count[uid] = len(qs)
+    _poll_count[uid] = count
     old_task = _poll_debounce.pop(uid, None)
     if old_task:
         old_task.cancel()
