@@ -277,10 +277,25 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
             except Exception as e:
                 log.error(f"Rasm yuborishda xato (savol {current}): {e}")
 
+        # Savol matni uzun bo'lsa — to'liq matnni alohida xabar qilib
+        # yuboramiz, poll'ga esa qisqa sarlavha ketadi. Variantlarni va
+        # umumiy xavfsizlikni baribir sanitize_poll orqali o'tkazamiz,
+        # so'ng savol matnini (agar bo'lingan bo'lsa) almashtiramiz.
+        from utils.poll_safe import split_long_question
+        full_text, poll_qtxt = split_long_question(qtxt, hdr_poll)
+        if full_text:
+            try:
+                await bot.send_message(chat_id, full_text, protect_content=True)
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                log.error(f"Uzun savol matnini yuborishda xato (savol {current}): {e}")
+
         # ── Telegram cheklovlariga moslab xavfsizlantirish ──
         question, clean_opts, ci = sanitize_poll(
             hdr_poll + qtxt, clean_opts, ci, true_false=(qtype == "true_false")
         )
+        if full_text:
+            question = poll_qtxt   # split_long_question'dan chiqqan, allaqachon escape qilingan qisqa sarlavha
         expl = sanitize_explanation(expl)
 
         try:

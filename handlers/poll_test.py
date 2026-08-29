@@ -390,7 +390,7 @@ async def _send_poll(bot, cid, state):
     opts = []
     for opt in q.get("options", []):
         ot = str(opt).split(")", 1)[-1].strip() if ")" in str(opt) else str(opt)
-        opts.append(ot[:95] + "..." if len(ot) > 95 else ot)
+        opts.append(ot)
     if q.get("type") == "true_false" or not opts:
         opts = ["Ha", "Yo'q"]
 
@@ -405,10 +405,6 @@ async def _send_poll(bot, cid, state):
     ci = max(0, min(ci, len(opts) - 1))
 
     expl = q.get("explanation","") or None
-    if expl and expl in ("Izoh kiritilmagan.","Izoh yo'q","Izoh kiritilmagan"):
-        expl = None
-    if expl and len(expl) > 195:
-        expl = expl[:195] + "..."
 
     qtxt = q.get("question", q.get("text","Savol"))
     qtxt = re.sub(r'^\[\d+/\d+\]\s*', '', qtxt).strip()
@@ -432,13 +428,30 @@ async def _send_poll(bot, cid, state):
             log.error(f"Poll rasm xato: {e}")
 
     hdr  = f"[{idx+1}/{len(qs)}] "
-    if len(hdr + qtxt) > 295:
-        qtxt = qtxt[:295 - len(hdr)] + "..."
+
+    from utils.poll_safe import sanitize_poll, sanitize_explanation, split_long_question
+    full_text, poll_q = split_long_question(qtxt, hdr)
+    if full_text:
+        try:
+            await bot.send_message(cid, full_text)
+        except Exception as e:
+            log.error(f"Uzun savol matnini yuborishda xato: {e}")
+        # Savol allaqachon alohida yuborildi — poll'ga faqat qisqa
+        # ko'rsatma ketadi, sanitize_poll uni qayta kesib qo'ymasin.
+        question, clean_opts, ci = sanitize_poll(
+            "", opts, ci, true_false=(q.get("type") == "true_false")
+        )
+        question = poll_q
+    else:
+        question, clean_opts, ci = sanitize_poll(
+            hdr + qtxt, opts, ci, true_false=(q.get("type") == "true_false")
+        )
+    expl = sanitize_explanation(expl)
 
     await state.update_data(answered_this=False)
     try:
         pm = await bot.send_poll(
-            chat_id=cid, question=hdr+qtxt, options=opts,
+            chat_id=cid, question=question, options=clean_opts,
             type="quiz", correct_option_id=ci, explanation=expl,
             is_anonymous=False, open_period=pt if pt > 0 else None
         )

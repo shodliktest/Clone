@@ -1059,7 +1059,7 @@ async def quiz_poll_export(callback: CallbackQuery, state: FSMContext):
 
     sent = 0
     for i, q in enumerate(qs):
-        from utils.poll_safe import sanitize_poll, sanitize_explanation
+        from utils.poll_safe import sanitize_poll, sanitize_explanation, split_long_question
         # Savol matni — raqamsiz
         qtxt = _clean_q(q.get("question", q.get("q", q.get("text", "Savol?"))))
 
@@ -1078,8 +1078,29 @@ async def quiz_poll_export(callback: CallbackQuery, state: FSMContext):
             m  = _re.match(r"^([A-Za-z])", str(corr).strip())
             ci = (ord(m.group(1).upper()) - ord("A")) if m else 0
 
+        # Rasm bo'lsa — poll oldidan yuborish
+        photo_id = q.get("photo") or q.get("image") or None
+        if photo_id:
+            try:
+                await callback.bot.send_photo(uid, photo_id)
+                await _aio.sleep(0.3)
+            except Exception as e:
+                log.error(f"Quiz eksport rasm xato {i}: {e}")
+
+        # Savol matni uzun bo'lsa — to'liq matnni alohida xabar qilib
+        # yuboramiz, poll'ga esa qisqa sarlavha ketadi.
+        full_text, poll_qtxt = split_long_question(qtxt)
+        if full_text:
+            try:
+                await callback.bot.send_message(uid, full_text)
+                await _aio.sleep(0.3)
+            except Exception as e:
+                log.error(f"Uzun savol matnini yuborishda xato {i}: {e}")
+
         # ── Telegram cheklovlariga moslab xavfsizlantirish ──
         qtxt, opts, ci = sanitize_poll(qtxt, opts, ci)
+        if full_text:
+            qtxt = poll_qtxt
         expl = sanitize_explanation(q.get("explanation"))
 
         try:

@@ -125,6 +125,7 @@ _poll_debounce:    dict = {}  # {uid: asyncio.Task}
 _save_in_progress: set  = set()   # Double-click himoyasi
 _poll_progress: dict = {}  # {uid: progress_msg_id}
 _poll_count:    dict = {}  # {uid: savol soni}
+_pending_photo: dict = {}  # {uid: file_id} — waiting_polls'da oxirgi kelgan, hali quiz'ga bog'lanmagan rasm
 
 # Matn (chat orqali)
 _text_debounce: dict = {}  # {uid: asyncio.Task}
@@ -1876,7 +1877,8 @@ async def method_poll(callback: CallbackQuery, state: FSMContext):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "1️⃣ @QuizBot ga o'ting\n"
         "2️⃣ Quiz savollarini bu yerga forward qiling\n"
-        "3️⃣ Hammasi yuborilgach — <b>✅ Tayyor</b> bosing\n\n"
+        "3️⃣ Rasmli savol bo'lsa — avval rasmni, keyin quiz'ni forward qiling\n"
+        "4️⃣ Hammasi yuborilgach — <b>✅ Tayyor</b> bosing\n\n"
         "<i>💡 Faqat 'Viktorina' (Quiz) turi qabul qilinadi!</i>",
         parse_mode="HTML",
         reply_markup=b.as_markup()
@@ -1885,7 +1887,20 @@ async def method_poll(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
     _poll_progress[uid] = callback.message.message_id
     _poll_count[uid] = 0
+    _pending_photo.pop(uid, None)
     await state.set_state(CreateTest.waiting_polls)
+
+
+@router.message(F.photo, CreateTest.waiting_polls)
+async def catch_poll_photo(message: Message, state: FSMContext):
+    """
+    QuizBot forward oqimida rasm avval, undan keyin tegishli quiz keladi.
+    Rasmni saqlab qolamiz — keyingi catch_poll shu rasmni savolga bog'laydi.
+    """
+    uid = message.from_user.id
+    # Eng katta o'lchamdagi versiyasini olamiz
+    _pending_photo[uid] = message.photo[-1].file_id
+    await _del(message.bot, message.chat.id, message.message_id)
 
 
 @router.message(F.poll, CreateTest.waiting_polls)
@@ -1902,23 +1917,29 @@ async def catch_poll(message: Message, state: FSMContext):
     # QuizBot [N/N] raqamlarini olib tashlash
     clean_q = _re.sub(r"^\[\d+/\d+\]\s*", "", p.question).strip()
 
+    uid = message.from_user.id
+    # Bevosita oldin rasm kelgan bo'lsa — shu savolga biriktiramiz
+    photo_id = _pending_photo.pop(uid, None)
+
     d  = await state.get_data()
     qs = d.get("questions", [])
-    qs.append({
+    new_q = {
         "type":        "multiple_choice",
         "question":    clean_q,
         "options":     opts,
         "correct":     opts[p.correct_option_id],
         "explanation": p.explanation or "",
         "points":      1
-    })
+    }
+    if photo_id:
+        new_q["photo"] = photo_id
+    qs.append(new_q)
     await state.update_data(questions=qs)
 
     # Poll xabarini o'chirish
     await _del(message.bot, message.chat.id, message.message_id)
 
     # Debounce: 0.8s kutib, oxirgi sanoq bilan bitta progress xabar yuboradi
-    uid = message.from_user.id
     _poll_count[uid] = len(qs)
     old_task = _poll_debounce.pop(uid, None)
     if old_task:
