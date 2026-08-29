@@ -90,3 +90,43 @@ def sanitize_explanation(expl):
     if str(expl).strip() in ("Izoh kiritilmagan.", "Izoh yo'q", "Izoh kiritilmagan"):
         return None
     return esc(expl)[:MAX_EXPL]
+
+
+# ──────────────────────────────────────────────────────────────────
+# UZUN SAVOLLARNI BO'LISH
+# ──────────────────────────────────────────────────────────────────
+# Telegram sendPoll question maydoni 300 belgi bilan cheklangan. Savol
+# matni shundan uzun bo'lsa, kesib "..." qo'yish o'rniga — savolni
+# ALOHIDA oddiy xabar qilib to'liq yuboramiz, keyin quiz'ni qisqa
+# sarlavha bilan ("👆 Savolga qarang") yuboramiz. Shu tartibda:
+# avval to'liq savol matni, keyin variantlar bilan poll keladi.
+
+QUESTION_SPLIT_LABEL = "👆 Yuqoridagi savolga javob bering"
+
+
+def needs_question_split(question: str, header: str = "") -> bool:
+    """header+question MAX_QUESTION dan uzunmi — bo'lish kerakligini bildiradi."""
+    q = str(question if question is not None else "").strip()
+    return len(header) + len(q) > MAX_QUESTION
+
+
+def split_long_question(question: str, header: str = ""):
+    """
+    Savol matnini poll uchun tayyorlaydi.
+
+    Qaytaradi: (full_text_or_None, poll_question)
+      • full_text_or_None: agar bo'lish kerak bo'lsa — savolning TO'LIQ matni
+        (header bilan), buni chaqiruvchi tomon oldindan oddiy xabar sifatida
+        yuborishi kerak. Bo'lish kerak bo'lmasa — None.
+      • poll_question: sendPoll uchun ishlatiladigan matn (har doim
+        MAX_QUESTION ichida, bo'sh emas).
+    """
+    q = str(question if question is not None else "").strip()
+    if not q:
+        q = "Savol"
+
+    if not needs_question_split(q, header):
+        return None, esc(header + q)[:MAX_QUESTION]
+
+    full_text = esc(header + q)
+    return full_text, esc(header + QUESTION_SPLIT_LABEL)[:MAX_QUESTION]
