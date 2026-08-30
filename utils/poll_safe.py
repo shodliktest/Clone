@@ -1,132 +1,103 @@
-"""
-🛡 POLL XAVFSIZLIGI — Telegram sendPoll cheklovlarini bir joyda kafolatlaydi.
-
-Telegram sendPoll qoidalari:
-  • question  : 1..300 belgi, bo'sh bo'lmasligi shart
-  • options   : 2..10 ta, har biri 1..100 belgi, bo'sh bo'lmasligi shart
-  • explanation: 0..200 belgi
-
-Bot default parse_mode=HTML bo'lgani uchun question/explanation HTML sifatida
-tahlil qilinadi — shu sbabli matndagi "<", ">", "&" belgilari
-"can't parse entities: Unsupported start tag" xatosini beradi.
-Bu yerda ularni HTML-escape qilamiz, demak parse_mode versiyasiga bog'liq
-bo'lmagan, barqaror yechim bo'ladi.
-"""
+"""Telegram Poll uchun xavfsiz matn/variant normalizatsiyasi."""
 import re as _re
 
-MAX_OPTIONS = 10            # Telegram limiti
+MAX_OPTIONS = 10
 MAX_QUESTION = 300
 MAX_OPTION = 100
 MAX_EXPL = 200
-
+MAX_MESSAGE = 4096
 _ESC = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
 
 
 def esc(s) -> str:
-    """HTML uchun xavfsiz qiladi ('&' birinchi bo'lishi shart)."""
     return _re.sub(r"[&<>]", lambda m: _ESC[m.group()], str(s if s is not None else ""))
 
 
 def _opt_text(opt) -> str:
-    """'A) matn' ko'rinishidan toza variant matnini ajratib oladi."""
-    s = str(opt)
-    s = s.split(")", 1)[-1].strip() if ")" in s else s.strip()
-    return s
+    s = str(opt).strip()
+    return _re.sub(r"^[A-Ha-h]\s*[).:]\s*", "", s).strip()
 
 
-def sanitize_poll(question, options, correct_index=0,
-                  *, true_false=False, strip_label=True):
-    """
-    Telegram sendPoll uchun kafolatlangan xavfsiz qiymatlarni qaytaradi.
-
-    Qaytaradi: (question_text, options_list, correct_index)
-    Barcha matnlar HTML-escape qilingan, bo'sh emas, cheklovlarga mos.
-    To'g'ri javob variantini 10 talik oynadan tashqarida qolib ketmaydi.
-    """
-    # ── Savol matni ──
-    q = str(question if question is not None else "").strip()
-    if not q:
-        q = "Savol"
-    q = esc(q)[:MAX_QUESTION]
-
-    # ── Variantlar ──
+def sanitize_poll(question, options, correct_index=0, *, true_false=False, strip_label=True):
+    q = str(question if question is not None else "").strip() or "Savol"
+    q = _truncate_tg(esc(q), MAX_QUESTION)
     if true_false:
-        return q, ["Ha", "Yo'q"], (0 if correct_index in (0, "0", None) else
-                                   (0 if str(correct_index).lower().startswith("ha") else 1))
-
-    cleaned = []
+        ci = 0 if correct_index in (0, "0", None) else (0 if str(correct_index).lower().startswith("ha") else 1)
+        return q, ["Ha", "Yo'q"], ci
+    cleaned=[]
     for o in (options or []):
         t = _opt_text(o) if strip_label else str(o).strip()
-        if not t:
-            t = "—"                       # hech qachon bo'sh bo'lmasin
-        cleaned.append(esc(t)[:MAX_OPTION])
-
-    # Kamida 2 ta variant bo'lishi shart
-    while len(cleaned) < 2:
+        cleaned.append(_truncate_tg(esc(t or "—"), MAX_OPTION))
+    while len(cleaned)<2:
         cleaned.append("—")
-
-    # To'g'ri javob indeksi
-    try:
-        ci = int(correct_index)
-    except (TypeError, ValueError):
-        ci = 0
-
-    # 10 tadan ortiq bo'lsa — to'g'ri javobni saqlab qolib kesamiz
-    if len(cleaned) > MAX_OPTIONS:
+    try: ci=int(correct_index)
+    except (TypeError,ValueError): ci=0
+    if len(cleaned)>MAX_OPTIONS:
         if 0 <= ci < len(cleaned) and ci >= MAX_OPTIONS:
-            cleaned = cleaned[:MAX_OPTIONS - 1] + [cleaned[ci]]
-            ci = MAX_OPTIONS - 1
+            cleaned=cleaned[:MAX_OPTIONS-1]+[cleaned[ci]]; ci=MAX_OPTIONS-1
         else:
-            cleaned = cleaned[:MAX_OPTIONS]
-
-    ci = max(0, min(ci, len(cleaned) - 1))
+            cleaned=cleaned[:MAX_OPTIONS]
+    ci=max(0,min(ci,len(cleaned)-1))
     return q, cleaned, ci
 
 
 def sanitize_explanation(expl):
-    """Izohni xavfsiz qiladi yoki None qaytaradi."""
-    if not expl:
-        return None
-    if str(expl).strip() in ("Izoh kiritilmagan.", "Izoh yo'q", "Izoh kiritilmagan"):
-        return None
-    return esc(expl)[:MAX_EXPL]
+    if not expl: return None
+    if str(expl).strip() in ("Izoh kiritilmagan.","Izoh yo'q","Izoh kiritilmagan"): return None
+    return _truncate_tg(esc(expl), MAX_EXPL)
 
 
-# ──────────────────────────────────────────────────────────────────
-# UZUN SAVOLLARNI BO'LISH
-# ──────────────────────────────────────────────────────────────────
-# Telegram sendPoll question maydoni 300 belgi bilan cheklangan. Savol
-# matni shundan uzun bo'lsa, kesib "..." qo'yish o'rniga — savolni
-# ALOHIDA oddiy xabar qilib to'liq yuboramiz, keyin quiz'ni qisqa
-# sarlavha bilan ("👆 Savolga qarang") yuboramiz. Shu tartibda:
-# avval to'liq savol matni, keyin variantlar bilan poll keladi.
+def _tg_len(text: str) -> int:
+    # Telegram Bot API limitlari UTF-16 code unit bilan hisoblanadi.
+    return len(str(text).encode("utf-16-le")) // 2
 
-QUESTION_SPLIT_LABEL = "👆 Yuqoridagi savolga javob bering"
+
+def _truncate_tg(text: str, limit: int) -> str:
+    text = str(text)
+    if _tg_len(text) <= limit:
+        return text
+    out=[]; units=0
+    for ch in text:
+        u=_tg_len(ch)
+        if units + u > limit:
+            break
+        out.append(ch); units += u
+    return "".join(out)
+
+
+def _split_text_4096(text: str):
+    """HTML-escaped textni Telegram 4096 UTF-16 limitidan oshirmasdan bo'ladi."""
+    if _tg_len(text) <= MAX_MESSAGE: return [text]
+    parts=[]; rest=text
+    while _tg_len(rest) > MAX_MESSAGE:
+        # Avval limit ichidagi eng yaqin newline/space ni topamiz.
+        probe=_truncate_tg(rest, MAX_MESSAGE)
+        cut=probe.rfind("\n")
+        if cut < 1000: cut=probe.rfind(" ")
+        if cut < 1: cut=len(probe)
+        parts.append(rest[:cut].rstrip())
+        rest=rest[cut:].lstrip()
+    if rest: parts.append(rest)
+    return parts
 
 
 def needs_question_split(question: str, header: str = "") -> bool:
-    """header+question MAX_QUESTION dan uzunmi — bo'lish kerakligini bildiradi."""
-    q = str(question if question is not None else "").strip()
-    return len(header) + len(q) > MAX_QUESTION
+    # Telegram parse_mode HTML bo'lgani uchun real yuboriladigan escaped uzunlikni tekshiramiz.
+    return _tg_len(esc(str(header or "") + str(question or "").strip())) > MAX_QUESTION
 
+QUESTION_SPLIT_LABEL = "👆 Yuqoridagi savolga javob bering"
 
 def split_long_question(question: str, header: str = ""):
+    """(full_messages_or_None, poll_question) qaytaradi.
+
+    full_messages — uzun savol 4096 dan ham oshsa bir nechta oddiy xabar;
+    poll_question esa doim <=300 belgi. Shunday qilib variantlar har doim
+    alohida Telegram Quiz Poll ichida qoladi.
     """
-    Savol matnini poll uchun tayyorlaydi.
-
-    Qaytaradi: (full_text_or_None, poll_question)
-      • full_text_or_None: agar bo'lish kerak bo'lsa — savolning TO'LIQ matni
-        (header bilan), buni chaqiruvchi tomon oldindan oddiy xabar sifatida
-        yuborishi kerak. Bo'lish kerak bo'lmasa — None.
-      • poll_question: sendPoll uchun ishlatiladigan matn (har doim
-        MAX_QUESTION ichida, bo'sh emas).
-    """
-    q = str(question if question is not None else "").strip()
-    if not q:
-        q = "Savol"
-
-    if not needs_question_split(q, header):
-        return None, esc(header + q)[:MAX_QUESTION]
-
-    full_text = esc(header + q)
-    return full_text, esc(header + QUESTION_SPLIT_LABEL)[:MAX_QUESTION]
+    q=str(question if question is not None else "").strip() or "Savol"
+    escaped_full=esc(str(header or "") + q)
+    if _tg_len(escaped_full) <= MAX_QUESTION:
+        return None, escaped_full
+    full_messages=_split_text_4096(escaped_full)
+    poll_q=_truncate_tg(esc(str(header or "") + QUESTION_SPLIT_LABEL), MAX_QUESTION)
+    return full_messages, poll_q
