@@ -118,16 +118,29 @@ async def premium_manage_input(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id): return
     raw=(message.text or '').strip()
     if raw.lower()=='/cancel': await state.clear(); return await message.answer("Bekor qilindi.",reply_markup=admin_kb())
-    d=await state.get_data(); mode=d.get('premium_mode'); import re
-    nums=re.findall(r'\d{5,15}',raw)
-    if not nums: return await message.answer("❌ Telegram ID noto‘g‘ri.")
-    uid=int(nums[0])
+    d=await state.get_data(); mode=d.get('premium_mode')
+    import re
+    # USER_ID va KUN ni alohida parse qilamiz. Oldingi regex {5,15}
+    # kunlar uchun ham minimum 5 raqam talab qilgani sababli
+    # `7078456772 30` kabi to‘g‘ri format xato deb chiqardi.
+    parts=raw.replace(',', ' ').split()
+    if mode == 'revoke':
+        if len(parts) != 1 or not parts[0].isdigit():
+            return await message.answer("❌ Format noto‘g‘ri. Faqat USER_ID yuboring.")
+        uid=int(parts[0])
+    else:
+        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+            return await message.answer("❌ Format noto‘g‘ri. Yuboring: <code>USER_ID KUN</code>\nMasalan: <code>123456789 30</code>")
+        uid=int(parts[0]); days=int(parts[1])
+        if not 5 <= len(parts[0]) <= 15:
+            return await message.answer("❌ Telegram ID noto‘g‘ri.")
+        if not 1 <= days <= 3650:
+            return await message.answer("❌ Kun soni 1–3650 oralig‘ida bo‘lishi kerak.")
     try:
         from utils import premium
         if mode=='revoke':
             await premium.revoke(uid); await state.clear(); return await message.answer(f"✅ <code>{uid}</code> Premiumdan chiqarildi.",reply_markup=admin_kb())
-        if len(nums)<2: return await message.answer("❌ Kun sonini ham yuboring: <code>USER_ID KUN</code>")
-        days=int(nums[1]); row=await premium.grant(uid,days,message.from_user.id,extend=(mode=='extend'))
+        days=int(parts[1]); row=await premium.grant(uid,days,message.from_user.id,extend=(mode=='extend'))
         exp=row.get('expires_at','')[:19].replace('T',' ')
         await state.clear()
         await message.answer(f"✅ <b>Premium {'uzaytirildi' if mode=='extend' else 'berildi'}</b>\n\n👤 ID: <code>{uid}</code>\n⏱ Muddat: <b>{days} kun</b>\n📅 Tugaydi: <code>{exp} UTC</code>",reply_markup=admin_kb())
