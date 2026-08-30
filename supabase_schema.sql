@@ -159,3 +159,15 @@ notify pgrst, 'reload schema';
 --   • "create index if not exists" — mavjud indeksga TEGMAYDI
 --   • Ustundagi mavjud MA'LUMOT hech qachon o'chirilmaydi/yozilmaydi
 -- ════════════════════════════════════════════════════════════════
+
+
+-- GLOBAL PREMIUM IDS
+create table if not exists premium_users (
+ user_id bigint primary key,
+ started_at timestamptz not null default now(),
+ expires_at timestamptz not null,
+ granted_by bigint,
+ created_at timestamptz not null default now(),
+ updated_at timestamptz not null default now()
+);
+create index if not exists idx_premium_expires on premium_users(expires_at);
