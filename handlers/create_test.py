@@ -1911,20 +1911,85 @@ async def method_poll(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CreateTest.waiting_polls)
 
 
+# Kanalga rasm yuborishda ham flood control'ga uchramaslik uchun,
+# _upload_images_to_channel bilan bir xil minimal oraliq va uid bo'yicha
+# oxirgi yuborish vaqtini kuzatamiz (global — botning o'zi bitta chatga
+# yuboradi, foydalanuvchidan qat'iy nazar).
+_last_channel_send_ts = 0.0
+
+
 @router.message(F.photo, CreateTest.waiting_polls)
 async def catch_poll_photo(message: Message, state: FSMContext):
     """
     QuizBot forward oqimida rasm avval, undan keyin tegishli quiz keladi.
-    Rasmni saqlab qolamiz — keyingi catch_poll shu rasmni savolga bog'laydi.
+
+    QOIDA: rasm faqat va faqat STORAGE_CHANNEL_ID kanaliga muvaffaqiyatli
+    yuklangandan keyin ishlatiladi. Asl (forward'dan kelgan, noma'lum
+    manbali) file_id HECH QACHON saqlanmaydi — chunki u botning boshqa bir
+    chatidan kelgan bo'lib, kelajakda ishlamay qolishi ehtimoli bor.
+    Kanalga yuklash muvaffaqiyatsiz bo'lsa, savol RASMSIZ qoladi va
+    foydalanuvchiga aniq ogohlantirish yuboriladi (jim yo'qotilmaydi).
 
     Lock bilan o'ralgan: ketma-ket forward qilingan rasm+poll juftliklari
     aiogram tomonidan parallel (concurrent task) ishlanganda ham,
     _pending_photo bir-birining ustidan yozilib ketmasligi uchun.
     """
+    global _last_channel_send_ts
+    from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
+
     uid = message.from_user.id
+    src_file_id   = message.photo[-1].file_id
+    saved_file_id = None   # faqat kanalga yuklangandan keyin to'ldiriladi
+
+    from config import STORAGE_CHANNEL_ID
+    if not STORAGE_CHANNEL_ID:
+        log.error("catch_poll_photo: STORAGE_CHANNEL_ID sozlanmagan — rasm o'tkazib yuborildi")
+        await message.answer(
+            "⚠️ Rasm saqlanmadi: bot sozlamalarida STORAGE_CHANNEL_ID "
+            "ko'rsatilmagan. Iltimos adminga murojaat qiling."
+        )
+    else:
+        MIN_INTERVAL = 1.1
+        MAX_ATTEMPTS = 8
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            elapsed = asyncio.get_event_loop().time() - _last_channel_send_ts
+            if elapsed < MIN_INTERVAL:
+                await asyncio.sleep(MIN_INTERVAL - elapsed)
+            try:
+                copied = await message.bot.send_photo(
+                    chat_id=STORAGE_CHANNEL_ID,
+                    photo=src_file_id,
+                    caption="📷 QuizBot forward",
+                    disable_notification=True,
+                )
+                _last_channel_send_ts = asyncio.get_event_loop().time()
+                if copied.photo:
+                    saved_file_id = copied.photo[-1].file_id
+                    log.info(f"catch_poll_photo: rasm kanalga yuklandi -> {saved_file_id[:25]}...")
+                break
+            except TelegramRetryAfter as e:
+                log.warning(f"catch_poll_photo: flood control, {e.retry_after}s kutilmoqda (urinish {attempt}/{MAX_ATTEMPTS})")
+                await asyncio.sleep(e.retry_after + 1)
+                _last_channel_send_ts = asyncio.get_event_loop().time()
+            except TelegramNetworkError as e:
+                log.warning(f"catch_poll_photo: tarmoq xatosi (urinish {attempt}/{MAX_ATTEMPTS}): {e}")
+                await asyncio.sleep(min(2 * attempt, 10))
+            except Exception as e:
+                log.error(f"catch_poll_photo: kanalga yuklashda xato ({type(e).__name__}): {e}")
+                break
+
+        if saved_file_id is None:
+            log.error(f"catch_poll_photo: rasm {MAX_ATTEMPTS} urinishdan keyin ham kanalga yuklanmadi (uid={uid})")
+            await message.answer(
+                "⚠️ Ushbu rasmni saqlashda xatolik yuz berdi — savol RASMSIZ qo'shiladi. "
+                "Iltimos keyinroq shu rasm+savolni qaytadan forward qilib ko'ring."
+            )
+
     async with _get_poll_lock(uid):
-        # Eng katta o'lchamdagi versiyasini olamiz
-        _pending_photo[uid] = message.photo[-1].file_id
+        if saved_file_id:
+            _pending_photo[uid] = saved_file_id
+        else:
+            _pending_photo.pop(uid, None)   # eskisi bo'lsa ham tozalaymiz
     await _del(message.bot, message.chat.id, message.message_id)
 
 
@@ -1946,6 +2011,7 @@ async def catch_poll(message: Message, state: FSMContext):
     async with _get_poll_lock(uid):
         # Bevosita oldin rasm kelgan bo'lsa — shu savolga biriktiramiz
         photo_id = _pending_photo.pop(uid, None)
+        log.info(f"catch_poll: uid={uid}, photo_id={'BOR: '+photo_id[:25]+'...' if photo_id else 'YO`Q'}")
 
         d  = await state.get_data()
         qs = d.get("questions", [])
