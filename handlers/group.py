@@ -272,10 +272,18 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
         # Rasm bo'lsa — poll oldidan yuborish
         if photo_id:
             try:
-                await bot.send_photo(chat_id, photo_id, protect_content=True)
-                await asyncio.sleep(0.5)
+                photo_mid = q.get("photo_message_id") or q.get("storage_message_id")
+                photo_channel = q.get("photo_channel_id")
+                if photo_mid and photo_channel:
+                    await bot.copy_message(chat_id=chat_id, from_chat_id=int(photo_channel), message_id=int(photo_mid), protect_content=True)
+                else:
+                    await bot.send_photo(chat_id, photo_id, protect_content=True)
+                await asyncio.sleep(0.2)
             except Exception as e:
-                log.error(f"Rasm yuborishda xato (savol {current}): {e}")
+                try:
+                    await bot.send_photo(chat_id, photo_id, protect_content=True)
+                except Exception as e2:
+                    log.error(f"Rasm yuborishda xato (savol {current}): copy={e}; fallback={e2}")
 
         # Savol matni uzun bo'lsa — to'liq matnni alohida xabar qilib
         # yuboramiz, poll'ga esa qisqa sarlavha ketadi. Variantlarni va
@@ -285,7 +293,9 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
         full_text, poll_qtxt = split_long_question(qtxt, hdr_poll)
         if full_text:
             try:
-                await bot.send_message(chat_id, full_text, protect_content=True)
+                
+                for _part in full_text:
+                    await bot.send_message(chat_id, _part, protect_content=True)
                 await asyncio.sleep(0.3)
             except Exception as e:
                 log.error(f"Uzun savol matnini yuborishda xato (savol {current}): {e}")
@@ -1242,8 +1252,8 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
     from utils.ram_cache import get_test_meta as _gtm
     from config import ADMIN_USERNAME
     _meta_g  = _gtm(tid) or {}
-    _allowed = _meta_g.get("allowed_users", [])
-    if _allowed and uid not in _allowed:
+    from utils.premium import can_access
+    if not await can_access(_meta_g, uid):
         b = InlineKeyboardBuilder()
         b.row(InlineKeyboardButton(
             text="📩 Adminga murojat",

@@ -1092,7 +1092,9 @@ async def quiz_poll_export(callback: CallbackQuery, state: FSMContext):
         full_text, poll_qtxt = split_long_question(qtxt)
         if full_text:
             try:
-                await callback.bot.send_message(uid, full_text)
+                
+                for _part in full_text:
+                    await callback.bot.send_message(uid, _part)
                 await _aio.sleep(0.3)
             except Exception as e:
                 log.error(f"Uzun savol matnini yuborishda xato {i}: {e}")

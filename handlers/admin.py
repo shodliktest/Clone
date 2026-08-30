@@ -71,6 +71,72 @@ def _fmt_mb(bytes_val: int) -> float:
     return round((bytes_val or 0) / 1024 / 1024, 1)
 
 
+# ══ PREMIUM ID BOSHQARUVI ═══════════════════════════════════════
+@router.callback_query(F.data == "admin_premium")
+async def admin_premium(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    from utils.premium import active_list
+    rows = await active_list(100)
+    lines = ["⭐ <b>PREMIUM ID BOSHQARUVI</b>", "━━━━━━━━━━━━━━━━━━━━━━━━"]
+    lines.append(f"Faol Premium: <b>{len(rows)}</b> ta\n")
+    if rows:
+        for r in rows[:30]:
+            exp = str(r.get("expires_at", ""))[:16].replace("T", " ")
+            lines.append(f"• <code>{r['user_id']}</code> — ⏳ {exp} UTC")
+        if len(rows) > 30: lines.append(f"\n… yana {len(rows)-30} ta")
+    else: lines.append("<i>Faol Premium ID yo‘q</i>")
+    b=InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="➕ Premium berish",callback_data="premium_add"))
+    b.row(InlineKeyboardButton(text="➕ Muddatni uzaytirish",callback_data="premium_extend"))
+    b.row(InlineKeyboardButton(text="❌ Premiumni bekor qilish",callback_data="premium_revoke"))
+    b.row(InlineKeyboardButton(text="🔄 Yangilash",callback_data="admin_premium"))
+    b.row(InlineKeyboardButton(text="⬅️ Admin panel",callback_data="admin_panel"))
+    await callback.message.edit_text("\n".join(lines),reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data == "premium_add")
+async def premium_add_cb(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return await callback.answer("🚫",show_alert=True)
+    await callback.answer(); await state.set_state(AdminPanel.premium_manage); await state.update_data(premium_mode="add")
+    await callback.message.edit_text("➕ <b>PREMIUM BERISH</b>\n\nFormat: <code>USER_ID KUN</code>\nMasalan: <code>123456789 30</code>\n\n⏱ 1–3650 kun.\n/cancel — bekor qilish")
+
+@router.callback_query(F.data == "premium_extend")
+async def premium_extend_cb(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return await callback.answer("🚫",show_alert=True)
+    await callback.answer(); await state.set_state(AdminPanel.premium_manage); await state.update_data(premium_mode="extend")
+    await callback.message.edit_text("➕ <b>PREMIUM MUDDATINI UZAYTIRISH</b>\n\nFormat: <code>USER_ID KUN</code>\nMasalan: <code>123456789 30</code>\n\nYangi kunlar mavjud muddat ustiga qo‘shiladi.")
+
+@router.callback_query(F.data == "premium_revoke")
+async def premium_revoke_cb(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return await callback.answer("🚫",show_alert=True)
+    await callback.answer(); await state.set_state(AdminPanel.premium_manage); await state.update_data(premium_mode="revoke")
+    await callback.message.edit_text("❌ <b>PREMIUMNI BEKOR QILISH</b>\n\nFormat: <code>USER_ID</code>\nMasalan: <code>123456789</code>")
+
+@router.message(AdminPanel.premium_manage)
+async def premium_manage_input(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    raw=(message.text or '').strip()
+    if raw.lower()=='/cancel': await state.clear(); return await message.answer("Bekor qilindi.",reply_markup=admin_kb())
+    d=await state.get_data(); mode=d.get('premium_mode'); import re
+    nums=re.findall(r'\d{5,15}',raw)
+    if not nums: return await message.answer("❌ Telegram ID noto‘g‘ri.")
+    uid=int(nums[0])
+    try:
+        from utils import premium
+        if mode=='revoke':
+            await premium.revoke(uid); await state.clear(); return await message.answer(f"✅ <code>{uid}</code> Premiumdan chiqarildi.",reply_markup=admin_kb())
+        if len(nums)<2: return await message.answer("❌ Kun sonini ham yuboring: <code>USER_ID KUN</code>")
+        days=int(nums[1]); row=await premium.grant(uid,days,message.from_user.id,extend=(mode=='extend'))
+        exp=row.get('expires_at','')[:19].replace('T',' ')
+        await state.clear()
+        await message.answer(f"✅ <b>Premium {'uzaytirildi' if mode=='extend' else 'berildi'}</b>\n\n👤 ID: <code>{uid}</code>\n⏱ Muddat: <b>{days} kun</b>\n📅 Tugaydi: <code>{exp} UTC</code>",reply_markup=admin_kb())
+        try:
+            await message.bot.send_message(uid,f"🎉 <b>Premium faollashtirildi!</b>\n\n⭐ Sizga Premium {'muddat uzaytirildi' if mode=='extend' else 'berildi'}.\n⏱ Qo‘shilgan muddat: <b>{days} kun</b>\n📅 Tugash sanasi: <code>{exp} UTC</code>\n\n🔐 Premium muddati davomida ID bilan cheklangan testlarning barchasiga kirishingiz mumkin.",parse_mode='HTML')
+        except Exception as e: log.warning('premium user notify %s: %s',uid,e)
+    except Exception as e:
+        log.exception('premium manage: %s',e); await message.answer(f"❌ Saqlashda xato: <code>{str(e)[:300]}</code>")
+
 # ══ STATISTIKA ════════════════════════════════════════════════
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: CallbackQuery):
