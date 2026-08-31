@@ -340,7 +340,7 @@ async def _resolve_photo_id(bot, state, d, photo_id: str) -> str:
     try:
         msg = await bot.send_photo(
             STORAGE_CHANNEL_ID, photo_id,
-            caption="",
+            caption="📷 Poll uchun avtomatik o'girildi",
             disable_notification=True,
         )
         if not msg.photo:
@@ -423,7 +423,8 @@ async def _send_poll(bot, cid, state):
                 q["photo"] = resolved      # joriy sessiyada ham keshlanadi
                 await state.update_data(qs=qs)
                 photo_id = resolved
-            await bot.send_photo(cid, photo_id, caption="")
+            from utils.photo_sender import send_test_photo
+            await send_test_photo(bot, cid, q)
         except Exception as e:
             log.error(f"Poll rasm xato: {e}")
 

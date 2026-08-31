@@ -159,7 +159,8 @@ async def _show_next_question(bot, cid, msg_id, qs, idx, state, uid):
             photo_id = pm_match.group(1).strip()
     if photo_id:
         try:
-            await bot.send_photo(cid, photo_id, caption="", protect_content=True)
+            from utils.photo_sender import send_test_photo
+            await send_test_photo(bot, cid, q)
         except Exception as e:
             log.error(f"Inline rasm xato: {e}")
     text, kb, is_text = _build_question_content(qs, idx, time_left=QUESTION_SEC)
@@ -693,7 +694,7 @@ async def _send_question_new(bot, cid, state, uid):
             photo_id_first = pm_f.group(1).strip()
     if photo_id_first:
         try:
-            await bot.send_photo(cid, photo_id_first, caption="", protect_content=True)
+            await bot.send_photo(cid, photo_id_first, protect_content=True)
         except Exception as e:
             log.error(f"Inline rasm xato: {e}")
     text, kb, is_text = _build_question_content(qs, idx, time_left=QUESTION_SEC)

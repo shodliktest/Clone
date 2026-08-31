@@ -517,12 +517,14 @@ async def _upload_images_to_channel(bot, questions: list) -> tuple:
                 photo = BufferedInputFile(img_bytes, filename=fname)
                 msg = await bot.send_photo(
                     media_channel, photo,
-                    caption="",
+                    caption=None,
                     disable_notification=True,
                 )
                 last_send_ts = asyncio.get_event_loop().time()
                 if msg.photo:
                     q["photo"] = msg.photo[-1].file_id
+                    q["photo_storage_chat_id"] = media_channel
+                    q["photo_storage_message_id"] = msg.message_id
                     uploaded += 1
                 q.pop("_img_bytes", None)
                 q.pop("_img_ext", None)
@@ -1940,6 +1942,8 @@ async def catch_poll_photo(message: Message, state: FSMContext):
     uid = message.from_user.id
     src_file_id   = message.photo[-1].file_id
     saved_file_id = None   # faqat kanalga yuklangandan keyin to'ldiriladi
+    saved_storage_chat_id = None
+    saved_storage_message_id = None
 
     from config import STORAGE_CHANNEL_ID
     if not STORAGE_CHANNEL_ID:
@@ -1959,12 +1963,16 @@ async def catch_poll_photo(message: Message, state: FSMContext):
                 copied = await message.bot.send_photo(
                     chat_id=STORAGE_CHANNEL_ID,
                     photo=src_file_id,
-                    caption="",
+                    caption=None,
                     disable_notification=True,
                 )
                 _last_channel_send_ts = asyncio.get_event_loop().time()
                 if copied.photo:
                     saved_file_id = copied.photo[-1].file_id
+                    # The file_id is primary; storage message id is a durable
+                    # fallback if Telegram later rejects the cached file_id.
+                    saved_storage_chat_id = STORAGE_CHANNEL_ID
+                    saved_storage_message_id = copied.message_id
                     log.info(f"catch_poll_photo: rasm kanalga yuklandi -> {saved_file_id[:25]}...")
                 break
             except TelegramRetryAfter as e:
@@ -1987,7 +1995,11 @@ async def catch_poll_photo(message: Message, state: FSMContext):
 
     async with _get_poll_lock(uid):
         if saved_file_id:
-            _pending_photo[uid] = saved_file_id
+            _pending_photo[uid] = {
+                "photo": saved_file_id,
+                "storage_chat_id": saved_storage_chat_id,
+                "storage_message_id": saved_storage_message_id,
+            }
         else:
             _pending_photo.pop(uid, None)   # eskisi bo'lsa ham tozalaymiz
     await _del(message.bot, message.chat.id, message.message_id)
@@ -2010,7 +2022,15 @@ async def catch_poll(message: Message, state: FSMContext):
     uid = message.from_user.id
     async with _get_poll_lock(uid):
         # Bevosita oldin rasm kelgan bo'lsa — shu savolga biriktiramiz
-        photo_id = _pending_photo.pop(uid, None)
+        pending = _pending_photo.pop(uid, None)
+        if isinstance(pending, dict):
+            photo_id = pending.get("photo")
+            photo_storage_chat_id = pending.get("storage_chat_id")
+            photo_storage_message_id = pending.get("storage_message_id")
+        else:
+            photo_id = pending
+            photo_storage_chat_id = None
+            photo_storage_message_id = None
         log.info(f"catch_poll: uid={uid}, photo_id={'BOR: '+photo_id[:25]+'...' if photo_id else 'YO`Q'}")
 
         d  = await state.get_data()
@@ -2025,6 +2045,10 @@ async def catch_poll(message: Message, state: FSMContext):
         }
         if photo_id:
             new_q["photo"] = photo_id
+            if photo_storage_chat_id is not None:
+                new_q["photo_storage_chat_id"] = photo_storage_chat_id
+            if photo_storage_message_id is not None:
+                new_q["photo_storage_message_id"] = photo_storage_message_id
         qs.append(new_q)
         await state.update_data(questions=qs)
         count = len(qs)
