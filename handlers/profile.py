@@ -1082,7 +1082,7 @@ async def quiz_poll_export(callback: CallbackQuery, state: FSMContext):
         photo_id = q.get("photo") or q.get("image") or None
         if photo_id:
             try:
-                await callback.bot.send_photo(uid, photo_id, caption="")
+                await callback.bot.send_photo(uid, photo_id)
                 await _aio.sleep(0.3)
             except Exception as e:
                 log.error(f"Quiz eksport rasm xato {i}: {e}")

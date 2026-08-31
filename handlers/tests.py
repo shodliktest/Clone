@@ -159,8 +159,7 @@ async def _show_next_question(bot, cid, msg_id, qs, idx, state, uid):
             photo_id = pm_match.group(1).strip()
     if photo_id:
         try:
-            from utils.photo_sender import send_test_photo
-            await send_test_photo(bot, cid, q)
+            await bot.send_photo(cid, photo_id, protect_content=True)
         except Exception as e:
             log.error(f"Inline rasm xato: {e}")
     text, kb, is_text = _build_question_content(qs, idx, time_left=QUESTION_SEC)

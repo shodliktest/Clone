@@ -1,5 +1,6 @@
 """➕ TEST YARATISH — Fayl yoki QuizBot forward"""
 import os, re, logging, tempfile, asyncio
+from collections import deque
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
 from aiogram.fsm.context import FSMContext
@@ -125,7 +126,12 @@ _poll_debounce:    dict = {}  # {uid: asyncio.Task}
 _save_in_progress: set  = set()   # Double-click himoyasi
 _poll_progress: dict = {}  # {uid: progress_msg_id}
 _poll_count:    dict = {}  # {uid: savol soni}
-_pending_photo: dict = {}  # {uid: file_id} — waiting_polls'da oxirgi kelgan, hali quiz'ga bog'lanmagan rasm
+# Forward qilingan rasmlar navbati. Har bir element — storage kanaliga
+# yuklanish natijasini beradigan Future. Future'ni RASM handleri birinchi
+# navbatda ro'yxatga qo'yadi; shuning uchun parallel update'larda poll rasm
+# kanalga yuklanishini kutib, file_id'ni yo'qotmaydi.
+_pending_photo_futures: dict = {}  # {uid: deque[Future[str|None]]}
+_channel_send_lock = asyncio.Lock()
 
 # aiogram handle_as_tasks=True bilan har bir update ALOHIDA asyncio.Task
 # sifatida, bir-biriga nisbatan PARALLEL ishga tushadi. Foydalanuvchi
@@ -517,14 +523,12 @@ async def _upload_images_to_channel(bot, questions: list) -> tuple:
                 photo = BufferedInputFile(img_bytes, filename=fname)
                 msg = await bot.send_photo(
                     media_channel, photo,
-                    caption=None,
+                    caption=f"📷 Savol #{idx+1}",
                     disable_notification=True,
                 )
                 last_send_ts = asyncio.get_event_loop().time()
                 if msg.photo:
                     q["photo"] = msg.photo[-1].file_id
-                    q["photo_storage_chat_id"] = media_channel
-                    q["photo_storage_message_id"] = msg.message_id
                     uploaded += 1
                 q.pop("_img_bytes", None)
                 q.pop("_img_ext", None)
@@ -1909,7 +1913,7 @@ async def method_poll(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
     _poll_progress[uid] = callback.message.message_id
     _poll_count[uid] = 0
-    _pending_photo.pop(uid, None)
+    _pending_photo_futures.pop(uid, None)
     await state.set_state(CreateTest.waiting_polls)
 
 
@@ -1923,86 +1927,96 @@ _last_channel_send_ts = 0.0
 @router.message(F.photo, CreateTest.waiting_polls)
 async def catch_poll_photo(message: Message, state: FSMContext):
     """
-    QuizBot forward oqimida rasm avval, undan keyin tegishli quiz keladi.
+    QuizBot forward oqimi: RASM -> QUIZ.
 
-    QOIDA: rasm faqat va faqat STORAGE_CHANNEL_ID kanaliga muvaffaqiyatli
-    yuklangandan keyin ishlatiladi. Asl (forward'dan kelgan, noma'lum
-    manbali) file_id HECH QACHON saqlanmaydi — chunki u botning boshqa bir
-    chatidan kelgan bo'lib, kelajakda ishlamay qolishi ehtimoli bor.
-    Kanalga yuklash muvaffaqiyatsiz bo'lsa, savol RASMSIZ qoladi va
-    foydalanuvchiga aniq ogohlantirish yuboriladi (jim yo'qotilmaydi).
-
-    Lock bilan o'ralgan: ketma-ket forward qilingan rasm+poll juftliklari
-    aiogram tomonidan parallel (concurrent task) ishlanganda ham,
-    _pending_photo bir-birining ustidan yozilib ketmasligi uchun.
+    Muhim arxitektura:
+      1) Forwarddagi original file_id faqat storage kanaliga yuborish uchun.
+      2) Storage kanaliga yangi rasm yuboriladi.
+      3) Kanal qaytargan yangi photo.file_id — test savoliga yoziladigan ID.
+      4) Rasm handleri Future'ni upload boshlanishidan OLDIN queue'ga qo'yadi.
+         Shu sababli rasm+poll parallel update bo'lib kelsa ham poll rasmni
+         kutadi va pairing buzilmaydi.
+      5) Kanalga caption yuborilmaydi.
     """
-    global _last_channel_send_ts
     from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
+    from config import STORAGE_CHANNEL_ID
 
     uid = message.from_user.id
-    src_file_id   = message.photo[-1].file_id
-    saved_file_id = None   # faqat kanalga yuklangandan keyin to'ldiriladi
-    saved_storage_chat_id = None
-    saved_storage_message_id = None
+    src_file_id = message.photo[-1].file_id
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    queue = _pending_photo_futures.setdefault(uid, deque())
+    queue.append(future)
 
-    from config import STORAGE_CHANNEL_ID
-    if not STORAGE_CHANNEL_ID:
-        log.error("catch_poll_photo: STORAGE_CHANNEL_ID sozlanmagan — rasm o'tkazib yuborildi")
-        await message.answer(
-            "⚠️ Rasm saqlanmadi: bot sozlamalarida STORAGE_CHANNEL_ID "
-            "ko'rsatilmagan. Iltimos adminga murojaat qiling."
-        )
-    else:
+    async def _store() -> str | None:
+        global _last_channel_send_ts
+        if not STORAGE_CHANNEL_ID:
+            log.error("catch_poll_photo: STORAGE_CHANNEL_ID sozlanmagan")
+            return None
+
         MIN_INTERVAL = 1.1
         MAX_ATTEMPTS = 8
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            elapsed = asyncio.get_event_loop().time() - _last_channel_send_ts
-            if elapsed < MIN_INTERVAL:
-                await asyncio.sleep(MIN_INTERVAL - elapsed)
-            try:
-                copied = await message.bot.send_photo(
-                    chat_id=STORAGE_CHANNEL_ID,
-                    photo=src_file_id,
-                    caption=None,
-                    disable_notification=True,
-                )
-                _last_channel_send_ts = asyncio.get_event_loop().time()
-                if copied.photo:
-                    saved_file_id = copied.photo[-1].file_id
-                    # The file_id is primary; storage message id is a durable
-                    # fallback if Telegram later rejects the cached file_id.
-                    saved_storage_chat_id = STORAGE_CHANNEL_ID
-                    saved_storage_message_id = copied.message_id
-                    log.info(f"catch_poll_photo: rasm kanalga yuklandi -> {saved_file_id[:25]}...")
-                break
-            except TelegramRetryAfter as e:
-                log.warning(f"catch_poll_photo: flood control, {e.retry_after}s kutilmoqda (urinish {attempt}/{MAX_ATTEMPTS})")
-                await asyncio.sleep(e.retry_after + 1)
-                _last_channel_send_ts = asyncio.get_event_loop().time()
-            except TelegramNetworkError as e:
-                log.warning(f"catch_poll_photo: tarmoq xatosi (urinish {attempt}/{MAX_ATTEMPTS}): {e}")
-                await asyncio.sleep(min(2 * attempt, 10))
-            except Exception as e:
-                log.error(f"catch_poll_photo: kanalga yuklashda xato ({type(e).__name__}): {e}")
-                break
 
-        if saved_file_id is None:
-            log.error(f"catch_poll_photo: rasm {MAX_ATTEMPTS} urinishdan keyin ham kanalga yuklanmadi (uid={uid})")
+        # Barcha foydalanuvchilar uchun bitta storage kanalga yuborish
+        # ketma-ketligi. Flood-control va parallel upload'larni nazorat qiladi.
+        async with _channel_send_lock:
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                elapsed = asyncio.get_running_loop().time() - _last_channel_send_ts
+                if elapsed < MIN_INTERVAL:
+                    await asyncio.sleep(MIN_INTERVAL - elapsed)
+                try:
+                    copied = await message.bot.send_photo(
+                        chat_id=STORAGE_CHANNEL_ID,
+                        photo=src_file_id,
+                        caption="",
+                        disable_notification=True,
+                    )
+                    _last_channel_send_ts = asyncio.get_running_loop().time()
+                    if copied.photo:
+                        saved_file_id = copied.photo[-1].file_id
+                        log.info(
+                            "catch_poll_photo: storage channel file_id olindi -> %s...",
+                            saved_file_id[:25],
+                        )
+                        return saved_file_id
+                    return None
+                except TelegramRetryAfter as e:
+                    wait = int(e.retry_after) + 1
+                    log.warning(
+                        "catch_poll_photo: flood control, %ss kutilmoqda "
+                        "(urinish %s/%s)", wait, attempt, MAX_ATTEMPTS
+                    )
+                    await asyncio.sleep(wait)
+                except TelegramNetworkError as e:
+                    log.warning(
+                        "catch_poll_photo: tarmoq xatosi (urinish %s/%s): %s",
+                        attempt, MAX_ATTEMPTS, e,
+                    )
+                    await asyncio.sleep(min(2 * attempt, 10))
+                except Exception as e:
+                    log.error(
+                        "catch_poll_photo: storage kanaliga yuklash xatosi "
+                        "(%s): %s", type(e).__name__, e
+                    )
+                    if attempt < MAX_ATTEMPTS:
+                        await asyncio.sleep(min(2 * attempt, 10))
+            return None
+
+    try:
+        saved_file_id = await _store()
+        if not future.done():
+            future.set_result(saved_file_id)
+        if not saved_file_id:
             await message.answer(
-                "⚠️ Ushbu rasmni saqlashda xatolik yuz berdi — savol RASMSIZ qo'shiladi. "
-                "Iltimos keyinroq shu rasm+savolni qaytadan forward qilib ko'ring."
+                "⚠️ Ushbu rasmni saqlashda xatolik yuz berdi — "
+                "savol rasm bilan bog'lanmadi. Rasm+savolni qaytadan forward qiling."
             )
-
-    async with _get_poll_lock(uid):
-        if saved_file_id:
-            _pending_photo[uid] = {
-                "photo": saved_file_id,
-                "storage_chat_id": saved_storage_chat_id,
-                "storage_message_id": saved_storage_message_id,
-            }
-        else:
-            _pending_photo.pop(uid, None)   # eskisi bo'lsa ham tozalaymiz
-    await _del(message.bot, message.chat.id, message.message_id)
+    except Exception as e:
+        log.error("catch_poll_photo: kutilmagan xato: %s", e, exc_info=True)
+        if not future.done():
+            future.set_result(None)
+    finally:
+        await _del(message.bot, message.chat.id, message.message_id)
 
 
 @router.message(F.poll, CreateTest.waiting_polls)
@@ -2021,17 +2035,26 @@ async def catch_poll(message: Message, state: FSMContext):
 
     uid = message.from_user.id
     async with _get_poll_lock(uid):
-        # Bevosita oldin rasm kelgan bo'lsa — shu savolga biriktiramiz
-        pending = _pending_photo.pop(uid, None)
-        if isinstance(pending, dict):
-            photo_id = pending.get("photo")
-            photo_storage_chat_id = pending.get("storage_chat_id")
-            photo_storage_message_id = pending.get("storage_message_id")
-        else:
-            photo_id = pending
-            photo_storage_chat_id = None
-            photo_storage_message_id = None
-        log.info(f"catch_poll: uid={uid}, photo_id={'BOR: '+photo_id[:25]+'...' if photo_id else 'YO`Q'}")
+        # Rasm handleri Future'ni upload boshlanishidan oldin queue'ga qo'yadi.
+        # Shuning uchun parallel rasm+poll update bo'lsa, poll storage kanalidan
+        # yangi file_id kelishini kutadi. Rasm bo'lmasa queue bo'sh qoladi.
+        photo_id = None
+        photo_queue = _pending_photo_futures.get(uid)
+        if photo_queue:
+            photo_future = photo_queue.popleft()
+            try:
+                photo_id = await photo_future
+            except Exception as e:
+                log.error("catch_poll: rasm Future xatosi: %s", e)
+                photo_id = None
+            if not photo_queue:
+                _pending_photo_futures.pop(uid, None)
+
+        log.info(
+            "catch_poll: uid=%s, photo_id=%s",
+            uid,
+            ('BOR: ' + photo_id[:25] + '...' if photo_id else "YO'Q"),
+        )
 
         d  = await state.get_data()
         qs = d.get("questions", [])
@@ -2045,10 +2068,6 @@ async def catch_poll(message: Message, state: FSMContext):
         }
         if photo_id:
             new_q["photo"] = photo_id
-            if photo_storage_chat_id is not None:
-                new_q["photo_storage_chat_id"] = photo_storage_chat_id
-            if photo_storage_message_id is not None:
-                new_q["photo_storage_message_id"] = photo_storage_message_id
         qs.append(new_q)
         await state.update_data(questions=qs)
         count = len(qs)

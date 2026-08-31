@@ -423,8 +423,7 @@ async def _send_poll(bot, cid, state):
                 q["photo"] = resolved      # joriy sessiyada ham keshlanadi
                 await state.update_data(qs=qs)
                 photo_id = resolved
-            from utils.photo_sender import send_test_photo
-            await send_test_photo(bot, cid, q)
+            await bot.send_photo(cid, photo_id)
         except Exception as e:
             log.error(f"Poll rasm xato: {e}")
 

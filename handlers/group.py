@@ -272,8 +272,7 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
         # Rasm bo'lsa — poll oldidan yuborish
         if photo_id:
             try:
-                from utils.photo_sender import send_test_photo
-                await send_test_photo(bot, chat_id, q)
+                await bot.send_photo(chat_id, photo_id, protect_content=True)
                 await asyncio.sleep(0.5)
             except Exception as e:
                 log.error(f"Rasm yuborishda xato (savol {current}): {e}")
@@ -502,8 +501,7 @@ async def _run_inline_session(
                 qtxt     = qtxt[pm_match.end():].strip()
         if photo_id:
             try:
-                from utils.photo_sender import send_test_photo
-                await send_test_photo(bot, chat_id, q)
+                await bot.send_photo(chat_id, photo_id, protect_content=True)
                 await asyncio.sleep(0.5)
             except Exception as e:
                 log.error(f"Inline rasm yuborishda xato (savol {i+1}): {e}")
