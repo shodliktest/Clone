@@ -17,15 +17,6 @@ router = Router()
 LT     = ["A","B","C","D","E","F","G","H","I","J"]
 POLL_TYPES = ("multiple_choice", "multiple", "true_false", "multi_select", "quiz")
 _poll_timers: dict = {}
-_poll_send_locks: dict = {}  # {chat_id: asyncio.Lock()} — image + text + poll atomik tartibda
-
-def _get_poll_send_lock(cid: int) -> asyncio.Lock:
-    lock = _poll_send_locks.get(cid)
-    if lock is None:
-        lock = asyncio.Lock()
-        _poll_send_locks[cid] = lock
-    return lock
-
 
 COUNT_EMOJIS = ["3️⃣","2️⃣","1️⃣","🚀"]
 
@@ -124,8 +115,8 @@ async def start_poll(callback: CallbackQuery, state: FSMContext):
             logging.getLogger(__name__).warning(f"ref check poll: {_re}")
 
     # Ruxsat tekshiruvi
-    from utils.premium import can_access
-    if not await can_access(meta, uid):
+    allowed = meta.get("allowed_users", [])
+    if allowed and uid not in allowed:
         return await _send_no_access(callback, meta)
 
     # Urinishlar cheklovi
@@ -241,7 +232,7 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
         all_qs = all_qs[:demo_count]
 
     # Variantlarni aralashtirish + savol matni variantdan olib tashlash
-    LABELS = ["A","B","C","D","E","F","G","H","I","J"]
+    LABELS = ["A","B","C","D","E","F","G","H"]
     def _strip(o): return _re.sub(r"^[A-Ha-h]\s*[).:]\s*", "", str(o)).strip()
     for q in all_qs:
         if q.get("type") not in ("multiple_choice", "multiple", "multi_select"):
@@ -349,7 +340,7 @@ async def _resolve_photo_id(bot, state, d, photo_id: str) -> str:
     try:
         msg = await bot.send_photo(
             STORAGE_CHANNEL_ID, photo_id,
-            caption="📷 Poll uchun avtomatik o'girildi",
+            caption="",
             disable_notification=True,
         )
         if not msg.photo:
@@ -383,12 +374,6 @@ async def _resolve_photo_id(bot, state, d, photo_id: str) -> str:
 
 
 async def _send_poll(bot, cid, state):
-    """Bitta savolning RASM -> SAVOL -> QUIZ ketma-ketligini atomik yuboradi."""
-    async with _get_poll_send_lock(cid):
-        return await _send_poll_impl(bot, cid, state)
-
-
-async def _send_poll_impl(bot, cid, state):
     d   = await state.get_data()
     qs  = d["qs"]
     idx = d["idx"]
@@ -433,29 +418,14 @@ async def _send_poll_impl(bot, cid, state):
             qtxt     = qtxt[pm_match.end():].strip()
     if photo_id:
         try:
-            # Eng ishonchli usul — kanal xabar ID orqali copy_message.
-            # Bu Telegram CDN file_id'ga bog'lanib qolmaydi.
-            photo_mid = q.get("photo_message_id") or q.get("storage_message_id")
-            photo_channel = q.get("photo_channel_id")
-            if photo_mid and photo_channel:
-                await bot.copy_message(
-                    chat_id=cid,
-                    from_chat_id=int(photo_channel),
-                    message_id=int(photo_mid),
-                )
-            else:
-                resolved = await _resolve_photo_id(bot, state, d, photo_id)
-                if resolved != photo_id:
-                    q["photo"] = resolved
-                    await state.update_data(qs=qs)
-                    photo_id = resolved
-                await bot.send_photo(cid, photo_id)
+            resolved = await _resolve_photo_id(bot, state, d, photo_id)
+            if resolved != photo_id:
+                q["photo"] = resolved      # joriy sessiyada ham keshlanadi
+                await state.update_data(qs=qs)
+                photo_id = resolved
+            await bot.send_photo(cid, photo_id, caption="")
         except Exception as e:
-            # copy_message ishlamasa eski file_id fallback.
-            try:
-                await bot.send_photo(cid, photo_id)
-            except Exception as e2:
-                log.error(f"Poll rasm xato: copy={e}; fallback={e2}")
+            log.error(f"Poll rasm xato: {e}")
 
     hdr  = f"[{idx+1}/{len(qs)}] "
 
@@ -463,8 +433,7 @@ async def _send_poll_impl(bot, cid, state):
     full_text, poll_q = split_long_question(qtxt, hdr)
     if full_text:
         try:
-            for part in full_text:
-                await bot.send_message(cid, part)
+            await bot.send_message(cid, full_text)
         except Exception as e:
             log.error(f"Uzun savol matnini yuborishda xato: {e}")
         # Savol allaqachon alohida yuborildi — poll'ga faqat qisqa
@@ -503,17 +472,10 @@ async def _send_poll_impl(bot, cid, state):
             _cancel_timer(cid)
             await state.clear()
             return
-        # Boshqa xatolar — keyingi savolga o'tamiz. Bu funksiya send-lock
-        # ichida turgani uchun bu yerda _send_poll() ni rekursiv chaqirmaymiz.
+        # Boshqa xatolar - keyingi savolga o'tamiz
         log.error(f"Poll xatosi: {e}")
         await state.update_data(idx=idx+1)
-        fresh = await state.get_data()
-        if fresh.get("idx", 0) < len(fresh.get("qs", [])):
-            # Ichki loop uchun lockni qayta olmasdan davom ettirish kerak;
-            # shu sabab yordamchi flag bilan yangi task yaratamiz.
-            asyncio.create_task(_send_poll(bot, cid, state))
-        else:
-            await _finish_poll(bot, cid, state, fresh)
+        await _send_poll(bot, cid, state)
 
 
 def _cancel_timer(cid):

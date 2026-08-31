@@ -159,21 +159,9 @@ async def _show_next_question(bot, cid, msg_id, qs, idx, state, uid):
             photo_id = pm_match.group(1).strip()
     if photo_id:
         try:
-            photo_mid = q.get("photo_message_id") or q.get("storage_message_id")
-            photo_channel = q.get("photo_channel_id")
-            if photo_mid and photo_channel:
-                await bot.copy_message(
-                    chat_id=cid,
-                    from_chat_id=int(photo_channel),
-                    message_id=int(photo_mid),
-                )
-            else:
-                await bot.send_photo(cid, photo_id, protect_content=True)
+            await bot.send_photo(cid, photo_id, caption="", protect_content=True)
         except Exception as e:
-            try:
-                await bot.send_photo(cid, photo_id, protect_content=True)
-            except Exception as e2:
-                log.error(f"Inline rasm xato: copy={e}; fallback={e2}")
+            log.error(f"Inline rasm xato: {e}")
     text, kb, is_text = _build_question_content(qs, idx, time_left=QUESTION_SEC)
     try:
         await bot.edit_message_text(chat_id=cid, message_id=msg_id, text=text, reply_markup=kb)
@@ -487,8 +475,8 @@ async def start_inline_test(callback: CallbackQuery, state: FSMContext):
         meta = get_test_meta(tid) or {}
 
     # Ruxsat tekshiruvi
-    from utils.premium import can_access
-    if not await can_access(meta, uid):
+    allowed = meta.get("allowed_users", [])
+    if allowed and uid not in allowed:
         return await _send_no_access(callback, meta)
 
     # Urinishlar cheklovi
@@ -705,17 +693,9 @@ async def _send_question_new(bot, cid, state, uid):
             photo_id_first = pm_f.group(1).strip()
     if photo_id_first:
         try:
-            photo_mid = q_first.get("photo_message_id") or q_first.get("storage_message_id")
-            photo_channel = q_first.get("photo_channel_id")
-            if photo_mid and photo_channel:
-                await bot.copy_message(chat_id=cid, from_chat_id=int(photo_channel), message_id=int(photo_mid), protect_content=True)
-            else:
-                await bot.send_photo(cid, photo_id_first, protect_content=True)
+            await bot.send_photo(cid, photo_id_first, caption="", protect_content=True)
         except Exception as e:
-            try:
-                await bot.send_photo(cid, photo_id_first, protect_content=True)
-            except Exception as e2:
-                log.error(f"Inline rasm xato: copy={e}; fallback={e2}")
+            log.error(f"Inline rasm xato: {e}")
     text, kb, is_text = _build_question_content(qs, idx, time_left=QUESTION_SEC)
     msg = await bot.send_message(cid, text, reply_markup=kb,
         protect_content=True)
