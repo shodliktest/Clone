@@ -182,39 +182,118 @@ class ClearMenuMiddleware(BaseMiddleware):
 
 class GroupTrackerMiddleware(BaseMiddleware):
     """
-    Guruhdan kelgan har bir xabar/callbackda guruhni
-    avtomatik ro'yxatga qo'shadi. Shu tarzda bot
-    avval qo'shilgan guruhlar ham saqlanadi.
+    Global group discovery.
+
+    Telegram does not provide an API to list every chat the bot belongs to, so
+    existing/old groups are discovered whenever ANY group update reaches the
+    bot.  The bot does NOT need to be an admin; it only needs to be able to
+    send messages to the group.
+
+    Important: to receive ordinary user messages in a group, BotFather privacy
+    mode must be disabled (/setprivacy -> Disable). Commands/replies can still
+    arrive with privacy mode enabled, but arbitrary user messages cannot.
     """
+    _save_tasks = set()
+
+    @classmethod
+    async def _persist_known_groups(cls):
+        try:
+            from utils import tg_db
+            if tg_db.ready():
+                await tg_db.save_known_groups()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "known_groups Supabase saqlash xato: %s", e
+            )
+
+    @classmethod
+    def _schedule_persist(cls):
+        import asyncio
+        task = asyncio.create_task(cls._persist_known_groups())
+        cls._save_tasks.add(task)
+        task.add_done_callback(cls._save_tasks.discard)
+
     async def __call__(self, handler, event, data):
         chat = None
-        bot  = None
+        bot = None
         if isinstance(event, Message):
             chat = event.chat
-            bot  = event.bot
+            bot = event.bot
         elif isinstance(event, CallbackQuery) and event.message:
             chat = event.message.chat
-            bot  = event.bot
+            bot = event.bot
 
         if chat and chat.type in ("group", "supergroup"):
             cid = str(chat.id)
-            existing = ram.get_known_groups().get(cid)
-            # Faqat noma'lum yoki yangi ma'lumot bo'lsa yangilaymiz
-            if not existing or not existing.get("active"):
-                try:
-                    mc = await bot.get_chat_member_count(chat.id)
-                except Exception:
-                    mc = existing.get("member_count", 0) if existing else 0
-                ram.add_known_group(
-                    chat_id=chat.id,
-                    title=chat.title or "Nomsiz guruh",
-                    username=getattr(chat, "username", "") or "",
-                    chat_type=chat.type,
-                    member_count=mc,
+            groups = ram.get_known_groups()
+            existing = groups.get(cid)
+
+            # Every received group update is a reliable "chat seen" signal.
+            # Verify that the bot can actually send before marking it active.
+            can_send = True
+            bot_status = "unknown"
+            try:
+                me = await bot.me()
+                member = await bot.get_chat_member(chat.id, me.id)
+                bot_status = getattr(member, "status", "unknown")
+
+                if bot_status in ("left", "kicked", "banned"):
+                    can_send = False
+                elif bot_status == "restricted":
+                    can_send = bool(getattr(member, "can_send_messages", False))
+                elif bot_status in ("member", "administrator", "creator"):
+                    can_send = True
+                else:
+                    can_send = False
+            except Exception as e:
+                # We still keep the group if the update itself came from it.
+                # A transient getChatMember failure must not lose old groups.
+                import logging
+                logging.getLogger(__name__).debug(
+                    "GroupTracker getChatMember %s: %s", cid, e
                 )
+                can_send = existing.get("active", True) if existing else True
+
+            try:
+                member_count = await bot.get_chat_member_count(chat.id)
+            except Exception:
+                member_count = (existing or {}).get("member_count", 0)
+
+            title = getattr(chat, "title", None) or (existing or {}).get("title") or "Nomsiz guruh"
+            username = getattr(chat, "username", None) or (existing or {}).get("username") or ""
+
+            # add_known_group performs the project's normal RAM representation.
+            ram.add_known_group(
+                chat_id=chat.id,
+                title=title,
+                username=username,
+                chat_type=chat.type,
+                member_count=member_count,
+            )
+
+            groups = ram.get_known_groups()
+            item = groups.get(cid, {})
+            item.update({
+                "chat_id": chat.id,
+                "title": title,
+                "username": username,
+                "type": chat.type,
+                "member_count": member_count,
+                "active": can_send,
+                "bot_status": bot_status,
+                "can_send_messages": can_send,
+                "last_seen_at": __import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                ).isoformat(),
+            })
+            ram.set_known_groups(groups)
+
+            # Persist immediately for a newly discovered group; subsequent
+            # updates are also persisted asynchronously so restart cannot lose it.
+            self._schedule_persist()
 
         return await handler(event, data)
-
 
 
 
