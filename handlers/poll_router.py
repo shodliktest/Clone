@@ -20,7 +20,7 @@ async def universal_poll_router(poll_answer: PollAnswer, state: FSMContext,
         await scheduler_poll_answer(poll_answer)
 
         # 1. Guruh sessiyasiga tegishlimi?
-        handled = await group_handler(poll_answer)
+        handled = await group_handler(poll_answer, bot)
         if handled:
             return True
 

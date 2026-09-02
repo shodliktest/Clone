@@ -64,6 +64,57 @@ def _shuffle_options(qs):
 
 router = Router()
 
+
+# ══ GURUH TESTI KIRISH NAZORATI ═══════════════════════════════
+async def _group_access_allowed(meta: dict, uid: int) -> bool:
+    """Test ID cheklangan bo'lsa: allowed_users yoki mavjud Premium ID ruxsat beradi."""
+    from utils.premium import can_access
+    return await can_access(meta or {}, int(uid))
+
+
+def _group_access_text(meta: dict) -> str:
+    from config import ADMIN_USERNAME
+    title = str((meta or {}).get("title") or "Bu test")
+    return (
+        f"🔐 <b>Kirish cheklangan</b>\n\n"
+        f"<b>{title}</b> testiga kirishga ruxsatingiz yo'q.\n\n"
+        f"Ruxsat olish uchun adminga murojaat qiling: @{ADMIN_USERNAME}"
+    )
+
+
+async def _deny_group_callback(callback: CallbackQuery, meta: dict):
+    """Guruhda spam qilmaydi: DM + shu callback uchun mono alert."""
+    from config import ADMIN_USERNAME
+    text = _group_access_text(meta)
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📩 Adminga murojaat", url=f"https://t.me/{ADMIN_USERNAME}"))
+    b.row(InlineKeyboardButton(text="🤖 Bot orqali murojaat", callback_data="contact_admin"))
+    try:
+        await callback.bot.send_message(
+            callback.from_user.id, text, reply_markup=b.as_markup(),
+            parse_mode="HTML", protect_content=True
+        )
+    except Exception as e:
+        log.debug("Group access DM failed for %s: %s", callback.from_user.id, e)
+    return await callback.answer(
+        "🔐 Kirish cheklangan!\nRuxsat olish uchun adminga murojaat qiling.",
+        show_alert=True
+    )
+
+
+async def _deny_group_command(bot, uid: int, meta: dict):
+    """/quiz_start uchun cheklov xabari faqat foydalanuvchining private chatiga yuboriladi."""
+    from config import ADMIN_USERNAME
+    text = _group_access_text(meta)
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📩 Adminga murojaat", url=f"https://t.me/{ADMIN_USERNAME}"))
+    b.row(InlineKeyboardButton(text="🤖 Bot orqali murojaat", callback_data="contact_admin"))
+    try:
+        await bot.send_message(uid, text, reply_markup=b.as_markup(), parse_mode="HTML", protect_content=True)
+    except Exception as e:
+        log.debug("Group command access DM failed for %s: %s", uid, e)
+
+
 LETTERS      = ["A","B","C","D","E","F","G","H","I","J"]
 COUNT_EMOJIS = ["3️⃣", "2️⃣", "1️⃣", "🎯"]
 
@@ -79,7 +130,7 @@ _inline_sessions: Dict[int, dict] = {}
 # POLL ANSWER ROUTING (poll_router.py dan chaqiriladi)
 # ══════════════════════════════════════════════════════════════
 
-async def route_poll_answer(poll_answer: PollAnswer) -> bool:
+async def route_poll_answer(poll_answer: PollAnswer, bot=None) -> bool:
     poll_id     = poll_answer.poll_id
     target_chat = None
     for chat_id, session in _group_sessions.items():
@@ -91,7 +142,20 @@ async def route_poll_answer(poll_answer: PollAnswer) -> bool:
     if not poll_answer.option_ids:
         return True
     session = _group_sessions[target_chat]
-    uid_str = str(poll_answer.user.id)
+    uid = int(poll_answer.user.id)
+    uid_str = str(uid)
+
+    # Native Telegram pollni texnik jihatdan faqat bot yaratganligi sababli
+    # "hide" qilib bo'lmaydi. Shuning uchun cheklangan testda ruxsatsiz
+    # javoblar statistikaga umuman yozilmaydi. Birinchi urinishda DM yuboramiz.
+    if not await _group_access_allowed(session.get("access_meta") or session.get("test", {}), uid):
+        notified = session.setdefault("access_denied_notified", set())
+        if uid not in notified:
+            notified.add(uid)
+            if bot is not None:
+                await _deny_group_command(bot, uid, session.get("access_meta") or session.get("test", {}))
+        return True
+
     q_idx   = session["poll_map"][poll_id]
     if uid_str not in session["answers"]:
         session["answers"][uid_str] = {}
@@ -131,7 +195,6 @@ async def _load_test(bot, chat_id: int, tid: str) -> Optional[dict]:
 
 @router.callback_query(F.data.startswith("group_start_"))
 async def group_start_poll(callback: CallbackQuery):
-    await callback.answer()
     tid = callback.data[12:]
     uid = callback.from_user.id
 
@@ -169,6 +232,10 @@ async def group_start_poll(callback: CallbackQuery):
     if not test:
         return await callback.answer("❌ Test topilmadi.", show_alert=True)
 
+    meta = __import__("utils.ram_cache", fromlist=["get_test_meta"]).get_test_meta(tid) or test
+    if not await _group_access_allowed(meta, uid):
+        return await _deny_group_callback(callback, meta)
+
     qs = [q for q in test.get("questions",[])
           if q.get("type","multiple_choice") in ("multiple_choice","true_false")]
     if not qs:
@@ -188,6 +255,7 @@ async def group_start_poll(callback: CallbackQuery):
         "tid": tid, "test": test, "questions": qs,
         "answers": {}, "names": {}, "poll_map": {},
         "host_id": uid, "poll_time": poll_time, "task": None,
+        "access_meta": meta, "access_denied_notified": set(),
     }
 
     try: await callback.message.delete()
@@ -349,7 +417,6 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
 
 @router.callback_query(F.data.startswith("group_inline_"))
 async def group_start_inline(callback: CallbackQuery):
-    await callback.answer()
     tid = callback.data[13:]
     uid = callback.from_user.id
 
@@ -385,6 +452,10 @@ async def group_start_inline(callback: CallbackQuery):
     if not test:
         return await callback.answer("❌ Test topilmadi.", show_alert=True)
 
+    meta = __import__("utils.ram_cache", fromlist=["get_test_meta"]).get_test_meta(tid) or test
+    if not await _group_access_allowed(meta, uid):
+        return await _deny_group_callback(callback, meta)
+
     qs = test.get("questions", [])
     if not qs:
         return await callback.answer("⚠️ Bu testda savollar yo'q!", show_alert=True)
@@ -405,6 +476,7 @@ async def group_start_inline(callback: CallbackQuery):
         "answers":       {},          # {uid_str: {q_idx_str: answer_letter}}
         "names":         {},          # {uid_str: full_name}
         "host_id":       uid,
+        "access_meta":   meta,
         "poll_time":     poll_time,
         "passing_score": passing_score,
         "cur_q":         0,
@@ -710,6 +782,10 @@ async def handle_inline_answer(callback: CallbackQuery):
     session = _inline_sessions.get(chat_id)
     if not session:
         return await callback.answer("❌ Faol test sessiyasi yo'q.", show_alert=False)
+
+    if not await _group_access_allowed(session.get("access_meta") or session.get("test", {}), user.id):
+        return await _deny_group_callback(callback, session.get("access_meta") or session.get("test", {}))
+
     if session.get("locked"):
         return await callback.answer("🔒 Vaqt tugadi!", show_alert=True)
     if session.get("cur_q") != q_idx:
@@ -1141,19 +1217,17 @@ async def _send_text_leaderboard(
 @router.callback_query(F.data.startswith("grestart_"))
 async def grestart(callback: CallbackQuery):
     """Test tugagach 'Yana bir marta' — o'sha guruhga avto-buyruq."""
-    await callback.answer()
     parts = callback.data[9:].rsplit("_", 1)  # grestart_TID_mode
     if len(parts) != 2:
-        return
+        return await callback.answer("❌", show_alert=False)
     tid, mode_sfx = parts
     chat_id = callback.message.chat.id if callback.message else None
     if not chat_id:
-        return
-    await callback.bot.send_message(
-        chat_id,
-        f"/quiz_start {tid} {mode_sfx}"
-    ,
-        protect_content=True)
+        return await callback.answer("⚠️ Guruh topilmadi.", show_alert=True)
+    # Bot nomidan /quiz_start yuborish o'rniga aynan tugmani bosgan userni
+    # host sifatida uzatamiz; aks holda restricted testda bot ID tekshirilardi.
+    await callback.answer()
+    await _start_group_test(callback.bot, chat_id, callback.from_user.id, tid, mode_sfx)
 
 
 @router.callback_query(F.data.startswith("gsend_poll_"))
@@ -1238,25 +1312,12 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
     if not test:
         return await bot.send_message(chat_id, f"❌ <code>{tid}</code> kodli test topilmadi.", protect_content=True)
 
-    # ── Kirish nazorati ───────────────────────────────────────
+    # ── Kirish nazorati: allowed_users + mavjud Premium ID ──
     from utils.ram_cache import get_test_meta as _gtm
-    from config import ADMIN_USERNAME
-    _meta_g  = _gtm(tid) or {}
-    _allowed = _meta_g.get("allowed_users", [])
-    if _allowed and uid not in _allowed:
-        b = InlineKeyboardBuilder()
-        b.row(InlineKeyboardButton(
-            text="📩 Adminga murojat",
-            url=f"https://t.me/{ADMIN_USERNAME}"
-        ))
-        return await bot.send_message(
-            chat_id,
-            f"🔐 <b>Kirish cheklangan</b>\n\n"
-            f"Bu testga kirishga ruxsatingiz yo'q.\n"
-            f"Ruxsat olish uchun @{ADMIN_USERNAME} ga yozing.",
-            reply_markup=b.as_markup(),
-            protect_content=True
-        )
+    _meta_g = _gtm(tid) or test
+    if not await _group_access_allowed(_meta_g, uid):
+        await _deny_group_command(bot, uid, _meta_g)
+        return
 
     if mode == "inline":
         qs            = test.get("questions", [])
