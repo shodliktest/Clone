@@ -114,13 +114,12 @@ async def start_poll(callback: CallbackQuery, state: FSMContext):
             import logging
             logging.getLogger(__name__).warning(f"ref check poll: {_re}")
 
-    # Ruxsat tekshiruvi: allowed_users yoki mavjud Premium ID
-    from utils.premium import can_access
-    if not await can_access(meta, uid):
+    # Ruxsat tekshiruvi
+    allowed = meta.get("allowed_users", [])
+    if allowed and uid not in allowed:
         return await _send_no_access(callback, meta)
 
-    # Urinishlar cheklovi (Premium ID ham bu limitni chetlab o'tmaydi)
-    allowed = meta.get("allowed_users", [])
+    # Urinishlar cheklovi
     max_att = meta.get("max_attempts", 0)
     if max_att > 0 and uid not in allowed:
         from utils.ram_cache import get_test_stats_for_user
