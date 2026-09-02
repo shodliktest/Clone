@@ -33,7 +33,6 @@ class AdminPanel(StatesGroup):
     fj_add            = State()
     find_test         = State()  # Kod orqali test qidirish
     waiting_json      = State()  # /import_json — tayyor JSON test fayllari kutilmoqda
-    premium_manage    = State()  # Premium ID boshqaruvi
 
 class ContactAdmin(StatesGroup):
     waiting_message = State()
