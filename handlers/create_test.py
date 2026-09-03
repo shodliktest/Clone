@@ -1,6 +1,5 @@
 """➕ TEST YARATISH — Fayl yoki QuizBot forward"""
 import os, re, logging, tempfile, asyncio
-from collections import deque
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
 from aiogram.fsm.context import FSMContext
@@ -126,12 +125,37 @@ _poll_debounce:    dict = {}  # {uid: asyncio.Task}
 _save_in_progress: set  = set()   # Double-click himoyasi
 _poll_progress: dict = {}  # {uid: progress_msg_id}
 _poll_count:    dict = {}  # {uid: savol soni}
-# Forward qilingan rasmlar navbati. Har bir element — storage kanaliga
-# yuklanish natijasini beradigan Future. Future'ni RASM handleri birinchi
-# navbatda ro'yxatga qo'yadi; shuning uchun parallel update'larda poll rasm
-# kanalga yuklanishini kutib, file_id'ni yo'qotmaydi.
-_pending_photo_futures: dict = {}  # {uid: deque[Future[str|None]]}
-_channel_send_lock = asyncio.Lock()
+# Forward pairing registry: {uid: {source_message_id: Future[file_id|None]}}.
+# Future is created at the very start of the photo handler, so a concurrently
+# arriving Quiz can wait for the preceding photo upload instead of racing it.
+_photo_registry: dict = {}
+_photo_registry_lock: dict = {}
+_channel_upload_lock = asyncio.Lock()
+
+
+def _get_photo_registry_lock(uid: int) -> asyncio.Lock:
+    lock = _photo_registry_lock.get(uid)
+    if lock is None:
+        lock = asyncio.Lock()
+        _photo_registry_lock[uid] = lock
+    return lock
+
+
+def _register_photo(uid: int, message_id: int) -> asyncio.Future:
+    reg = _photo_registry.setdefault(uid, {})
+    fut = reg.get(message_id)
+    if fut is None:
+        fut = asyncio.get_running_loop().create_future()
+        reg[message_id] = fut
+    return fut
+
+
+def _cleanup_photo_registry(uid: int):
+    reg = _photo_registry.get(uid)
+    if reg is not None and not reg:
+        _photo_registry.pop(uid, None)
+        _photo_registry_lock.pop(uid, None)
+
 
 # aiogram handle_as_tasks=True bilan har bir update ALOHIDA asyncio.Task
 # sifatida, bir-biriga nisbatan PARALLEL ishga tushadi. Foydalanuvchi
@@ -1913,7 +1937,8 @@ async def method_poll(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
     _poll_progress[uid] = callback.message.message_id
     _poll_count[uid] = 0
-    _pending_photo_futures.pop(uid, None)
+    _photo_registry.pop(uid, None)
+    _photo_registry_lock.pop(uid, None)
     await state.set_state(CreateTest.waiting_polls)
 
 
@@ -1926,97 +1951,68 @@ _last_channel_send_ts = 0.0
 
 @router.message(F.photo, CreateTest.waiting_polls)
 async def catch_poll_photo(message: Message, state: FSMContext):
-    """
-    QuizBot forward oqimi: RASM -> QUIZ.
+    """QuizBot forward rasmi: avval ro'yxatga olinadi, keyin storage kanalga yuklanadi.
 
-    Muhim arxitektura:
-      1) Forwarddagi original file_id faqat storage kanaliga yuborish uchun.
-      2) Storage kanaliga yangi rasm yuboriladi.
-      3) Kanal qaytargan yangi photo.file_id — test savoliga yoziladigan ID.
-      4) Rasm handleri Future'ni upload boshlanishidan OLDIN queue'ga qo'yadi.
-         Shu sababli rasm+poll parallel update bo'lib kelsa ham poll rasmni
-         kutadi va pairing buzilmaydi.
-      5) Kanalga caption yuborilmaydi.
+    Pairing message_id tartibi bilan qilinadi. Shu sababli handlerlar parallel
+    ishga tushgan taqdirda ham keyingi Quiz o'zidan oldingi eng eski, hali
+    biriktirilmagan rasmni oladi. Storage kanalidan qaytgan YANGI file_idgina
+    savolga yoziladi.
     """
+    global _last_channel_send_ts
     from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
-    from config import STORAGE_CHANNEL_ID
 
     uid = message.from_user.id
+    source_mid = message.message_id
     src_file_id = message.photo[-1].file_id
-    loop = asyncio.get_running_loop()
-    future = loop.create_future()
-    queue = _pending_photo_futures.setdefault(uid, deque())
-    queue.append(future)
 
-    async def _store() -> str | None:
-        global _last_channel_send_ts
-        if not STORAGE_CHANNEL_ID:
-            log.error("catch_poll_photo: STORAGE_CHANNEL_ID sozlanmagan")
-            return None
+    # MUHIM: uploaddan oldin future yaratamiz. Poll handler shu future'ni ko'rib
+    # upload tugashini kutishi mumkin.
+    async with _get_photo_registry_lock(uid):
+        fut = _register_photo(uid, source_mid)
 
+    saved_file_id = None
+    from config import STORAGE_CHANNEL_ID
+    if not STORAGE_CHANNEL_ID:
+        log.error("catch_poll_photo: STORAGE_CHANNEL_ID sozlanmagan")
+    else:
         MIN_INTERVAL = 1.1
         MAX_ATTEMPTS = 8
-
-        # Barcha foydalanuvchilar uchun bitta storage kanalga yuborish
-        # ketma-ketligi. Flood-control va parallel upload'larni nazorat qiladi.
-        async with _channel_send_lock:
-            for attempt in range(1, MAX_ATTEMPTS + 1):
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            async with _channel_upload_lock:
                 elapsed = asyncio.get_running_loop().time() - _last_channel_send_ts
                 if elapsed < MIN_INTERVAL:
                     await asyncio.sleep(MIN_INTERVAL - elapsed)
                 try:
+                    # Kanalga faqat rasm yuboriladi — caption yo'q.
                     copied = await message.bot.send_photo(
                         chat_id=STORAGE_CHANNEL_ID,
                         photo=src_file_id,
-                        caption="",
                         disable_notification=True,
                     )
                     _last_channel_send_ts = asyncio.get_running_loop().time()
                     if copied.photo:
                         saved_file_id = copied.photo[-1].file_id
-                        log.info(
-                            "catch_poll_photo: storage channel file_id olindi -> %s...",
-                            saved_file_id[:25],
-                        )
-                        return saved_file_id
-                    return None
+                    break
                 except TelegramRetryAfter as e:
-                    wait = int(e.retry_after) + 1
-                    log.warning(
-                        "catch_poll_photo: flood control, %ss kutilmoqda "
-                        "(urinish %s/%s)", wait, attempt, MAX_ATTEMPTS
-                    )
-                    await asyncio.sleep(wait)
+                    _last_channel_send_ts = asyncio.get_running_loop().time()
+                    log.warning("catch_poll_photo: flood control, %ss kutilmoqda", e.retry_after)
+                    await asyncio.sleep(e.retry_after + 1)
                 except TelegramNetworkError as e:
-                    log.warning(
-                        "catch_poll_photo: tarmoq xatosi (urinish %s/%s): %s",
-                        attempt, MAX_ATTEMPTS, e,
-                    )
+                    log.warning("catch_poll_photo: tarmoq xatosi (%s/%s): %s", attempt, MAX_ATTEMPTS, e)
                     await asyncio.sleep(min(2 * attempt, 10))
                 except Exception as e:
-                    log.error(
-                        "catch_poll_photo: storage kanaliga yuklash xatosi "
-                        "(%s): %s", type(e).__name__, e
-                    )
-                    if attempt < MAX_ATTEMPTS:
-                        await asyncio.sleep(min(2 * attempt, 10))
-            return None
+                    log.error("catch_poll_photo: kanalga yuklashda xato (%s): %s", type(e).__name__, e)
+                    break
 
-    try:
-        saved_file_id = await _store()
-        if not future.done():
-            future.set_result(saved_file_id)
-        if not saved_file_id:
-            await message.answer(
-                "⚠️ Ushbu rasmni saqlashda xatolik yuz berdi — "
-                "savol rasm bilan bog'lanmadi. Rasm+savolni qaytadan forward qiling."
-            )
-    except Exception as e:
-        log.error("catch_poll_photo: kutilmagan xato: %s", e, exc_info=True)
-        if not future.done():
-            future.set_result(None)
-    finally:
-        await _del(message.bot, message.chat.id, message.message_id)
+    # Future'ni aynan shu source message_id bilan yakunlaymiz.
+    if not fut.done():
+        fut.set_result(saved_file_id)
+
+    if saved_file_id is None:
+        log.error("catch_poll_photo: rasm saqlanmadi uid=%s mid=%s", uid, source_mid)
+        await message.answer("⚠️ Rasmni storage kanaliga saqlab bo'lmadi. Savol rasm-siz qo'shiladi.")
+
+    await _del(message.bot, message.chat.id, message.message_id)
 
 
 @router.message(F.poll, CreateTest.waiting_polls)
@@ -2026,62 +2022,64 @@ async def catch_poll(message: Message, state: FSMContext):
         return await message.answer("❌ Faqat <b>Viktorina (Quiz)</b> turi qabul qilinadi!")
 
     import re as _re
-    p    = message.poll
-    lts  = ["A)", "B)", "C)", "D)", "E)", "F)"]
+    p = message.poll
+    lts = ["A)", "B)", "C)", "D)", "E)", "F)"]
     opts = [f"{lts[i]} {op.text}" for i, op in enumerate(p.options)]
-
-    # QuizBot [N/N] raqamlarini olib tashlash
     clean_q = _re.sub(r"^\[\d+/\d+\]\s*", "", p.question).strip()
-
     uid = message.from_user.id
+
+    # Handlerlar parallel bo'lishi mumkin. Photo handler Future'ni birinchi
+    # qadamdayoq yaratadi; biz esa juda qisqa scheduling oynasi berib, so'ng
+    # message_id bo'yicha qat'iy FIFO pairing qilamiz.
+    await asyncio.sleep(0.12)
+
     async with _get_poll_lock(uid):
-        # Rasm handleri Future'ni upload boshlanishidan oldin queue'ga qo'yadi.
-        # Shuning uchun parallel rasm+poll update bo'lsa, poll storage kanalidan
-        # yangi file_id kelishini kutadi. Rasm bo'lmasa queue bo'sh qoladi.
         photo_id = None
-        photo_queue = _pending_photo_futures.get(uid)
-        if photo_queue:
-            photo_future = photo_queue.popleft()
+        reg = _photo_registry.get(uid, {})
+
+        # Poll'dan oldin kelgan, hali biriktirilmagan rasmlardan ENG ESKISI.
+        candidates = [mid for mid in reg if mid < message.message_id]
+        if candidates:
+            photo_mid = min(candidates)
+            fut = reg.pop(photo_mid)
             try:
-                photo_id = await photo_future
-            except Exception as e:
-                log.error("catch_poll: rasm Future xatosi: %s", e)
+                photo_id = await asyncio.wait_for(fut, timeout=25.0)
+            except asyncio.TimeoutError:
+                log.error("catch_poll: photo timeout uid=%s photo_mid=%s poll_mid=%s", uid, photo_mid, message.message_id)
                 photo_id = None
-            if not photo_queue:
-                _pending_photo_futures.pop(uid, None)
+            except Exception as e:
+                log.error("catch_poll: photo future xatosi: %s", e)
+                photo_id = None
+            _cleanup_photo_registry(uid)
 
-        log.info(
-            "catch_poll: uid=%s, photo_id=%s",
-            uid,
-            ('BOR: ' + photo_id[:25] + '...' if photo_id else "YO'Q"),
-        )
-
-        d  = await state.get_data()
-        qs = d.get("questions", [])
+        d = await state.get_data()
+        qs = list(d.get("questions", []))
         new_q = {
-            "type":        "multiple_choice",
-            "question":    clean_q,
-            "options":     opts,
-            "correct":     opts[p.correct_option_id],
+            "type": "multiple_choice",
+            "question": clean_q,
+            "options": opts,
+            "correct": opts[p.correct_option_id],
             "explanation": p.explanation or "",
-            "points":      1
+            "points": 1,
         }
         if photo_id:
             new_q["photo"] = photo_id
+
         qs.append(new_q)
         await state.update_data(questions=qs)
         count = len(qs)
+        log.info("catch_poll: uid=%s poll_mid=%s paired_photo=%s total=%s",
+                 uid, message.message_id, photo_id[:20] + "..." if photo_id else "YO'Q", count)
 
-    # Poll xabarini o'chirish
     await _del(message.bot, message.chat.id, message.message_id)
 
-    # Debounce: 0.8s kutib, oxirgi sanoq bilan bitta progress xabar yuboradi
     _poll_count[uid] = count
     old_task = _poll_debounce.pop(uid, None)
     if old_task:
         old_task.cancel()
-    task = asyncio.create_task(_flush_polls(message.bot, message.chat.id, uid))
-    _poll_debounce[uid] = task
+    _poll_debounce[uid] = asyncio.create_task(
+        _flush_polls(message.bot, message.chat.id, uid)
+    )
 
 
 @router.callback_query(F.data == "finish_polls", CreateTest.waiting_polls)
