@@ -275,6 +275,7 @@ def admin_kb():
         InlineKeyboardButton(text="👥 Userlar",    callback_data="admin_users"),
         InlineKeyboardButton(text="📋 Testlar",    callback_data="admin_tests"),
     )
+    b.row(InlineKeyboardButton(text="⭐ Premium ID", callback_data="admin_premium"))
     b.row(
         InlineKeyboardButton(text="📈 Statistika", callback_data="admin_stats"),
         InlineKeyboardButton(text="📢 Broadcast",  callback_data="admin_broadcast"),
