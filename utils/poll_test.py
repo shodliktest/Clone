@@ -1,0 +1,777 @@
+"""📊 POLL TEST — private chat, sanash emoji bilan"""
+import time, logging, re, asyncio
+from aiogram import Router, F
+from aiogram.types import CallbackQuery, PollAnswer
+from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton
+
+from utils.db import get_test_full, save_result
+from utils.ram_cache import get_test_by_id, get_daily, is_test_paused, get_test_meta
+from utils.states import PollTest
+from utils.scoring import calculate_score, format_result
+from keyboards.keyboards import main_kb, result_kb, poll_pause_kb, poll_control_reply_kb, poll_pause_reply_kb
+
+log    = logging.getLogger(__name__)
+router = Router()
+LT     = ["A","B","C","D","E","F","G","H","I","J"]
+POLL_TYPES = ("multiple_choice", "multiple", "true_false", "multi_select", "quiz")
+_poll_timers: dict = {}
+
+COUNT_EMOJIS = ["3️⃣","2️⃣","1️⃣","🚀"]
+
+
+async def _send_no_access(callback: CallbackQuery, meta: dict):
+    from config import ADMIN_USERNAME
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(
+        text="📩 Adminga murojat",
+        url=f"https://t.me/{ADMIN_USERNAME}"
+    ))
+    b.row(InlineKeyboardButton(
+        text="🤖 Bot orqali murojat",
+        callback_data="contact_admin"
+    ))
+    title = meta.get("title", "Bu test")
+    try:
+        await callback.message.answer(
+            f"🔐 <b>Kirish cheklangan</b>\n\n"
+            f"<b>{title}</b> testiga kirishga ruxsatingiz yo'q.\n\n"
+            f"Ruxsat olish uchun:\n"
+            f"• Adminga murojat qiling: @{ADMIN_USERNAME}\n"
+            f"• Yoki quyidagi tugmani bosing 👇",
+            reply_markup=b.as_markup()
+        )
+    except Exception:
+        pass
+    await callback.answer("🔐 Kirish cheklangan!", show_alert=True)
+
+
+async def route_poll_answer(poll_answer: PollAnswer, state: FSMContext, bot=None):
+    cur_st = await state.get_state()
+    if cur_st not in (PollTest.active.state, PollTest.paused.state):
+        return
+    d    = await state.get_data()
+    pmap = d.get("poll_map", {})
+    pid  = poll_answer.poll_id
+    if pid not in pmap:
+        return
+    if not poll_answer.option_ids:
+        return
+    qi  = pmap[pid]
+    q   = d["qs"][qi] if qi < len(d["qs"]) else {}
+    ans = d.get("ans", {})
+    ch  = LT[poll_answer.option_ids[0]] if poll_answer.option_ids[0] < len(LT) else str(poll_answer.option_ids[0])
+    if q.get("type") == "true_false":
+        ch = "Ha" if poll_answer.option_ids[0] == 0 else "Yo'q"
+    ans[str(qi)] = ch
+    new_idx = d.get("idx", 0) + 1
+    await state.update_data(ans=ans, idx=new_idx, answered_this=True, no_ans_streak=0)
+    await state.set_state(PollTest.active)
+    cid = d.get("cid")
+    _cancel_timer(cid)
+    if bot and cid:
+        fresh = await state.get_data()
+        if new_idx < len(fresh["qs"]):
+            await _send_poll(bot, cid, state)
+        else:
+            await _finish_poll(bot, cid, state, fresh)
+
+
+# ── Boshlash ──────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("start_poll_") | F.data.startswith("start_demopoll_"))
+async def start_poll(callback: CallbackQuery, state: FSMContext):
+    if callback.message and callback.message.chat.type in ("group","supergroup"):
+        return await callback.answer(
+            "📊 Poll test private chatda ishlaydi.\n"
+            "👥 Guruh uchun → \"Guruhda yechish\" tugmasini ishlating.",
+            show_alert=True
+        )
+
+    await callback.answer()
+    is_demo_poll = callback.data.startswith("start_demopoll_")
+    raw    = callback.data[15:] if is_demo_poll else callback.data[11:]
+    via_link = raw.endswith("_link")
+    tid    = raw[:-5].upper() if via_link else raw.upper()
+    uid    = callback.from_user.id
+    meta   = get_test_meta(tid) or {}
+
+    # ── Referral tekshiruvi ──
+    if not is_demo_poll:
+        try:
+            from utils.ref_test import check_test_referral, send_referral_required_msg
+            _bu = (await callback.bot.me()).username
+            _ref = await check_test_referral(
+                callback.bot, uid, tid, meta, _bu
+            )
+            if not _ref["ok"]:
+                await send_referral_required_msg(
+                    callback, _ref, meta.get("title", tid), _bu
+                )
+                return
+        except Exception as _re:
+            import logging
+            logging.getLogger(__name__).warning(f"ref check poll: {_re}")
+
+    # Ruxsat tekshiruvi
+    allowed = meta.get("allowed_users", [])
+    if allowed and uid not in allowed:
+        return await _send_no_access(callback, meta)
+
+    # Urinishlar cheklovi
+    max_att = meta.get("max_attempts", 0)
+    if max_att > 0 and uid not in allowed:
+        from utils.ram_cache import get_test_stats_for_user
+        stats = get_test_stats_for_user(uid, tid)
+        used  = stats.get("attempts", 0) if stats else 0
+        if used >= max_att:
+            from config import ADMIN_USERNAME
+            b = InlineKeyboardBuilder()
+            b.row(InlineKeyboardButton(text="📩 Adminga murojat",
+                                       url=f"https://t.me/{ADMIN_USERNAME}"))
+            try:
+                await callback.message.answer(
+                    f"⛔ <b>Urinishlar tugadi</b>\n\n"
+                    f"Bu test uchun {max_att} ta urinish berilgan edi.\n"
+                    f"Siz {used} marta yechdingiz.",
+                    reply_markup=b.as_markup()
+                )
+            except Exception: pass
+            return await callback.answer("⛔ Urinishlar tugadi!", show_alert=True)
+
+    msg    = callback.message
+    chat_id= msg.chat.id if msg and msg.chat else uid
+
+    if is_test_paused(tid):
+        return await callback.answer("⚠️ Bu test vaqtincha to'xtatilgan!", show_alert=True)
+
+    # ── Aktiv test tekshiruvi ─────────────────────────────────
+    from utils.states import TestSolving as _TS
+    cur = await state.get_state()
+    active_states = (
+        _TS.answering.state, _TS.text_answer.state, _TS.paused.state,
+        PollTest.active.state, PollTest.paused.state,
+    )
+    if cur in active_states:
+        d = await state.get_data()
+        active_name  = d.get("test", {}).get("title", "Joriy test")
+        active_idx   = d.get("idx", 0)
+        active_total = len(d.get("qs", []))
+
+        from config import ADMIN_IDS
+        can_stop = (uid == d.get("uid", uid)) or (uid in ADMIN_IDS)
+
+        import re as _re
+        def _esc(s): return _re.sub(r'[<>&]', lambda m: {'<':'&lt;','>':'&gt;','&':'&amp;'}[m.group()], str(s))
+
+        b = InlineKeyboardBuilder()
+        if can_stop:
+            b.row(InlineKeyboardButton(
+                text="⏹ Joriy testni to'xtatib, yangisini boshlash",
+                callback_data=f"force_start_poll_{tid}{'_link' if via_link else ''}"
+            ))
+        b.row(InlineKeyboardButton(
+            text="▶️ Joriy testni davom ettirish",
+            callback_data="noop"
+        ))
+        await msg.answer(
+            f"⚠️ <b>Siz hozir test yechyapsiz!</b>\n\n"
+            f"📝 <b>{_esc(active_name)}</b>\n"
+            f"📊 Savol: {active_idx}/{active_total}\n\n"
+            f"{'Yangi test boshlash uchun avval joriy testni to\'xtating.' if can_stop else 'Faqat siz boshlagan test to\'xtatilishi mumkin.'}",
+            reply_markup=b.as_markup()
+        )
+        return
+    # ──────────────────────────────────────────────────────────
+
+    test = get_test_by_id(tid)
+    if not test or not test.get("questions"):
+        load_msg = None
+        try:
+            load_msg = await callback.bot.send_message(
+                chat_id, "⏳ <b>Test yuklanmoqda...</b>"
+            )
+        except Exception: pass
+        test = await get_test_full(tid)
+        if load_msg:
+            try: await load_msg.delete()
+            except Exception: pass
+
+    if not test:
+        return await callback.answer("❌ Test topilmadi.", show_alert=True)
+
+    try: await msg.delete()
+    except Exception: pass
+
+    await _begin_poll(callback.bot, state, uid, chat_id, tid, via_link, test,
+                      is_demo=is_demo_poll)
+
+
+async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, is_demo=False):
+    """Poll testni boshlash — state allaqachon tozalangan bo'lishi kerak."""
+    import random, copy, re as _re
+
+    if test is None:
+        test = get_test_by_id(tid)
+        if not test or not test.get("questions"):
+            test = await get_test_full(tid)
+    if not test:
+        try: await bot.send_message(chat_id, "❌ Test topilmadi.")
+        except: pass
+        return
+
+    all_qs_raw = test.get("questions", [])
+    all_qs = copy.deepcopy(all_qs_raw)
+    random.shuffle(all_qs)
+
+    # Demo rejimda savollar sonini cheklaymiz
+    if is_demo:
+        from handlers.inline_mode import DEMO_MIN, DEMO_MAX
+        demo_count = min(DEMO_MAX, max(DEMO_MIN, len(all_qs) // 3))
+        all_qs = all_qs[:demo_count]
+
+    # Variantlarni aralashtirish + savol matni variantdan olib tashlash
+    LABELS = ["A","B","C","D","E","F","G","H"]
+    def _strip(o): return _re.sub(r"^[A-Ha-h]\s*[).:]\s*", "", str(o)).strip()
+    for q in all_qs:
+        if q.get("type") not in ("multiple_choice", "multiple", "multi_select"):
+            continue
+        opts = q.get("options", [])
+        if len(opts) < 2: continue
+        pure = [_strip(o) for o in opts]
+        q_text = _strip(q.get("question", q.get("text", ""))).strip()
+        if q_text:
+            pure = [o for o in pure if o.strip().lower() != q_text.lower()]
+        if len(pure) < 2: continue
+        corr = q.get("correct")
+        corr_text = (
+            pure[corr] if isinstance(corr, int) and 0 <= corr < len(pure)
+            else _strip(corr) if isinstance(corr, str) else None
+        )
+        random.shuffle(pure)
+        # Telegram poll max 10 variant qabul qiladi
+        # LABELS 8 ta — 8 dan ortiq bo'lsa kesib olamiz
+        pure = pure[:len(LABELS)]
+        q["options"] = [f"{LABELS[i]}) {t}" for i, t in enumerate(pure)]
+        if corr_text is not None:
+            # corr_text pure ichida bo'lmasligi mumkin (kesib tashlangan)
+            ni = next((i for i, t in enumerate(pure) if t == corr_text), None)
+            if ni is not None:
+                q["correct"] = f"{LABELS[ni]}) {corr_text}"
+
+    qs = [q for q in all_qs if q.get("type", "multiple_choice") in POLL_TYPES]
+    skipped = len(all_qs) - len(qs)
+
+    if not qs:
+        try:
+            b = InlineKeyboardBuilder()
+            b.row(InlineKeyboardButton(text="▶️ Inline test", callback_data=f"start_test_{tid}"))
+            await bot.send_message(
+                chat_id, "⚠️ Bu testda variantli savollar yo'q.",
+                reply_markup=b.as_markup()
+            )
+        except: pass
+        return
+
+    pt = test.get("poll_time", 30) or 30
+    await state.set_state(PollTest.active)
+    await state.set_data({
+        "test": test, "qs": qs, "idx": 0,
+        "ans": {}, "poll_map": {}, "msg_ids": [],
+        "cid": chat_id, "t0": time.time(), "pt": pt,
+        "uid": uid, "answered_this": False,
+        "via_link": via_link,
+        "is_demo": is_demo,
+    })
+
+    # Live monitor uchun (ilgari faqat inline rejim ro'yxatga olinardi)
+    from utils.ram_cache import live_start
+    live_start(uid, test, mode="poll", chat_id=chat_id)
+
+    try:
+        title_txt = f"📝 <b>{test.get('title','?')}</b>"
+        if is_demo:
+            title_txt = f"🔍 <b>[DEMO] {test.get('title','?')}</b>"
+        countdown = await bot.send_message(chat_id, title_txt)
+        for emoji in COUNT_EMOJIS:
+            await asyncio.sleep(0.8)
+            try: await countdown.edit_text(emoji)
+            except: pass
+        await asyncio.sleep(0.5)
+        try: await countdown.delete()
+        except: pass
+    except: pass
+
+    skip_txt = f"\n⚠️ <i>{skipped} ta matn savol o'tkazildi</i>" if skipped else ""
+    try:
+        info = await bot.send_message(
+            chat_id,
+            f"{'🔍 [DEMO] ' if is_demo else ''}📊 <b>{test.get('title','POLL TEST')}</b> | {len(qs)} savol | ⏱ {pt}s{skip_txt}",
+            reply_markup=poll_control_reply_kb()
+        )
+        await state.update_data(info_msg_id=info.message_id)
+    except: pass
+
+    await _send_poll(bot, chat_id, state)
+
+
+# ── Poll yuborish ─────────────────────────────────────────────
+
+async def _resolve_photo_id(bot, state, d, photo_id: str) -> str:
+    """
+    Agar photo_id URL bo'lsa (masalan Supabase Storage link), uni
+    STORAGE_CHANNEL_ID kanaliga bir marta yuklab, Telegram file_id ga
+    aylantiradi — poll rasmlari shu file_id orqali yuboriladi (web
+    testdagi kabi "kuchli" Telegram CDN orqali, URL emas).
+
+    Olingan file_id keyingi safarlar uchun bazadagi (Supabase `tests`
+    jadvali) savol obyektiga QAYTA YOZIB QO'YILADI, shunda bir marta
+    o'girilgach boshqa hech qachon URL orqali qayta yuklanmaydi.
+    """
+    if not photo_id or not str(photo_id).startswith(("http://", "https://")):
+        return photo_id
+
+    from config import STORAGE_CHANNEL_ID
+    if not STORAGE_CHANNEL_ID:
+        log.warning("Poll rasm: photo URL topildi, lekin STORAGE_CHANNEL_ID yo'q — o'girib bo'lmadi")
+        return photo_id
+
+    try:
+        msg = await bot.send_photo(
+            STORAGE_CHANNEL_ID, photo_id,
+            caption="📷 Poll uchun avtomatik o'girildi",
+            disable_notification=True,
+        )
+        if not msg.photo:
+            return photo_id
+        file_id = msg.photo[-1].file_id
+    except Exception as e:
+        log.error(f"Poll rasm URL->file_id o'girishda xato: {e}")
+        return photo_id
+
+    # Bazadagi asl testni topib, xuddi shu URL'ga ega savolni file_id bilan yangilaymiz
+    try:
+        test = d.get("test") or {}
+        tid  = test.get("test_id")
+        if tid:
+            from utils.db import get_test_full as _get_full
+            full_test = await _get_full(tid)
+            changed = False
+            for oq in full_test.get("questions", []):
+                if (oq.get("photo") or oq.get("image")) == photo_id:
+                    oq["photo"] = file_id
+                    oq.pop("image", None)
+                    changed = True
+            if changed:
+                from utils.tg_db import save_test_full
+                await save_test_full(full_test)
+                log.info(f"Poll rasm: {tid} uchun URL file_id ga o'girib, bazaga yozildi")
+    except Exception as e:
+        log.error(f"Poll rasm: bazaga qayta yozishda xato: {e}")
+
+    return file_id
+
+
+async def _send_poll(bot, cid, state):
+    d   = await state.get_data()
+    qs  = d["qs"]
+    idx = d["idx"]
+    if idx >= len(qs):
+        await _finish_poll(bot, cid, state, d)
+        return
+    q  = qs[idx]
+    pt = d.get("pt", 30)
+
+    from utils.ram_cache import live_update
+    live_update(d.get("uid", cid), idx)
+
+
+    opts = []
+    for opt in q.get("options", []):
+        ot = str(opt).split(")", 1)[-1].strip() if ")" in str(opt) else str(opt)
+        opts.append(ot)
+    if q.get("type") == "true_false" or not opts:
+        opts = ["Ha", "Yo'q"]
+
+    corr = q.get("correct","")
+    if q.get("type") == "true_false":
+        ci = 0 if "ha" in str(corr).lower() else 1
+    elif isinstance(corr, int):
+        ci = corr
+    else:
+        m  = re.match(r"^([A-Za-z])", str(corr).strip())
+        ci = (ord(m.group(1).upper()) - ord("A")) if m else 0
+    ci = max(0, min(ci, len(opts) - 1))
+
+    expl = q.get("explanation","") or None
+
+    qtxt = q.get("question", q.get("text","Savol"))
+    qtxt = re.sub(r'^\[\d+/\d+\]\s*', '', qtxt).strip()
+
+    # Rasm bo'lsa — poll oldidan yuborish
+    photo_id = q.get("photo") or q.get("image") or None
+    if not photo_id:
+        pm_match = re.match(r'^\[rasm:\s*([^\]]+)\]\s*', qtxt)
+        if pm_match:
+            photo_id = pm_match.group(1).strip()
+            qtxt     = qtxt[pm_match.end():].strip()
+    if photo_id:
+        try:
+            resolved = await _resolve_photo_id(bot, state, d, photo_id)
+            if resolved != photo_id:
+                q["photo"] = resolved      # joriy sessiyada ham keshlanadi
+                await state.update_data(qs=qs)
+                photo_id = resolved
+            await bot.send_photo(cid, photo_id)
+        except Exception as e:
+            log.error(f"Poll rasm xato: {e}")
+
+    hdr  = f"[{idx+1}/{len(qs)}] "
+
+    from utils.poll_safe import sanitize_poll, sanitize_explanation, split_long_question
+    full_text, poll_q = split_long_question(qtxt, hdr)
+    if full_text:
+        try:
+            await bot.send_message(cid, full_text)
+        except Exception as e:
+            log.error(f"Uzun savol matnini yuborishda xato: {e}")
+        # Savol allaqachon alohida yuborildi — poll'ga faqat qisqa
+        # ko'rsatma ketadi, sanitize_poll uni qayta kesib qo'ymasin.
+        question, clean_opts, ci = sanitize_poll(
+            "", opts, ci, true_false=(q.get("type") == "true_false")
+        )
+        question = poll_q
+    else:
+        question, clean_opts, ci = sanitize_poll(
+            hdr + qtxt, opts, ci, true_false=(q.get("type") == "true_false")
+        )
+    expl = sanitize_explanation(expl)
+
+    await state.update_data(answered_this=False)
+    try:
+        pm = await bot.send_poll(
+            chat_id=cid, question=question, options=clean_opts,
+            type="quiz", correct_option_id=ci, explanation=expl,
+            is_anonymous=False, open_period=pt if pt > 0 else None
+        )
+        msgs = d.get("msg_ids", [])
+        msgs.append(pm.message_id)
+        pmap = d.get("poll_map", {})
+        pmap[pm.poll.id] = idx
+        await state.update_data(msg_ids=msgs, poll_map=pmap)
+        wait = pt if pt > 0 else 50
+        _cancel_timer(cid)
+        task = asyncio.create_task(_poll_timeout(bot, cid, state, idx, wait))
+        _poll_timers[cid] = task
+    except Exception as e:
+        err_str = str(e).lower()
+        # User botni bloklagan - sessiyani yakunlaymiz
+        if 'forbidden' in err_str or 'blocked' in err_str or 'kicked' in err_str:
+            log.warning(f"Poll: user botni bloklagan {cid}, sessiya yakunlanadi")
+            _cancel_timer(cid)
+            await state.clear()
+            return
+        # Boshqa xatolar - keyingi savolga o'tamiz
+        log.error(f"Poll xatosi: {e}")
+        await state.update_data(idx=idx+1)
+        await _send_poll(bot, cid, state)
+
+
+def _cancel_timer(cid):
+    t = _poll_timers.pop(cid, None)
+    if t:
+        try: t.cancel()
+        except Exception: pass
+
+
+async def _poll_timeout(bot, cid, state, expected_idx, wait_sec):
+    try:
+        await asyncio.sleep(wait_sec)
+        cur_st = await state.get_state()
+        if cur_st != PollTest.active.state: return
+        d = await state.get_data()
+        if d.get("idx") != expected_idx: return
+        answered = d.get("answered_this", False)
+        qs_total = len(d.get("qs", []))
+        if not answered:
+            streak = d.get("no_ans_streak", 0) + 1
+            await state.update_data(no_ans_streak=streak)
+            ans = d.get("ans", {})
+            ans[str(expected_idx)] = None
+            if streak >= 2:
+                await state.set_state(PollTest.paused)
+                await state.update_data(ans=ans, idx=expected_idx+1, no_ans_streak=0)
+                b = InlineKeyboardBuilder()
+                b.row(InlineKeyboardButton(text="▶️ Davom etish",   callback_data="resume_poll"))
+                b.row(InlineKeyboardButton(text="⏹ Yakunlash",     callback_data="cancel_poll"))
+                await bot.send_message(
+                    cid,
+                    f"⏸ <b>PAUZA</b> — {expected_idx+1}/{qs_total} savolga javob berilmadi (2 marta).",
+                    reply_markup=b.as_markup()
+                )
+            else:
+                new_idx = expected_idx + 1
+                await state.update_data(ans=ans, idx=new_idx)
+                if new_idx < qs_total:
+                    await _send_poll(bot, cid, state)
+                else:
+                    fresh = await state.get_data()
+                    await _finish_poll(bot, cid, state, fresh)
+    except asyncio.CancelledError: pass
+    except Exception as e: log.error(f"Timeout xato: {e}")
+
+
+# ── Pauza / Davom / To'xtatish ────────────────────────────────
+
+@router.callback_query(F.data == "pause_poll", PollTest.active)
+async def pause_poll(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("⏸")
+    cid = callback.message.chat.id if callback.message and callback.message.chat else callback.from_user.id
+    _cancel_timer(cid)
+    await state.set_state(PollTest.paused)
+    try: await callback.message.delete()
+    except Exception: pass
+    d = await state.get_data()
+    await callback.bot.send_message(
+        cid,
+        f"⏸ <b>PAUZA</b> | Savol {d.get('idx',0)}/{len(d.get('qs',[]))}",
+        reply_markup=poll_pause_reply_kb()
+    )
+
+@router.callback_query(F.data == "resume_poll", PollTest.paused)
+async def resume_poll(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("▶️")
+    await state.set_state(PollTest.active)
+    cid = callback.message.chat.id if callback.message and callback.message.chat else callback.from_user.id
+    try: await callback.message.delete()
+    except Exception: pass
+    # Qayta control keyboard chiqaramiz
+    try:
+        d = await state.get_data()
+        idx = d.get("idx", 0)
+        qs  = d.get("qs", [])
+        await callback.bot.send_message(
+            cid,
+            f"▶️ <b>Davom etildi</b> | Savol {idx}/{len(qs)}",
+            reply_markup=poll_control_reply_kb()
+        )
+    except Exception: pass
+    await _send_poll(callback.bot, cid, state)
+
+@router.callback_query(F.data == "cancel_poll")
+async def cancel_poll(callback: CallbackQuery, state: FSMContext):
+    from config import ADMIN_IDS
+    uid = callback.from_user.id
+    d   = await state.get_data()
+
+    if uid != d.get("uid", uid) and uid not in ADMIN_IDS:
+        return await callback.answer("🚫 Faqat siz boshlagan testni to'xtata olasiz!", show_alert=True)
+
+    await callback.answer("⏹")
+    cid = callback.message.chat.id if callback.message and callback.message.chat else uid
+    _cancel_timer(cid)
+
+    for mid in d.get("msg_ids", []):
+        try: await callback.bot.stop_poll(cid, mid)
+        except Exception: pass
+    mid = d.get("info_msg_id")
+    if mid:
+        try: await callback.bot.delete_message(cid, mid)
+        except Exception: pass
+    try:
+        if callback.message: await callback.message.delete()
+    except Exception: pass
+
+    ans = d.get("ans", {})
+    qs  = d.get("qs", [])
+    if qs and ans:
+        d["is_partial"] = True
+        await _finish_poll(callback.bot, cid, state, d)
+    else:
+        from utils.ram_cache import live_end
+        live_end(uid)
+        await state.clear()
+        await callback.bot.send_message(
+            cid, "❌ <b>Test to'xtatildi.</b>",
+            reply_markup=main_kb(uid, "private")
+        )
+
+
+# ── Majburiy to'xtatib poll boshlaш ──────────────────────────
+@router.callback_query(F.data.startswith("force_start_poll_"))
+async def force_start_poll(callback: CallbackQuery, state: FSMContext):
+    from config import ADMIN_IDS
+    uid = callback.from_user.id
+    d   = await state.get_data()
+
+    if uid != d.get("uid", uid) and uid not in ADMIN_IDS:
+        return await callback.answer("🚫 Faqat siz boshlagan testni to'xtata olasiz!", show_alert=True)
+
+    await callback.answer("⏹ Joriy test to'xtatildi")
+    cid = callback.message.chat.id if callback.message and callback.message.chat else uid
+    _cancel_timer(cid)
+
+    # Avvalgi poll xabarlarini tozalash
+    for mid in d.get("msg_ids", []):
+        try: await callback.bot.stop_poll(cid, mid)
+        except: pass
+    info_mid = d.get("info_msg_id")
+    if info_mid:
+        try: await callback.bot.delete_message(cid, info_mid)
+        except: pass
+
+    await state.clear()
+    try: await callback.message.edit_text("⏹ <b>Joriy test to'xtatildi.</b>")
+    except: pass
+
+    # Yangi poll boshlash
+    raw = callback.data[len("force_start_poll_"):]
+    via_link = raw.endswith("_link")
+    tid = raw[:-5].upper() if via_link else raw.upper()
+    await _begin_poll(callback.bot, state, uid, cid, tid, via_link)
+
+
+# ── Yakunlash ─────────────────────────────────────────────────
+
+async def _finish_poll(bot, cid, state, d):
+    test     = d["test"]
+    qs       = d["qs"]
+    ans      = d.get("ans", {})
+    elapsed  = int(time.time() - d.get("t0", time.time()))
+    uid      = d.get("uid", cid)
+    via_link = d.get("via_link", False)
+
+    from utils.ram_cache import live_end
+    live_end(uid)
+    is_demo  = d.get("is_demo", False)
+    _cancel_timer(cid)
+
+    mid = d.get("info_msg_id")
+    if mid:
+        try: await bot.delete_message(cid, mid)
+        except Exception: pass
+
+    scored = calculate_score(qs, ans)
+    scored.update({
+        "time_spent":    elapsed,
+        "passing_score": test.get("passing_score", 60),
+        "mode":          "poll",
+        "demo":          is_demo,
+        "partial":       d.get("is_partial", False),
+    })
+    tid = test.get("test_id", "")
+    rid = await save_result(uid, tid, scored, via_link=via_link)
+    await state.clear()
+
+    daily   = get_daily()
+    pct     = scored.get("percentage", 0)
+    all_pct = [
+        max(v.get("by_test",{}).get(tid,{}).get("all_pcts",[0]))
+        for v in daily.values()
+        if v.get("by_test",{}).get(tid,{}).get("attempts",0) > 0
+    ]
+    all_pct.sort(reverse=True)
+    rank     = next((i+1 for i, p in enumerate(all_pct) if p <= pct), len(all_pct))
+    rank_txt = f"\n🏅 <b>Reyting: {rank}/{len(all_pct)} o'rin</b>" if len(all_pct) > 1 else ""
+
+    result_text = format_result(scored, test) + rank_txt
+    if d.get("is_partial"):
+        result_text = "⚠️ <b>Test yarim qoldirildi</b>\n\n" + result_text
+
+    if is_demo:
+        from config import ADMIN_USERNAME
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="📩 To'liq test olish",
+                                   url=f"https://t.me/{ADMIN_USERNAME}"))
+        b.row(InlineKeyboardButton(text="🤖 Bot orqali murojat",
+                                   callback_data="contact_admin"))
+        demo_text = (
+            f"{result_text}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔍 <b>Bu sinov (demo) rejimi edi!</b>\n\n"
+            f"To'liq testni olish uchun:\n"
+            f"• @{ADMIN_USERNAME} ga yozing\n"
+            f"• Yoki quyidagi tugmani bosing 👇"
+        )
+        await bot.send_message(cid, demo_text, reply_markup=b.as_markup())
+        return
+
+    await bot.send_message(cid, result_text, reply_markup=result_kb(tid, rid))
+
+
+# ── ReplyKeyboard tugmalari (pastdagi tugmalar) ───────────────
+
+@router.message(F.text == "⏸ Pauza", PollTest.active)
+async def reply_pause_poll(message, state: FSMContext):
+    """Pastdagi ⏸ Pauza tugmasi"""
+    from aiogram.types import ReplyKeyboardRemove
+    cid = message.chat.id
+    _cancel_timer(cid)
+    await state.set_state(PollTest.paused)
+    try: await message.delete()
+    except Exception: pass
+    d = await state.get_data()
+    await message.bot.send_message(
+        cid,
+        f"⏸ <b>PAUZA</b> | Savol {d.get('idx', 0)}/{len(d.get('qs', []))}",
+        reply_markup=poll_pause_reply_kb()
+    )
+
+
+@router.message(F.text == "▶️ Davom etish", PollTest.paused)
+async def reply_resume_poll(message, state: FSMContext):
+    """Pastdagi ▶️ Davom etish tugmasi"""
+    await state.set_state(PollTest.active)
+    cid = message.chat.id
+    try: await message.delete()
+    except Exception: pass
+    d = await state.get_data()
+    idx = d.get("idx", 0)
+    qs  = d.get("qs", [])
+    try:
+        await message.bot.send_message(
+            cid,
+            f"▶️ <b>Davom etildi</b> | Savol {idx}/{len(qs)}",
+            reply_markup=poll_control_reply_kb()
+        )
+    except Exception: pass
+    await _send_poll(message.bot, cid, state)
+
+
+@router.message(F.text == "⏹ Tugatish")
+async def reply_cancel_poll(message, state: FSMContext):
+    """Pastdagi ⏹ Tugatish tugmasi — istalgan poll state da"""
+    from config import ADMIN_IDS
+    from aiogram.types import ReplyKeyboardRemove
+    cur = await state.get_state()
+    if cur not in (PollTest.active.state, PollTest.paused.state):
+        return
+    uid = message.from_user.id
+    d   = await state.get_data()
+    if uid != d.get("uid", uid) and uid not in ADMIN_IDS:
+        return await message.answer("🚫 Faqat siz boshlagan testni to'xtata olasiz!")
+    cid = message.chat.id
+    _cancel_timer(cid)
+
+    try: await message.delete()
+    except Exception: pass
+    for mid in d.get("msg_ids", []):
+        try: await message.bot.stop_poll(cid, mid)
+        except Exception: pass
+    info_mid = d.get("info_msg_id")
+    if info_mid:
+        try: await message.bot.delete_message(cid, info_mid)
+        except Exception: pass
+
+    ans = d.get("ans", {})
+    qs  = d.get("qs", [])
+    if qs and ans:
+        d["is_partial"] = True
+        await _finish_poll(message.bot, cid, state, d)
+    else:
+        await state.clear()
+        await message.bot.send_message(
+            cid, "❌ <b>Test to'xtatildi.</b>",
+            reply_markup=main_kb(uid, "private")
+        )

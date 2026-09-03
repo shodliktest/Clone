@@ -1,0 +1,2176 @@
+"""👑 ADMIN PANEL"""
+import json, logging
+from datetime import datetime, timezone
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
+
+from config import ADMIN_IDS
+from utils import ram_cache as ram
+from utils.db import get_all_users, get_all_tests, block_user
+from keyboards.keyboards import admin_kb, main_kb, CAT_ICONS, get_cat_icon, security_kb
+from utils.states import AdminPanel
+
+log    = logging.getLogger(__name__)
+router = Router()
+_forward_mode_users: set[int] = set()
+UTC    = timezone.utc
+
+def is_admin(uid): return uid in ADMIN_IDS
+
+
+# ══ ADMIN PANEL ASOSIY ════════════════════════════════════════
+@router.message(F.text == "👑 Admin Panel")
+@router.message(Command("admin"))
+async def admin_panel(message: Message):
+    if not is_admin(message.from_user.id): return
+    await _show_admin(message)
+
+@router.callback_query(F.data == "admin_panel")
+async def admin_panel_cb(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫", show_alert=True)
+    await _show_admin(callback, edit=True)
+
+async def _show_admin(ev, edit=False):
+    st    = ram.stats()
+    tests = ram.get_tests_meta()
+    users = ram.get_users()
+    text  = (
+        f"👑 <b>ADMIN PANEL</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 Testlar: <b>{len(tests)}</b>\n"
+        f"👥 Userlar: <b>{len(users)}</b>\n"
+        f"📊 Kunlik: <b>{st.get('daily_r',0)}</b>\n"
+        f"💾 RAM cache: <b>{st.get('cached_q',0)} test</b>\n"
+        f"🧠 RAM: <b>{st.get('mb',0)} MB ({st.get('pct',0)}%)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    try:
+        if edit and hasattr(ev, 'message'):
+            await ev.message.edit_text(text, reply_markup=admin_kb())
+        elif edit:
+            await ev.edit_text(text, reply_markup=admin_kb())
+        else:
+            await ev.answer(text, reply_markup=admin_kb())
+    except TelegramBadRequest:
+        target = ev.message if hasattr(ev, 'message') else ev
+        await target.answer(text, reply_markup=admin_kb())
+
+
+# Supabase Free tarif bazasi hajmi chegarasi (MB). Agar keyinchalik
+# Pro tarifga o'tilsa, shu yerni yangilash kifoya (Pro = 8192 MB).
+SUPABASE_DB_LIMIT_MB = 500
+
+def _fmt_mb(bytes_val: int) -> float:
+    return round((bytes_val or 0) / 1024 / 1024, 1)
+
+
+# ══ STATISTIKA ════════════════════════════════════════════════
+@router.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    st    = ram.stats()
+    users = ram.get_users()
+    tests = ram.get_tests_meta()
+    daily = ram.get_daily()
+    today_users  = sum(1 for v in daily.values() if v.get("by_test"))
+    today_solves = sum(
+        len(v.get("by_test", {})) for v in daily.values()
+    )
+    cache_info = ram.get_cache_stats() if hasattr(ram, 'get_cache_stats') else []
+    text = (
+        f"📈 <b>STATISTIKA</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 Jami userlar: <b>{len(users)}</b>\n"
+        f"📋 Jami testlar: <b>{len(tests)}</b>\n\n"
+        f"📅 <b>Bugun:</b>\n"
+        f"  👤 Aktiv userlar: <b>{today_users}</b>\n"
+        f"  🎯 Yechilgan: <b>{today_solves}</b>\n\n"
+        f"🧠 <b>RAM holati:</b>\n"
+        f"  💾 {st.get('mb',0)} MB / {st.get('limit_mb',450)} MB ({st.get('pct',0)}%)\n"
+        f"  📦 Cached testlar: <b>{st.get('cached_q',0)} ta</b>\n"
+    )
+
+    from utils import tg_db
+    storage = await tg_db.get_storage_stats()
+    if storage:
+        total_mb  = _fmt_mb(storage.get("total_bytes", 0))
+        pct       = round(total_mb / SUPABASE_DB_LIMIT_MB * 100, 1)
+        by_table  = {t["table_name"]: t for t in storage.get("tables", [])}
+        tests_row = by_table.get("tests")
+        text += (
+            f"\n🗄 <b>Supabase (baza) holati:</b>\n"
+            f"  💾 {total_mb} MB / {SUPABASE_DB_LIMIT_MB} MB ({pct}%)\n"
+        )
+        if tests_row:
+            tests_mb = _fmt_mb(tests_row.get("total_bytes", 0))
+            text += f"  📋 <code>tests</code> jadvali: <b>{tests_mb} MB</b> ({len(tests)} ta test)\n"
+            if tests and tests_row.get("total_bytes"):
+                avg_bytes_per_test = tests_row["total_bytes"] / len(tests)
+                remaining_bytes    = max(SUPABASE_DB_LIMIT_MB * 1024 * 1024 - storage.get("total_bytes", 0), 0)
+                approx_more        = int(remaining_bytes / avg_bytes_per_test)
+                text += f"  ➕ Taxminan yana <b>~{approx_more:,}</b> ta test sig'adi\n".replace(",", " ")
+        # Eng katta 3 ta jadval (tests dan tashqari) — qaerga joy ketayotganini ko'rish uchun
+        others = [t for t in storage.get("tables", []) if t["table_name"] != "tests"][:3]
+        if others:
+            text += "  <i>Boshqa yiriklari:</i> " + ", ".join(
+                f"{t['table_name']} ({_fmt_mb(t['total_bytes'])} MB)" for t in others
+            ) + "\n"
+    else:
+        text += (
+            f"\n🗄 <b>Supabase holati:</b> <i>sozlanmagan</i>\n"
+            f"  ⚙️ Yoqish uchun <code>fix_storage_stats.sql</code> ni\n"
+            f"  Supabase SQL Editor'da bir marta ishga tushiring.\n"
+        )
+
+    text += "━━━━━━━━━━━━━━━━━━━━━━━━"
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_panel"))
+    try: await callback.message.edit_text(text, reply_markup=b.as_markup())
+    except TelegramBadRequest: await callback.message.answer(text, reply_markup=b.as_markup())
+
+
+# ══ USERLAR ════════════════════════════════════════════════════
+@router.callback_query(F.data == "admin_users")
+async def admin_users(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await _show_users_page(callback.message, page=0, edit=True)
+
+@router.callback_query(F.data.startswith("adm_users_p"))
+async def admin_users_page(callback: CallbackQuery):
+    await callback.answer()
+    page = int(callback.data[11:])
+    await _show_users_page(callback.message, page=page, edit=True)
+
+async def _show_users_page(msg, page=0, edit=False):
+    users_dict = ram.get_users()
+    users      = sorted(users_dict.values(), key=lambda u: u.get("total_tests",0), reverse=True)
+    PG    = 10
+    total = (len(users)+PG-1)//PG
+    page  = max(0, min(page, total-1))
+    chunk = users[page*PG:(page+1)*PG]
+    text  = (
+        f"👥 <b>FOYDALANUVCHILAR</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Jami: {len(users)} ta | Sahifa {page+1}/{total}</i>\n\n"
+    )
+    b = InlineKeyboardBuilder()
+    for u in chunk:
+        uid   = u.get("telegram_id","")
+        name  = u.get("name","?")[:16]
+        total_t = u.get("total_tests",0)
+        avg   = round(u.get("avg_score",0),1)
+        blk   = "🚫" if u.get("is_blocked") else ""
+        text += f"{blk}👤 <b>{name}</b> | 📋{total_t} | ⭐{avg}%\n"
+        b.row(InlineKeyboardButton(
+            text=f"{'🚫' if u.get('is_blocked') else '👤'} {name} — {total_t} test",
+            callback_data=f"adm_user_{uid}"
+        ))
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm_users_p{page-1}"))
+    if page < total-1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm_users_p{page+1}"))
+    if nav: b.row(*nav)
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+    try:
+        if edit: await msg.edit_text(text, reply_markup=b.as_markup())
+        else:    await msg.answer(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=b.as_markup())
+
+@router.callback_query(F.data.startswith("adm_user_"))
+async def adm_user_detail(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    uid_str = callback.data[9:]
+    users   = ram.get_users()
+    u       = users.get(str(uid_str), {})
+    if not u:
+        return await callback.answer("Topilmadi", show_alert=True)
+    name  = u.get("name","?")
+    uname = f"@{u['username']}" if u.get("username") else "Yo'q"
+    blk   = u.get("is_blocked", False)
+    text  = (
+        f"👤 <b>{name}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 <code>{uid_str}</code>\n"
+        f"📱 {uname}\n"
+        f"📋 Testlar: <b>{u.get('total_tests',0)}</b>\n"
+        f"⭐ O'rtacha: <b>{round(u.get('avg_score',0),1)}%</b>\n"
+        f"🕐 Oxirgi: {str(u.get('last_active',''))[:16]}\n"
+        f"{'🚫 BLOKLANGAN' if blk else '✅ Aktiv'}"
+    )
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(
+        text="✅ Blokdan chiqarish" if blk else "🚫 Bloklash",
+        callback_data=f"adm_block_{uid_str}"
+    ))
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin_users"))
+    try: await callback.message.edit_text(text, reply_markup=b.as_markup())
+    except TelegramBadRequest: await callback.message.answer(text, reply_markup=b.as_markup())
+
+@router.callback_query(F.data.startswith("adm_block_"))
+async def adm_block_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    uid_str = callback.data[10:]
+    users   = ram.get_users()
+    u       = users.get(str(uid_str), {})
+    new_blk = not u.get("is_blocked", False)
+    import blocked as _bl
+    if new_blk:
+        _bl.block(int(uid_str))
+        await callback.answer("🚫 Bloklandi!", show_alert=True)
+    else:
+        _bl.unblock(int(uid_str))
+        await callback.answer("✅ Blok ochildi!", show_alert=True)
+    await adm_user_detail(callback)
+
+
+# ══ TESTLAR — FANLAR BO'YICHA ══════════════════════════════════
+@router.callback_query(F.data == "admin_tests")
+async def admin_tests(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await _show_admin_test_cats(callback.message, edit=True)
+
+@router.callback_query(F.data == "adm_back_to_cats")
+async def adm_back_cats(callback: CallbackQuery):
+    await callback.answer()
+    await _show_admin_test_cats(callback.message, edit=True)
+
+
+@router.callback_query(F.data.startswith("adm_deleted_"))
+async def adm_deleted_tests(callback: CallbackQuery):
+    """O'chirilgan testlar ro'yxati."""
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    page  = int(callback.data.split("_")[-1])
+    tests = [t for t in ram.get_all_tests_meta() if not t.get("is_active", True)]
+    PG    = 8
+    total = max(1, (len(tests)+PG-1)//PG)
+    page  = max(0, min(page, total-1))
+    chunk = tests[page*PG:(page+1)*PG]
+
+    text  = (
+        f"🗑 <b>O'CHIRILGAN TESTLAR</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>{len(tests)} ta | Sahifa {page+1}/{total}</i>\n\n"
+    )
+    b = InlineKeyboardBuilder()
+    for t in chunk:
+        tid     = t.get("test_id","")
+        title_t = t.get("title","?")[:18]
+        sc      = t.get("solve_count", 0)
+        c_name  = t.get("creator_name", "")[:12]
+        created = str(t.get("created_at",""))[:10]
+        text += f"🗑 <b>{title_t}</b> <code>[{tid}]</code>\n"
+        text += f"   👤{c_name} | 📅{created} | 👥{sc}\n\n"
+        b.row(InlineKeyboardButton(
+            text=f"🗑 {title_t[:20]} [{tid}]",
+            callback_data=f"adm_test_{tid}"
+        ))
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm_deleted_{page-1}"))
+    if page < total-1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm_deleted_{page+1}"))
+    if nav: b.row(*nav)
+    if tests:
+        b.row(InlineKeyboardButton(
+            text=f"🗑 Barchasini butunlay tozalash ({len(tests)})",
+            callback_data="purge_ghost_all"
+        ))
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_back_to_cats"))
+    try: await callback.message.edit_text(text, reply_markup=b.as_markup())
+    except TelegramBadRequest: await callback.message.answer(text, reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data == "purge_ghost_all")
+async def purge_ghost_all_confirm(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    count = sum(1 for t in ram.get_all_tests_meta() if not t.get("is_active", True))
+    if count == 0:
+        return await callback.answer("Tozalanadigan test yo'q.", show_alert=True)
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="✅ Ha, tozalash", callback_data="purge_ghost_all_yes"),
+        InlineKeyboardButton(text="❌ Yo'q", callback_data="adm_deleted_0"),
+    )
+    try:
+        await callback.message.edit_text(
+            f"⚠️ <b>BARCHASINI BUTUNLAY TOZALASH</b>\n\n"
+            f"🗑 {count} ta avval o'chirilgan (Supabase'da osilib qolgan) test "
+            f"<b>butunlay tozalanadi</b>.\n"
+            f"Bu testlar allaqachon avval o'chirilgan, backup ham saqlangan bo'lishi kerak.\n\n"
+            f"Bu amalni qaytarib bo'lmaydi!",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+
+
+@router.callback_query(F.data == "purge_ghost_all_yes")
+async def purge_ghost_all_exec(callback: CallbackQuery):
+    await callback.answer("⏳ Tozalanmoqda...")
+    if not is_admin(callback.from_user.id): return
+    from utils.db import purge_ghost_tests
+    count = await purge_ghost_tests()
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Fanlar", callback_data="adm_back_to_cats"))
+    try:
+        await callback.message.edit_text(
+            f"✅ <b>{count} ta</b> test Supabase'dan butunlay tozalandi.\n"
+            f"Bazada endi bu testlardan iz qolmadi.",
+            reply_markup=b.as_markup()
+        )
+    except: pass
+
+
+@router.callback_query(F.data == "purge_user_stats")
+async def purge_user_stats_confirm(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="✅ Ha, tozalash", callback_data="purge_user_stats_yes"),
+        InlineKeyboardButton(text="❌ Yo'q", callback_data="admin_panel"),
+    )
+    try:
+        await callback.message.edit_text(
+            f"⚠️ <b>TAHLIL/TARIXNI BUTUNLAY TOZALASH</b>\n\n"
+            f"🧹 BARCHA foydalanuvchilarning test yechish tarixi, foizlari "
+            f"va tahlillari (<code>user_stats</code>) butunlay o'chiriladi.\n\n"
+            f"✅ <b>Saqlanib qoladi:</b>\n"
+            f"• Testlar va ularning meta ma'lumotlari\n"
+            f"• Testlarning umumiy statistikasi (necha marta yechilgan, o'rtacha ball)\n"
+            f"• Foydalanuvchilar ro'yxati (profil, rol, umumiy hisoblagichlar)\n\n"
+            f"❌ <b>Yo'qoladi:</b>\n"
+            f"• Har bir foydalanuvchining har bir test bo'yicha batafsil tarixi\n"
+            f"• \"Oxirgi tahlil\" ma'lumotlari\n\n"
+            f"Bu amalni qaytarib bo'lmaydi!",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+
+
+@router.callback_query(F.data == "purge_user_stats_yes")
+async def purge_user_stats_exec(callback: CallbackQuery):
+    await callback.answer("⏳ Tozalanmoqda...")
+    if not is_admin(callback.from_user.id): return
+    from utils import tg_db
+    count = await tg_db.purge_all_user_stats()
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+    try:
+        await callback.message.edit_text(
+            f"✅ <b>{count} ta</b> foydalanuvchining tahlil/tarix yozuvi butunlay tozalandi.\n"
+            f"Testlar, test statistikasi va foydalanuvchilar ro'yxati tegilmadi.",
+            reply_markup=b.as_markup()
+        )
+    except: pass
+
+async def _show_admin_test_cats(msg, edit=False):
+    tests = ram.get_all_tests_meta()
+    cats  = {}
+    for t in tests:
+        c = t.get("category") or "Boshqa"
+        if c not in cats:
+            cats[c] = {"total": 0, "active": 0, "paused": 0, "deleted": 0}
+        cats[c]["total"] += 1
+        if not t.get("is_active", True):
+            cats[c]["deleted"] += 1
+        elif t.get("is_paused"):
+            cats[c]["paused"] += 1
+        else:
+            cats[c]["active"] += 1
+
+    sorted_cats = sorted(cats.items(), key=lambda x: x[1]["total"], reverse=True)
+    text = (
+        f"📋 <b>TESTLAR — FANLAR BO'YICHA</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Jami: {len(tests)} ta test | {len(cats)} ta fan</i>\n\n"
+    )
+    b = InlineKeyboardBuilder()
+    for cat, info in sorted_cats:
+        icon  = get_cat_icon(cat)
+        parts = []
+        if info["active"]:  parts.append(f"✅{info['active']}")
+        if info["paused"]:  parts.append(f"⏸{info['paused']}")
+        if info["deleted"]: parts.append(f"🗑{info['deleted']}")
+        stat  = " ".join(parts)
+        text += f"{icon} <b>{cat}</b> — {info['total']} ta ({stat})\n"
+        b.row(InlineKeyboardButton(
+            text=f"{icon} {cat} — {info['total']} ta",
+            callback_data=f"adm_cat_{cat[:30]}_0"
+        ))
+    b.row(InlineKeyboardButton(text="🌟 Hammasi", callback_data="adm_cat_ALL_0"))
+    b.row(InlineKeyboardButton(text="⬅️ Admin",   callback_data="admin_panel"))
+    try:
+        if edit: await msg.edit_text(text, reply_markup=b.as_markup())
+        else:    await msg.answer(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data.startswith("adm_cat_"))
+async def adm_cat_tests(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    raw   = callback.data[8:]
+    parts = raw.rsplit("_", 1)
+    cat   = parts[0]
+    page  = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    await _show_adm_cat_tests(callback.message, cat, page, edit=True)
+
+async def _show_adm_cat_tests(msg, cat_name, page=0, edit=False, show_deleted=False):
+    tests = ram.get_all_tests_meta()
+    if cat_name != "ALL":
+        tests = [t for t in tests if t.get("category") == cat_name]
+    # O'chirilganlarni yashirish (maxsus ko'rsatilmasa)
+    if not show_deleted:
+        tests = [t for t in tests if t.get("is_active", True)]
+    deleted_count = sum(1 for t in ram.get_all_tests_meta() if not t.get("is_active", True))
+    PG    = 8
+    total = (len(tests)+PG-1)//PG
+    page  = max(0, min(page, total-1))
+    chunk = tests[page*PG:(page+1)*PG]
+    title = "🌟 BARCHA TESTLAR" if cat_name == "ALL" else f"📋 {cat_name.upper()}"
+    vis_m = {"public":"🌍","link":"🔗","private":"🔒"}
+    diff_m= {"easy":"🟢","medium":"🟡","hard":"🔴","expert":"⚡"}
+
+    text = (
+        f"<b>{title}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>{len(tests)} ta aktiv | 🗑 {deleted_count} ta o'chirilgan | Sahifa {page+1}/{max(1,total)}</i>\n\n"
+    )
+    b = InlineKeyboardBuilder()
+    for t in chunk:
+        tid     = t.get("test_id","")
+        title_t = t.get("title","?")[:18]
+        active  = t.get("is_active", True)
+        paused  = t.get("is_paused", False)
+        sc      = t.get("solve_count", 0)
+        vis     = vis_m.get(t.get("visibility",""), "")
+        diff    = diff_m.get(t.get("difficulty",""), "")
+        c_name  = t.get("creator_name", "")[:12]
+        icon    = "🗑" if not active else ("⏸" if paused else "✅")
+        text += f"{icon}{vis}{diff} <b>{title_t}</b> <code>[{tid}]</code> | 👥{sc}"
+        if c_name:
+            text += f" | 👤{c_name}"
+        text += "\n"
+        b.row(InlineKeyboardButton(
+            text=f"{icon} {title_t[:20]} [{tid}]",
+            callback_data=f"adm_test_{tid}"
+        ))
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm_cat_{cat_name}_{page-1}"))
+    if page < total-1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm_cat_{cat_name}_{page+1}"))
+    if nav: b.row(*nav)
+    if deleted_count > 0:
+        b.row(InlineKeyboardButton(
+            text=f"🗑 O'chirilganlar ({deleted_count})",
+            callback_data=f"adm_deleted_0"
+        ))
+    b.row(InlineKeyboardButton(text="⬅️ Fanlar", callback_data="adm_back_to_cats"))
+    try:
+        if edit: await msg.edit_text(text, reply_markup=b.as_markup())
+        else:    await msg.answer(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data.startswith("adm_test_"))
+async def adm_test_detail(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    tid  = callback.data[9:]
+    meta = ram.get_test_meta(tid) or {}
+    if not meta:
+        # O'chirilgan test — all_tests_meta dan qidirish
+        meta = next((t for t in ram.get_all_tests_meta() if t.get("test_id")==tid), {})
+    if not meta:
+        return await callback.answer("❌ Test topilmadi", show_alert=True)
+
+    active = meta.get("is_active", True)
+    paused = meta.get("is_paused", False)
+    vis_m  = {"public":"🌍 Ommaviy","link":"🔗 Ssilka","private":"🔒 Shaxsiy"}
+    diff_m = {"easy":"🟢","medium":"🟡","hard":"🔴","expert":"⚡"}
+
+    c_id   = meta.get("creator_id", "?")
+    c_name = meta.get("creator_name", "")
+    c_user = meta.get("creator_username", "")
+    c_str  = c_name if c_name else f"ID: {c_id}"
+    if c_user:
+        c_str += f" (@{c_user})"
+    created = str(meta.get("created_at", ""))[:10] or "—"
+
+    text = (
+        f"🔍 <b>TEST BATAFSIL</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{'🗑 <b>O\'CHIRILGAN</b>\n\n' if not active else ''}"
+        f"{'⏸ <b>PAUZADA</b>\n\n' if paused else ''}"
+        f"📝 <b>{meta.get('title','?')}</b>\n"
+        f"🆔 <code>{tid}</code>\n"
+        f"📁 {meta.get('category','')}\n"
+        f"📊 {diff_m.get(meta.get('difficulty',''),'')}\n"
+        f"🔒 {vis_m.get(meta.get('visibility',''),'')}\n"
+        f"📋 {meta.get('question_count',0)} savol\n"
+        f"👥 {meta.get('solve_count',0)} yechgan\n"
+        f"⭐ {round(meta.get('avg_score',0),1)}%\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 Yaratuvchi: <b>{c_str}</b>\n"
+        f"📅 Yaratilgan: <b>{created}</b>"
+    )
+    b = InlineKeyboardBuilder()
+    if active:
+        b.row(InlineKeyboardButton(
+            text="▶️ Davom ettirish" if paused else "⏸ To'xtatish",
+            callback_data=f"{'test_resume' if paused else 'test_pause'}_{tid}"
+        ))
+        b.row(
+            InlineKeyboardButton(text="✏️ Nomini o'zgartirish", callback_data=f"edit_title_{tid}"),
+        )
+        b.row(
+            InlineKeyboardButton(text="👥 Kim yechgan",    callback_data=f"test_solvers_{tid}_0"),
+            InlineKeyboardButton(text="⏱ Poll vaqti",      callback_data=f"edit_poll_time_{tid}"),
+        )
+        # Web tahrirlash tugmasi
+        from handlers.webauth import WEBAPP_URL
+        b.row(InlineKeyboardButton(
+            text="🌐 Tahrirlash (web)",
+            url=f"{WEBAPP_URL}/edit.html?id={tid}"
+        ))
+        b.row(InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"del_test_{tid}"))
+    cat = meta.get("category","")[:30]
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"adm_cat_{cat}_0"))
+    try: await callback.message.edit_text(text, reply_markup=b.as_markup())
+    except TelegramBadRequest: await callback.message.answer(text, reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data.startswith("del_test_"))
+async def del_test_confirm(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    tid  = callback.data[9:]
+    meta = ram.get_test_meta_any(tid) or {}
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="✅ Ha, butunlay o'chirish", callback_data=f"del_confirm_{tid}"),
+        InlineKeyboardButton(text="❌ Yo'q", callback_data=f"adm_test_{tid}"),
+    )
+    try:
+        await callback.message.edit_text(
+            f"⚠️ <b>BUTUNLAY O'CHIRISH</b>\n\n"
+            f"📝 {meta.get('title','?')} [{tid}]\n\n"
+            f"Test bazadan, RAMdan, TG dan <b>butunlay o'chiriladi</b>.\n"
+            f"Faqat backup TG kanalda qoladi.",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+
+@router.callback_query(F.data.startswith("del_confirm_"))
+async def del_test_exec(callback: CallbackQuery):
+    await callback.answer("⏳ O'chirilmoqda...")
+    if not is_admin(callback.from_user.id): return
+    tid  = callback.data[12:]
+    meta = ram.get_test_meta_any(tid) or {}
+    from utils.db import delete_test
+    await delete_test(tid)
+    try:
+        await callback.message.edit_text(
+            f"✅ <b>{meta.get('title','?')}</b> butunlay o'chirildi.\n"
+            f"🗑 Baza, RAM, TG — tozalandi.\n"
+            f"💾 Backup TG kanalda saqlanadi."
+        )
+    except: pass
+    await _show_admin_test_cats(callback.message)
+
+
+# ══ O'CHIRILGAN TESTLAR (yaratuvchi o'chirgan) ══════════════════
+
+@router.callback_query(F.data == "admin_deleted_tests")
+async def admin_deleted_tests(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    deleted = ram.get_deleted_tests()
+    if not deleted:
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin_panel"))
+        try:
+            await callback.message.edit_text(
+                "🗑 <b>O'chirilgan testlar</b>\n\nHozircha o'chirilgan test yo'q.",
+                reply_markup=b.as_markup()
+            )
+        except TelegramBadRequest: pass
+        return
+
+    # Fan bo'yicha guruhlash
+    cats = {}
+    for t in deleted:
+        cat = t.get("category") or t.get("subject") or "Boshqa"
+        cats.setdefault(cat, []).append(t)
+
+    lines = ["🗑 <b>O'chirilgan testlar</b> (yaratuvchi o'chirgan)\n"]
+    for cat, tests in sorted(cats.items()):
+        lines.append(f"\n📂 <b>{cat}</b> — {len(tests)} ta")
+        for t in tests[:5]:
+            lines.append(
+                f"  • {t.get('title','?')} [{t.get('test_id','')}] "
+                f"— {t.get('question_count',0)} savol"
+            )
+        if len(tests) > 5:
+            lines.append(f"  ... va yana {len(tests)-5} ta")
+
+    b = InlineKeyboardBuilder()
+    for cat in sorted(cats.keys()):
+        b.row(InlineKeyboardButton(
+            text=f"📂 {cat} ({len(cats[cat])})",
+            callback_data=f"del_cat_{cat[:30]}"
+        ))
+    b.row(InlineKeyboardButton(
+        text=f"🗑 Barchasini butunlay o'chirish ({len(deleted)})",
+        callback_data="purge_all_deleted"
+    ))
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+    try:
+        await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await callback.message.answer("\n".join(lines), reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data == "purge_all_deleted")
+async def purge_all_deleted_confirm(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    count = len(ram.get_deleted_tests())
+    if count == 0:
+        return await callback.answer("O'chirilgan test yo'q.", show_alert=True)
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="✅ Ha, barchasini o'chirish", callback_data="purge_all_deleted_yes"),
+        InlineKeyboardButton(text="❌ Yo'q", callback_data="admin_deleted_tests"),
+    )
+    try:
+        await callback.message.edit_text(
+            f"⚠️ <b>BARCHASINI BUTUNLAY O'CHIRISH</b>\n\n"
+            f"🗑 {count} ta o'chirilgan test bazadan, RAMdan, Supabase'dan "
+            f"<b>butunlay tozalanadi</b>.\n"
+            f"Har biri uchun backup TG kanalda saqlanadi.\n\n"
+            f"Bu amalni qaytarib bo'lmaydi!",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+
+
+@router.callback_query(F.data == "purge_all_deleted_yes")
+async def purge_all_deleted_exec(callback: CallbackQuery):
+    await callback.answer("⏳ Tozalanmoqda...")
+    if not is_admin(callback.from_user.id): return
+    from utils.db import purge_all_deleted_tests
+    count = await purge_all_deleted_tests()
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+    try:
+        await callback.message.edit_text(
+            f"✅ <b>{count} ta</b> o'chirilgan test butunlay tozalandi.\n"
+            f"🗑 Baza, RAM, Supabase — tozalandi.\n"
+            f"💾 Backuplar TG kanalda saqlanadi.",
+            reply_markup=b.as_markup()
+        )
+    except: pass
+
+
+@router.callback_query(F.data.startswith("del_cat_"))
+async def admin_deleted_cat(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    cat     = callback.data[8:]
+    deleted = ram.get_deleted_tests()
+    tests   = [t for t in deleted
+               if (t.get("category") or t.get("subject") or "Boshqa")[:30] == cat]
+    b = InlineKeyboardBuilder()
+    for t in tests:
+        tid = t.get("test_id","")
+        b.row(
+            InlineKeyboardButton(
+                text=f"📝 {t.get('title','?')[:30]}",
+                callback_data=f"del_view_{tid}"
+            )
+        )
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data="admin_deleted_tests"))
+    lines = [f"📂 <b>{cat}</b> — o'chirilgan testlar\n"]
+    for t in tests:
+        lines.append(
+            f"• <b>{t.get('title','?')}</b>\n"
+            f"  🆔 <code>{t.get('test_id','')}</code> | "
+            f"❓ {t.get('question_count',0)} savol | "
+            f"👤 {t.get('creator_name','?')}"
+        )
+    try:
+        await callback.message.edit_text("\n".join(lines), reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await callback.message.answer("\n".join(lines), reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data.startswith("del_view_"))
+async def admin_deleted_view(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    tid  = callback.data[9:]
+    meta = ram.get_test_meta_any(tid) or {}
+    cat  = (meta.get("category") or meta.get("subject") or "Boshqa")[:30]
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📄 TXT yuklab olish", callback_data=f"del_txt_{tid}"))
+    b.row(
+        InlineKeyboardButton(text="♻️ Qayta tiklash",  callback_data=f"del_restore_{tid}"),
+        InlineKeyboardButton(text="🗑 Butunlay o'chir", callback_data=f"del_confirm_{tid}"),
+    )
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"del_cat_{cat}"))
+    try:
+        await callback.message.edit_text(
+            f"🗑 <b>O'chirilgan test</b>\n\n"
+            f"📝 {meta.get('title','?')}\n"
+            f"🆔 <code>{tid}</code>\n"
+            f"📂 {cat}\n"
+            f"❓ {meta.get('question_count',0)} savol\n"
+            f"👤 {meta.get('creator_name','?')}\n"
+            f"📅 {meta.get('created_at','?')}",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest:
+        await callback.message.answer(
+            f"Test: {meta.get('title','?')} [{tid}]",
+            reply_markup=b.as_markup()
+        )
+
+
+@router.callback_query(F.data.startswith("del_restore_"))
+async def admin_restore_test(callback: CallbackQuery):
+    await callback.answer("♻️ Tiklanmoqda...")
+    if not is_admin(callback.from_user.id): return
+    tid = callback.data[12:]
+    from utils import tg_db
+    updates = {"is_deleted": False, "is_active": True}
+    ram.update_test_meta(tid, updates)
+    if tg_db.ready():
+        await tg_db.update_test_meta_tg(tid, updates)
+    meta = ram.get_test_meta_any(tid) or {}
+    try:
+        await callback.message.edit_text(
+            f"✅ <b>{meta.get('title','?')}</b> tiklandi!\n"
+            f"Test endi foydalanuvchilarga ko'rinadi."
+        )
+    except: pass
+
+
+@router.callback_query(F.data.startswith("del_txt_"))
+async def admin_download_txt(callback: CallbackQuery):
+    await callback.answer("📄 TXT tayyorlanmoqda...")
+    if not is_admin(callback.from_user.id): return
+    tid  = callback.data[8:]
+    from utils import tg_db
+    test = await tg_db.get_test_full(tid)
+    if not test or not test.get("questions"):
+        meta = ram.get_test_meta_any(tid) or {}
+        return await callback.message.answer(
+            f"❌ <b>{meta.get('title','?')}</b> savollari topilmadi.\n"
+            f"Test TG kanalda bo'lishi kerak."
+        )
+    # TXT format
+    lines = [
+        f"Test: {test.get('title','?')}",
+        f"Fan: {test.get('category') or test.get('subject','?')}",
+        f"Savollar: {len(test.get('questions',[]))}",
+        f"ID: {tid}",
+        "="*50,
+        ""
+    ]
+    for i, q in enumerate(test.get("questions", []), 1):
+        lines.append(f"{i}. {q.get('question', q.get('q','?'))}")
+        options = q.get("options", q.get("variants", []))
+        correct = q.get("correct", q.get("correct_index", 0))
+        for j, opt in enumerate(options):
+            mark = "✓" if j == correct else " "
+            lines.append(f"   {mark} {chr(65+j)}) {opt}")
+        if q.get("explanation"):
+            lines.append(f"   💡 {q['explanation']}")
+        lines.append("")
+
+    txt_content = "\n".join(lines).encode("utf-8")
+    from aiogram.types import BufferedInputFile
+    doc = BufferedInputFile(txt_content, filename=f"{test.get('title','test')}_{tid}.txt")
+    await callback.message.answer_document(
+        doc,
+        caption=f"📄 <b>{test.get('title','?')}</b>\n{len(test.get('questions',[]))} savol | {tid}"
+    )
+
+
+# ══ BROADCAST ══════════════════════════════════════════════════
+@router.callback_query(F.data == "admin_broadcast")
+async def broadcast_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="admin_panel"))
+    try:
+        await callback.message.edit_text(
+            "📢 <b>BROADCAST</b>\n\nXabar yozing (HTML qo'llab-quvvatlanadi):",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+    await state.set_state(AdminPanel.broadcast)
+
+@router.message(AdminPanel.broadcast)
+async def broadcast_send(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    users   = ram.get_users()
+    sent = ok = fail = 0
+    status = await message.answer(f"⏳ <b>Yuborilmoqda...</b> 0/{len(users)}")
+    for uid_str, u in users.items():
+        if u.get("is_blocked"): continue
+        try:
+            await message.bot.send_message(int(uid_str), message.text or message.caption or "")
+            ok += 1
+        except Exception:
+            fail += 1
+        sent += 1
+        if sent % 20 == 0:
+            try:
+                await status.edit_text(f"⏳ {sent}/{len(users)} | ✅{ok} ❌{fail}")
+            except: pass
+    await state.clear()
+    try:
+        await status.edit_text(
+            f"✅ <b>Broadcast tugadi</b>\n\n"
+            f"✅ Yuborildi: {ok}\n❌ Xato: {fail}\n📊 Jami: {sent}"
+        )
+    except: pass
+
+
+# ══ GURUH E'LON ════════════════════════════════════════════════
+
+GROUPS_PER_PAGE = 10
+
+async def _show_groups_page(msg, state: FSMContext, page: int = 0, edit: bool = True):
+    groups = ram.get_known_groups()
+    active_items = [(cid, g) for cid, g in groups.items() if g.get("active", True)]
+
+    if not active_items:
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+        text = (
+            "📣 <b>Guruh E'lon</b>\n\n"
+            "⚠️ Hali hech qaysi guruh yo'q.\n"
+            "Bot biror guruhga qo'shilganda bu ro'yxat to'ladi."
+        )
+        try:
+            if edit:
+                await msg.edit_text(text, reply_markup=b.as_markup())
+            else:
+                await msg.answer(text, reply_markup=b.as_markup())
+        except TelegramBadRequest:
+            pass
+        return
+
+    total_pages = (len(active_items) + GROUPS_PER_PAGE - 1) // GROUPS_PER_PAGE
+    page = max(0, min(page, total_pages - 1))
+    chunk = active_items[page * GROUPS_PER_PAGE:(page + 1) * GROUPS_PER_PAGE]
+    offset = page * GROUPS_PER_PAGE
+
+    lines = [f"📣 <b>GURUH E'LON</b>\n"]
+    lines.append(f"Bot admin bo'lgan guruhlar: <b>{len(active_items)} ta</b>  |  Sahifa {page+1}/{total_pages}\n")
+    for i, (cid, g) in enumerate(chunk, offset + 1):
+        title   = g.get("title", "?")
+        members = g.get("member_count", "?")
+        lines.append(f"{i}. <b>{title}</b> — {members} a'zo  <code>{cid}</code>")
+
+    lines.append("\n✍️ Xabar yozing (matn, rasm, video — hammasi qo'llab-quvvatlanadi):")
+
+    b = InlineKeyboardBuilder()
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm_grp_p{page-1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm_grp_p{page+1}"))
+    if nav:
+        b.row(*nav)
+    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="admin_panel"))
+
+    text = "\n".join(lines)
+    try:
+        if edit:
+            await msg.edit_text(text, reply_markup=b.as_markup())
+        else:
+            await msg.answer(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=b.as_markup())
+
+    if state:
+        await state.set_state(AdminPanel.group_broadcast)
+
+
+@router.callback_query(F.data == "admin_group_broadcast")
+async def group_broadcast_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await _show_groups_page(callback.message, state, page=0, edit=True)
+
+
+@router.callback_query(F.data.startswith("adm_grp_p"))
+async def group_broadcast_page(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    page = int(callback.data[9:])
+    await _show_groups_page(callback.message, state, page=page, edit=True)
+
+
+@router.message(AdminPanel.group_broadcast)
+async def group_broadcast_send(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    groups = ram.get_known_groups()
+    active = {cid: g for cid, g in groups.items() if g.get("active", True)}
+
+    if not active:
+        await state.clear()
+        return await message.answer("⚠️ Guruh topilmadi.")
+
+    status = await message.answer(f"⏳ <b>Guruhlarga yuborilmoqda...</b> 0/{len(active)}")
+    ok = fail = 0
+
+    for cid, g in active.items():
+        try:
+            # Xabar turini aniqlash va forward qilish
+            if message.text:
+                await message.bot.send_message(
+                    int(cid),
+                    message.text,
+                    parse_mode="HTML"
+                )
+            elif message.photo:
+                await message.bot.send_photo(
+                    int(cid),
+                    message.photo[-1].file_id,
+                    caption=message.caption or ""
+                )
+            elif message.video:
+                await message.bot.send_video(
+                    int(cid),
+                    message.video.file_id,
+                    caption=message.caption or ""
+                )
+            elif message.document:
+                await message.bot.send_document(
+                    int(cid),
+                    message.document.file_id,
+                    caption=message.caption or ""
+                )
+            elif message.sticker:
+                await message.bot.send_sticker(int(cid), message.sticker.file_id)
+            elif message.voice:
+                await message.bot.send_voice(int(cid), message.voice.file_id,
+                                             caption=message.caption or "")
+            elif message.video_note:
+                await message.bot.send_video_note(int(cid), message.video_note.file_id)
+            else:
+                await message.forward(int(cid))
+            ok += 1
+            # Guruh member sonini yangilab qo'yish
+            try:
+                mc = await message.bot.get_chat_member_count(int(cid))
+                g["member_count"] = mc
+            except: pass
+        except Exception as e:
+            fail += 1
+            log.warning(f"Guruh e'lon xato {cid} ({g.get('title','?')}): {e}")
+            # Bot guruhdan chiqarilgan bo'lsa belgilaymiz
+            err = str(e).lower()
+            if "bot was kicked" in err or "bot is not a member" in err or "chat not found" in err:
+                ram.remove_known_group(int(cid))
+            elif "upgraded to a supergroup" in err or "migrated" in err:
+                # Guruh supergroup ga o'tgan - eski ID o'chiramiz
+                ram.remove_known_group(int(cid))
+                log.info(f"Guruh {cid} supergroup ga o'tdi, ro'yxatdan o'chirildi")
+            elif "not enough rights" in err or "forbidden" in err:
+                # Bot xabar yubora olmaydi - guruhni passive qilish
+                g["active"] = False
+                log.info(f"Guruh {cid} passive qilindi (huquq yo'q)")
+
+        try:
+            await status.edit_text(f"⏳ {ok+fail}/{len(active)} | ✅{ok} ❌{fail}")
+        except: pass
+
+    await state.clear()
+
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📣 Yana e'lon", callback_data="admin_group_broadcast"))
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+    try:
+        await status.edit_text(
+            f"✅ <b>Guruh E'lon tugadi</b>\n\n"
+            f"✅ Yuborildi: <b>{ok}</b> ta guruh\n"
+            f"❌ Xato: <b>{fail}</b> ta\n"
+            f"📊 Jami guruhlar: <b>{len(active)}</b>",
+            reply_markup=b.as_markup()
+        )
+    except: pass
+
+
+# ══ FLUSH / REFRESH ════════════════════════════════════════════
+@router.callback_query(F.data == "adm_flush")
+async def adm_flush(callback: CallbackQuery):
+    await callback.answer("⏳ Yuborilmoqda...")
+    if not is_admin(callback.from_user.id): return
+    from utils import tg_db
+    results = await tg_db.manual_flush(
+        ram.get_daily(), ram.get_users(), ram.get_all_settings()
+    )
+    text = "⚡ <b>MANUAL FLUSH</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n" + "\n".join(results)
+    b    = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+    try: await callback.message.edit_text(text, reply_markup=b.as_markup())
+    except TelegramBadRequest: await callback.message.answer(text, reply_markup=b.as_markup())
+
+@router.callback_query(F.data == "adm_refresh")
+async def adm_refresh(callback: CallbackQuery):
+    await callback.answer("⏳ Sync qilinmoqda...")
+    if not is_admin(callback.from_user.id): return
+    from utils import tg_db
+    from utils.db import _sync_from_tg
+    try:
+        await _sync_from_tg()
+        text = "🔄 <b>SYNC TUGADI</b>\n\nRAM TGdan yangilandi."
+    except Exception as e:
+        text = f"❌ Sync xato: {e}"
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+    try: await callback.message.edit_text(text, reply_markup=b.as_markup())
+    except TelegramBadRequest: await callback.message.answer(text, reply_markup=b.as_markup())
+
+@router.callback_query(F.data == "adm_export_json")
+async def adm_export_json(callback: CallbackQuery):
+    await callback.answer("⏳")
+    if not is_admin(callback.from_user.id): return
+    data = {
+        "tests_meta": ram.get_all_tests_meta(),
+        "users_count": len(ram.get_users()),
+        "daily_users": len(ram.get_daily()),
+        "exported_at": str(datetime.now(UTC))
+    }
+    doc = BufferedInputFile(
+        json.dumps(data, ensure_ascii=False, indent=2, default=str).encode(),
+        filename=f"export_{datetime.now(UTC).strftime('%Y%m%d_%H%M')}.json"
+    )
+    await callback.message.answer_document(doc, caption="💾 Export")
+
+@router.callback_query(F.data == "adm_backups")
+async def adm_backups(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    from utils import tg_db
+    dates = await tg_db.get_backup_dates_async()
+    info  = tg_db.get_index_info()
+    text  = (
+        f"🗂 <b>BACKUPLAR</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 Jami: {len(dates)} ta\n"
+        f"📋 Testlar: {info.get('tests_count',0)} | Cache: {info.get('cached_tests',0)}\n\n"
+    )
+    for d in dates[:10]:
+        text += f"💾 {d}\n"
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+    try: await callback.message.edit_text(text, reply_markup=b.as_markup())
+    except TelegramBadRequest: await callback.message.answer(text, reply_markup=b.as_markup())
+
+
+# ══════════════════════════════════════════════════════════════
+# /reindex — Barcha testlarni qayta protect_content=False bilan saqlash
+# ══════════════════════════════════════════════════════════════
+
+
+
+@router.message(Command("rescan"))
+async def cmd_rescan(message: Message):
+    """
+    SUPABASE versiyasida kanal skanerlash kerak emas.
+    Bu komanda endi Supabase'dan barcha ma'lumotlarni RAM ga qayta yuklaydi.
+    """
+    if not is_admin(message.from_user.id):
+        return
+    from utils import tg_db, ram_cache as ram
+
+    before = len(ram.get_all_tests_meta())
+    msg = await message.answer(
+        "🔄 <b>Supabase dan qayta yuklanmoqda...</b>\n\n"
+        "Testlar, foydalanuvchilar va sozlamalar\n"
+        "to\'g\'ridan-to\'g\'ri bazadan o\'qiladi.\n\n"
+        "⏳ Bir soniya kuting..."
+    )
+
+    try:
+        await tg_db._load_tests_meta_to_ram()
+        await tg_db._load_users_to_ram()
+        await tg_db.load_known_groups()
+
+        after = len(ram.get_all_tests_meta())
+        users = len(ram.get_users())
+
+        await msg.edit_text(
+            f"✅ <b>Yuklash yakunlandi!</b>\n\n"
+            f"📋 Testlar: <b>{before}</b> → <b>{after}</b> ta\n"
+            f"👥 Userlar: <b>{users}</b> ta\n\n"
+            f"🗄 Manba: Supabase (Postgres)"
+        )
+    except Exception as e:
+        await msg.edit_text(f"❌ Xato: {e}")
+
+
+@router.message(Command("reindex"))
+async def cmd_reindex(message: Message):
+    """
+    SUPABASE versiyasida reindex = barcha testlarni bazaga qayta yozish
+    (masalan meta ma'lumotlari to\'g\'rilash kerak bo\'lsa).
+    """
+    if not is_admin(message.from_user.id):
+        return
+    from utils import tg_db, ram_cache as ram
+
+    metas = ram.get_all_tests_meta()
+    total = len(metas)
+    if not total:
+        await message.answer("📭 RAM da test yo\'q. Avval /rescan bajaring.")
+        return
+
+    msg = await message.answer(
+        f"♻️ <b>Reindex boshlandi...</b>\n"
+        f"{total} ta test meta Supabase ga yangilanadi."
+    )
+    ok = 0
+    failed = 0
+
+    for i, meta in enumerate(metas):
+        tid = meta.get("test_id")
+        if not tid:
+            continue
+        test = ram.get_cached_questions(tid) or tg_db._tests_cache.get(tid)
+        if not test or not test.get("questions"):
+            try:
+                test = await tg_db.get_test_full(tid)
+            except Exception:
+                test = None
+        if not test or not test.get("questions"):
+            failed += 1
+            continue
+        try:
+            saved = await tg_db.save_test_full(test)
+            if saved:
+                ok += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+
+        if (i + 1) % 20 == 0:
+            try:
+                await msg.edit_text(
+                    f"♻️ <b>Reindex:</b> {i+1}/{total}\n"
+                    f"✅ {ok} ta | ❌ {failed} ta"
+                )
+            except Exception:
+                pass
+
+    await msg.edit_text(
+        f"✅ <b>Reindex yakunlandi!</b>\n\n"
+        f"📋 Jami: {total} ta\n"
+        f"✅ Muvaffaqiyatli: {ok} ta\n"
+        f"❌ Xato: {failed} ta\n\n"
+        f"🗄 Manba: Supabase (Postgres)"
+    )
+
+
+@router.callback_query(F.data == "admin_forward_mode")
+async def enter_forward_mode(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    await callback.answer()
+    uid = callback.from_user.id
+    _forward_mode_users.add(uid)
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="❌ Forward rejimdan chiqish",
+                               callback_data="exit_forward_mode"))
+    try:
+        await callback.message.edit_text(
+            "📨 <b>Forward rejimi YOQILDI</b>\n\n"
+            "Endi siz yuborgan har qanday xabar —\n"
+            "rasm, video, hujjat, matn —\n"
+            "<b>screenshot va forward qilish mumkin</b> holda qayta yuboriladi.\n\n"
+            "📌 Qo\'llanish:\n"
+            "• Xabarni menga yuboring → men uni forward qilish mumkin holda qayta yubora men\n"
+            "• /cancel — rejimdan chiqish\n\n"
+            "<i>Bu rejimda protect_content=False ishlaydi</i>",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+
+
+@router.callback_query(F.data == "exit_forward_mode")
+async def exit_forward_mode_cb(callback: CallbackQuery):
+    uid = callback.from_user.id
+    _forward_mode_users.discard(uid)
+    await callback.answer("✅ Rejimdan chiqildi.")
+    try:
+        await callback.message.edit_text(
+            "📨 Forward rejimi <b>o\'chirildi</b>.",
+        )
+    except TelegramBadRequest: pass
+
+
+@router.message(Command("done"), AdminPanel.waiting_json)
+async def import_json_done(message: Message, state: FSMContext):
+    d = await state.get_data()
+    n = d.get("_import_json_count", 0)
+    await state.clear()
+    await message.answer(f"✅ <b>Import yakunlandi.</b>\n\n📋 Jami saqlangan: <b>{n}</b> ta test.")
+
+
+@router.message(Command("cancel"), AdminPanel.waiting_json)
+async def import_json_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ JSON import bekor qilindi.")
+
+
+@router.message(Command("cancel"))
+async def cancel_forward(message: Message):
+    uid = message.from_user.id
+    if uid in _forward_mode_users:
+        _forward_mode_users.discard(uid)
+        await message.answer("✅ Forward rejimdan chiqildi.")
+
+
+@router.message(F.from_user.func(lambda u: u.id in _forward_mode_users))
+async def forward_mode_handler(message: Message):
+    """
+    Forward rejimda: admin yuborgan har qanday xabarni
+    protect_content=False bilan qayta yuboradi.
+    Screenshot va forward qilish mumkin bo'ladi.
+    """
+    uid = message.from_user.id
+    if uid not in _forward_mode_users:
+        return
+
+    try:
+        # Xabar turini aniqlash
+        if message.text and not message.text.startswith("/"):
+            sent = await message.bot.send_message(
+                uid, message.text,
+                parse_mode="HTML", protect_content=False
+            )
+        elif message.photo:
+            sent = await message.bot.send_photo(
+                uid, message.photo[-1].file_id,
+                caption=message.caption or "", protect_content=False
+            )
+        elif message.video:
+            sent = await message.bot.send_video(
+                uid, message.video.file_id,
+                caption=message.caption or "", protect_content=False
+            )
+        elif message.document:
+            sent = await message.bot.send_document(
+                uid, message.document.file_id,
+                caption=message.caption or "", protect_content=False
+            )
+        elif message.voice:
+            sent = await message.bot.send_voice(
+                uid, message.voice.file_id,
+                caption=message.caption or "", protect_content=False
+            )
+        elif message.sticker:
+            sent = await message.bot.send_sticker(
+                uid, message.sticker.file_id, protect_content=False
+            )
+        elif message.video_note:
+            sent = await message.bot.send_video_note(
+                uid, message.video_note.file_id, protect_content=False
+            )
+        else:
+            return
+
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="❌ Rejimdan chiqish",
+                                   callback_data="exit_forward_mode"))
+        await message.answer(
+            "✅ Yuborildi. Endi screenshot va forward qilish mumkin.\n"
+            "Yana xabar yuboring yoki rejimdan chiqing.",
+            reply_markup=b.as_markup()
+        )
+    except Exception as e:
+        await message.answer(f"❌ Xato: {e}")
+
+
+
+# ══ TEST YARATISH SOZLAMALARI ═══════════════════════════════════
+
+@router.callback_query(F.data == "admin_creation_settings")
+async def admin_creation_settings(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    await callback.answer()
+    from utils.roles import get_creation_settings
+    s = get_creation_settings()
+
+    disabled   = s["test_creation_disabled"]
+    open_all   = s["open_test_creation"]
+    ref_off    = s["referral_creation_disabled"]
+    refs_need  = s["refs_needed_for_create"]
+
+    b = InlineKeyboardBuilder()
+
+    # 1. Butunlay berkitish
+    if disabled:
+        b.row(InlineKeyboardButton(
+            text="✅ Test yaratish YOPIQ — ochish",
+            callback_data="creation_toggle_disabled"
+        ))
+    else:
+        b.row(InlineKeyboardButton(
+            text="🔒 Test yaratishni BERKITISH",
+            callback_data="creation_toggle_disabled"
+        ))
+
+    # 2. Hammaga ochish
+    if not disabled:
+        if open_all:
+            b.row(InlineKeyboardButton(
+                text="✅ Hammaga OCHIQ — yopish",
+                callback_data="creation_toggle_open"
+            ))
+        else:
+            b.row(InlineKeyboardButton(
+                text="🌐 Hammaga ochish",
+                callback_data="creation_toggle_open"
+            ))
+
+    # 3. Referal orqali yaratish
+    if not disabled and not open_all:
+        if ref_off:
+            b.row(InlineKeyboardButton(
+                text="✅ Referal yaratish YOPIQ — ochish",
+                callback_data="creation_toggle_referal"
+            ))
+        else:
+            b.row(InlineKeyboardButton(
+                text="🔗 Referal yaratishni berkitish",
+                callback_data="creation_toggle_referal"
+            ))
+
+        # 4. Referal soni
+        b.row(
+            InlineKeyboardButton(text="➖", callback_data="creation_refs_minus"),
+            InlineKeyboardButton(text=f"🔗 {refs_need} ta referal kerak",
+                                 callback_data="noop"),
+            InlineKeyboardButton(text="➕", callback_data="creation_refs_plus"),
+        )
+
+    b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+
+    status_lines = [
+        "⚙️ <b>Test yaratish sozlamalari</b>\n",
+        f"🔒 Butunlay berkitilgan: {'✅ HA' if disabled else '❌ YOQ'}",
+        f"🌐 Hammaga ochiq: {'✅ HA' if open_all else '❌ YOQ'}",
+        f"🔗 Referal orqali: {'❌ YOPIQ' if ref_off else '✅ OCHIQ'}",
+        f"🔢 Kerakli referal soni: <b>{refs_need} ta</b>",
+    ]
+    if not disabled and not open_all and not ref_off:
+        status_lines.append(
+            f"\n💡 Foydalanuvchi bugun <b>{refs_need} ta</b> referal "
+            f"yuborsa test yaratishi mumkin."
+        )
+    if disabled:
+        status_lines.append("\n⚠️ Hozir hech kim (admindan tashqari) test yarata olmaydi!")
+
+    try:
+        await callback.message.edit_text(
+            "\n".join(status_lines),
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest: pass
+
+
+@router.callback_query(F.data == "creation_toggle_disabled")
+async def creation_toggle_disabled(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    from utils.roles import get_creation_settings, set_creation_settings
+    s = get_creation_settings()
+    new_val = not s["test_creation_disabled"]
+    set_creation_settings({"test_creation_disabled": new_val})
+    status = "🔒 BERKITILDI" if new_val else "🔓 OCHILDI"
+    await callback.answer(f"Test yaratish {status}!", show_alert=True)
+    await admin_creation_settings(callback)
+
+
+@router.callback_query(F.data == "creation_toggle_open")
+async def creation_toggle_open(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    from utils.roles import get_creation_settings, set_creation_settings
+    s = get_creation_settings()
+    new_val = not s["open_test_creation"]
+    set_creation_settings({"open_test_creation": new_val})
+    status = "✅ Hammaga OCHILDI" if new_val else "❌ Yopildi"
+    await callback.answer(status, show_alert=True)
+    await admin_creation_settings(callback)
+
+
+@router.callback_query(F.data == "creation_toggle_referal")
+async def creation_toggle_referal(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    from utils.roles import get_creation_settings, set_creation_settings
+    s = get_creation_settings()
+    new_val = not s["referral_creation_disabled"]
+    set_creation_settings({"referral_creation_disabled": new_val})
+    status = "🔒 Referal yaratish BERKITILDI" if new_val else "✅ Referal yaratish OCHILDI"
+    await callback.answer(status, show_alert=True)
+    await admin_creation_settings(callback)
+
+
+@router.callback_query(F.data.in_({"creation_refs_plus", "creation_refs_minus"}))
+async def creation_refs_count(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    from utils.roles import get_creation_settings, set_creation_settings
+    s    = get_creation_settings()
+    cur  = s["refs_needed_for_create"]
+    if callback.data == "creation_refs_plus":
+        new = min(cur + 1, 20)
+    else:
+        new = max(cur - 1, 1)
+    set_creation_settings({"refs_needed_for_create": new})
+    await callback.answer(f"✅ {new} ta referal kerak")
+    await admin_creation_settings(callback)
+
+
+
+# ══════════════════════════════════════════════════════════════
+# 🔒 MAJBURIY OBUNA — FORCE JOIN PANEL
+# ══════════════════════════════════════════════════════════════
+
+def _fj_text():
+    from utils.force_join import get_force_channels, is_force_enabled
+    chs = get_force_channels()
+    en  = is_force_enabled()
+    st  = "✅ YOQILGAN" if en else "❌ O'CHIRILGAN"
+    lines = [
+        f"🔒 <b>MAJBURIY OBUNA</b>",
+        f"━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Holat: <b>{st}</b>",
+        f"Kanallar soni: <b>{len(chs)}</b>",
+        "",
+    ]
+    if chs:
+        lines.append("📋 <b>Ro'yxat:</b>")
+        for i, ch in enumerate(chs, 1):
+            icon = "📢" if ch.get("type") == "channel" else "👥"
+            lines.append(f"  {i}. {icon} {ch['title']} (<code>{ch['id']}</code>)")
+    else:
+        lines.append("➕ Hech qanday kanal/guruh qo'shilmagan")
+    return "\n".join(lines)
+
+
+def _fj_kb():
+    from utils.force_join import is_force_enabled, get_force_channels
+    b   = InlineKeyboardBuilder()
+    en  = is_force_enabled()
+    chs = get_force_channels()
+    b.row(InlineKeyboardButton(
+        text="❌ O'chirish" if en else "✅ Yoqish",
+        callback_data="fj_toggle"
+    ))
+    b.row(InlineKeyboardButton(
+        text="➕ Kanal/Guruh qo'shish",
+        callback_data="fj_add"
+    ))
+    if chs:
+        for ch in chs:
+            icon = "📢" if ch.get("type") == "channel" else "👥"
+            b.row(InlineKeyboardButton(
+                text=f"🗑 {icon} {ch['title']}",
+                callback_data=f"fj_del_{ch['id']}"
+            ))
+    b.row(InlineKeyboardButton(text="◀️ Orqaga", callback_data="admin_panel"))
+    return b.as_markup()
+
+
+@router.callback_query(F.data == "admin_force_join")
+async def admin_force_join(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await callback.message.edit_text(_fj_text(), reply_markup=_fj_kb())
+
+
+@router.callback_query(F.data == "fj_toggle")
+async def fj_toggle(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    from utils.force_join import is_force_enabled, set_force_enabled
+    new_val = not is_force_enabled()
+    set_force_enabled(new_val)
+    st = "✅ Yoqildi" if new_val else "❌ O'chirildi"
+    await callback.answer(f"Majburiy obuna: {st}", show_alert=True)
+    await callback.message.edit_text(_fj_text(), reply_markup=_fj_kb())
+
+
+@router.callback_query(F.data == "fj_add")
+async def fj_add_start(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await state.set_state(AdminPanel.fj_add)
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="admin_force_join"))
+    await callback.message.edit_text(
+        "➕ <b>Kanal yoki guruh qo'shish</b>\n\n"
+        "Bot shu kanal/guruhga <b>admin</b> bo'lishi kerak!\n\n"
+        "Quyidagilardan birini yuboring:\n"
+        "• Kanal/guruh ID: <code>-1001234567890</code>\n"
+        "• Yoki kanalga forward qiling\n"
+        "• Yoki @username: <code>@mychanel</code>",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.message(AdminPanel.fj_add)
+async def fj_add_input(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear(); return
+
+    raw = message.text.strip() if message.text else ""
+    # Forward bo'lsa
+    if message.forward_from_chat:
+        raw = str(message.forward_from_chat.id)
+
+    from utils.force_join import add_channel
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="◀️ Orqaga", callback_data="admin_force_join"))
+
+    try:
+        chat = await message.bot.get_chat(raw)
+        ch_id    = chat.id
+        ch_title = chat.title or chat.username or str(ch_id)
+        ch_type  = "channel" if chat.type == "channel" else "group"
+
+        # Invite link
+        invite = ""
+        try:
+            if chat.invite_link:
+                invite = chat.invite_link
+            else:
+                link_res = await message.bot.create_chat_invite_link(ch_id)
+                invite   = link_res.invite_link
+        except Exception:
+            pass
+
+        added = add_channel(ch_id, ch_title, invite, ch_type)
+        icon  = "📢" if ch_type == "channel" else "👥"
+
+        if added:
+            await message.answer(
+                f"✅ Qo'shildi!\n{icon} <b>{ch_title}</b>\n"
+                f"ID: <code>{ch_id}</code>\n"
+                f"Havola: {invite or 'Yo\'q (public)'}",
+                reply_markup=b.as_markup()
+            )
+        else:
+            await message.answer("⚠️ Bu kanal allaqachon ro'yxatda!", reply_markup=b.as_markup())
+    except Exception as e:
+        await message.answer(
+            f"❌ Xato: {e}\n\n"
+            "Bot bu kanal/guruhga admin bo'lishi kerak!",
+            reply_markup=b.as_markup()
+        )
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("fj_del_"))
+async def fj_delete(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    from utils.force_join import remove_channel, get_force_channels
+    try:
+        ch_id = int(callback.data.replace("fj_del_", ""))
+        # Kanal nomini topish
+        chs   = get_force_channels()
+        title = next((c["title"] for c in chs if c["id"] == ch_id), str(ch_id))
+        ok    = remove_channel(ch_id)
+        if ok:
+            await callback.answer(f"🗑 O'chirildi: {title}", show_alert=True)
+        else:
+            await callback.answer("⚠️ Topilmadi", show_alert=True)
+    except Exception as e:
+        await callback.answer(f"❌ {e}", show_alert=True)
+    await callback.message.edit_text(_fj_text(), reply_markup=_fj_kb())
+
+
+@router.callback_query(F.data == "fj_check")
+async def fj_check_cb(callback: CallbackQuery):
+    """Foydalanuvchi 'A'zo bo'ldim' tugmasini bosdi"""
+    from utils.force_join import check_user_joined, send_join_request
+    uid        = callback.from_user.id
+    not_joined = await check_user_joined(callback.bot, uid)
+    if not not_joined:
+        await callback.answer("✅ Rahmat! Davom etishingiz mumkin.", show_alert=True)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        # /start ni qayta ishlatish — to'g'ridan xabar yuboramiz
+        await callback.message.answer(
+            "✅ Tekshirildi! Endi botdan foydalanishingiz mumkin.\n"
+            "/start ni bosing yoki quyidagi tugmani bosing:"
+        )
+        # Bot menyusini ko'rsatish
+        try:
+            from keyboards.keyboards import main_kb
+            from utils.db import get_or_create_user
+            u = callback.from_user
+            user = await get_or_create_user(
+                u.id, u.full_name or str(u.id), u.username or ""
+            )
+            await callback.message.answer(
+                f"🏠 <b>Asosiy menyu</b>",
+                reply_markup=main_kb(u.id)
+            )
+        except Exception as _me:
+            pass
+    else:
+        await callback.answer("❌ Hali ba'zi kanallarga a'zo emassiz!", show_alert=True)
+        await send_join_request(callback, not_joined, callback.bot)
+
+
+# ═══════════════════════════════════════════════════════════
+# 🛡 XAVFSIZLIK SOZLAMALARI
+# ═══════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_security")
+async def admin_security(callback: CallbackQuery):
+    """Xavfsizlik sozlamalari paneli"""
+    from config import ADMIN_IDS
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("❌ Ruxsat yo'q!", show_alert=True)
+
+    await callback.answer()
+    from utils.ram_cache import is_protect_content
+    protect = is_protect_content()
+
+    status_icon = "🔒 YOQILGAN" if protect else "🔓 O'CHIRILGAN"
+    status_text = (
+        "✅ Hozir <b>bloklangan:</b>\n"
+        "• Screenshot olish\n"
+        "• Xabarlarni forward qilish\n"
+        "• Botdan tashqariga nusxa olish"
+    ) if protect else (
+        "⚠️ Hozir <b>ruxsat berilgan:</b>\n"
+        "• Screenshot olish\n"
+        "• Xabarlarni forward qilish\n"
+        "• Botdan tashqariga nusxa olish"
+    )
+
+    await callback.message.edit_text(
+        f"🛡 <b>XAVFSIZLIK SOZLAMALARI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>Screenshot/Forward himoyasi: {status_icon}</b>\n\n"
+        f"{status_text}\n\n"
+        f"<i>⚠️ O'zgartirish bot qayta ishga tushirilganda kuchga kiradi</i>",
+        parse_mode="HTML",
+        reply_markup=security_kb(protect)
+    )
+
+
+@router.callback_query(F.data == "sec_protect_on")
+async def sec_protect_on(callback: CallbackQuery):
+    """Screenshot/forward bloklash yoqish"""
+    from config import ADMIN_IDS
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("❌ Ruxsat yo'q!", show_alert=True)
+
+    from utils.ram_cache import set_security
+    from utils import tg_db
+    set_security("protect_content", True)
+
+    # Sozlamani TG ga saqlash
+    try:
+        from utils.ram_cache import get_all_settings
+        await tg_db.save_settings(get_all_settings())
+    except Exception:
+        pass
+
+    await callback.answer("🔒 Himoya yoqildi!", show_alert=True)
+    await admin_security(callback)
+
+
+@router.callback_query(F.data == "sec_protect_off")
+async def sec_protect_off(callback: CallbackQuery):
+    """Screenshot/forward bloklashni o'chirish"""
+    from config import ADMIN_IDS
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("❌ Ruxsat yo'q!", show_alert=True)
+
+    from utils.ram_cache import set_security
+    from utils import tg_db
+    set_security("protect_content", False)
+
+    try:
+        from utils.ram_cache import get_all_settings
+        await tg_db.save_settings(get_all_settings())
+    except Exception:
+        pass
+
+    await callback.answer("🔓 Himoya o'chirildi!", show_alert=True)
+    await admin_security(callback)
+
+
+# ══ LOOP MONITOR ══════════════════════════════════════════════
+@router.callback_query(F.data == "adm_loops")
+async def adm_loops_cb(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await _show_loops(callback, edit=True)
+
+
+@router.callback_query(F.data == "adm_loops_refresh")
+async def adm_loops_refresh_cb(callback: CallbackQuery):
+    await callback.answer("🔄")
+    if not is_admin(callback.from_user.id): return
+    await _show_loops(callback, edit=True)
+
+
+@router.callback_query(F.data.startswith("adm_loop_restart_"))
+async def adm_loop_restart_cb(callback: CallbackQuery):
+    await callback.answer("♻️ Qayta boshlanmoqda...")
+    if not is_admin(callback.from_user.id): return
+    loop_name = callback.data[18:]
+
+    try:
+        import bot as _bot_mod
+        import asyncio
+
+        # Topilgan loop taskni bekor qilish
+        for task in asyncio.all_tasks():
+            if task.get_name() == loop_name and not task.done():
+                task.cancel()
+                try: await asyncio.wait_for(asyncio.shield(task), timeout=3)
+                except: pass
+                break
+
+        if loop_name == "auto_flush":
+            from utils import tg_db
+            asyncio.create_task(tg_db.auto_flush_loop(), name="auto_flush")
+        elif loop_name == "midnight_flush":
+            asyncio.create_task(_bot_mod._midnight_flush_loop(callback.bot), name="midnight_flush")
+        elif loop_name == "cache_cleanup":
+            asyncio.create_task(_bot_mod._cache_cleanup_loop(), name="cache_cleanup")
+
+        if hasattr(_bot_mod, "_beat"):
+            _bot_mod._beat(loop_name, "restarted")
+
+    except Exception as e:
+        await callback.message.answer(f"❌ Restart xatosi: {e}")
+        return
+
+    await _show_loops(callback, edit=True)
+
+
+async def _show_loops(ev, edit=False):
+    import time as _t
+    try:
+        import bot as _bot_mod
+        health = _bot_mod.get_loop_health() if hasattr(_bot_mod, "get_loop_health") else {}
+    except Exception:
+        health = {}
+
+    now = _t.time()
+
+    STATUS_ICON = {
+        "ok":         "🟢",
+        "running":    "🔵",
+        "warn":       "🟡",
+        "error":      "🔴",
+        "timeout":    "🔴",
+        "cancelled":  "⚫",
+        "restarting": "🟡",
+        "restarted":  "🟢",
+        "starting":   "🔵",
+    }
+
+    LOOP_LABELS = {
+        "auto_flush":     "💾 Supabase Auto Flush",
+        "midnight_flush": "🌙 Midnight Flush",
+        "cache_cleanup":  "🧹 Cache Cleanup",
+    }
+
+    lines = ["🔁 <b>LOOP MONITOR</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n"]
+    b = InlineKeyboardBuilder()
+
+    # Barcha looplar
+    loop_keys = ["auto_flush", "midnight_flush", "cache_cleanup"]
+    for key in loop_keys:
+        h     = health.get(key, {})
+        label = LOOP_LABELS.get(key, key)
+        if not h:
+            icon   = "⚫"
+            ago    = "ma'lumot yo'q"
+            errors = 0
+            status = "unknown"
+        else:
+            status  = h.get("status", "?")
+            icon    = STATUS_ICON.get(status, "⚪")
+            last_b  = h.get("last_beat", 0)
+            elapsed = int(now - last_b)
+            if elapsed < 120:     ago = f"{elapsed}s oldin"
+            elif elapsed < 3600:  ago = f"{elapsed//60}m oldin"
+            else:                 ago = f"{elapsed//3600}h {(elapsed%3600)//60}m oldin"
+            errors = h.get("errors", 0)
+            err_tx = h.get("error", "")
+
+        err_line = f"\n   ⚠️ <i>{err_tx[:60]}</i>" if h.get("error") else ""
+        lines.append(
+            f"{icon} <b>{label}</b>\n"
+            f"   Holat: <code>{status}</code> | Xatolar: {errors}\n"
+            f"   Oxirgi signal: {ago}{err_line}\n"
+        )
+        # Qayta boshlash tugmasi faqat muammoli looplarda
+        if status in ("error", "timeout", "cancelled", "unknown"):
+            b.row(InlineKeyboardButton(
+                text=f"♻️ {label} restart",
+                callback_data=f"adm_loop_restart_{key}"
+            ))
+
+    # asyncio task holati
+    import asyncio
+    tasks = asyncio.all_tasks()
+    task_names = {t.get_name() for t in tasks if not t.done()}
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"⚙️ Aktiv tasklar: <b>{len(tasks)}</b>")
+    for expected in ["auto_flush", "midnight_flush", "cache_cleanup"]:
+        exists = expected in task_names
+        lines.append(f"  {'✅' if exists else '❌'} {expected}")
+
+    b.row(
+        InlineKeyboardButton(text="🔄 Yangilash",  callback_data="adm_loops_refresh"),
+        InlineKeyboardButton(text="⬅️ Admin",      callback_data="admin_panel"),
+    )
+
+    text = "\n".join(lines)
+    msg = ev.message if hasattr(ev, "message") else ev
+    try:
+        if edit:
+            await msg.edit_text(text, reply_markup=b.as_markup())
+        else:
+            await msg.answer(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=b.as_markup())
+
+
+# ══ LIVE MONITOR ══════════════════════════════════════════════
+@router.callback_query(F.data == "adm_live")
+async def adm_live_cb(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    await _show_live(callback.message, edit=True)
+
+
+@router.callback_query(F.data == "adm_live_refresh")
+async def adm_live_refresh_cb(callback: CallbackQuery):
+    await callback.answer("🔄")
+    if not is_admin(callback.from_user.id): return
+    await _show_live(callback.message, edit=True)
+
+
+async def _show_live(msg, edit=False):
+    from utils.ram_cache import get_live_sessions, get_live_by_test
+    sessions  = get_live_sessions()
+    by_test   = get_live_by_test()
+
+    lines = ["📡 <b>LIVE MONITOR</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n"]
+
+    if not sessions:
+        lines.append("😴 Hozir hech kim test yechmayapti")
+    else:
+        lines.append(f"🟢 Aktiv: <b>{len(sessions)} kishi</b>\n")
+        for tid, sess_list in by_test.items():
+            title = sess_list[0].get("title", tid)
+            lines.append(f"📝 <b>{title[:35]}</b> — {len(sess_list)} kishi")
+            for s in sess_list[:5]:
+                mode_icon = "📊" if s["mode"] == "poll" else "📋"
+                chat = s["chat_title"]
+                lines.append(
+                    f"  {mode_icon} Savol {s['idx']}/{s['total']} | "
+                    f"⏱ {s['elapsed']} | 🏘 {chat}"
+                )
+            if len(sess_list) > 5:
+                lines.append(f"  ... va yana {len(sess_list)-5} kishi")
+            lines.append("")
+
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="🔄 Yangilash", callback_data="adm_live_refresh"),
+        InlineKeyboardButton(text="⬅️ Admin",     callback_data="admin_panel"),
+    )
+    text = "\n".join(lines)
+    try:
+        if edit:
+            await msg.edit_text(text, reply_markup=b.as_markup())
+        else:
+            await msg.answer(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=b.as_markup())
+
+
+# ══ TEST QIDIRISH (kod orqali) ═════════════════════════════════
+@router.callback_query(F.data == "adm_find_test")
+async def adm_find_test_cb(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="admin_panel"))
+    try:
+        await callback.message.edit_text(
+            "🔍 <b>TEST QIDIRISH</b>\n\n"
+            "Test kodini yoki sarlavhasining bir qismini yozing:\n\n"
+            "<i>Masalan: ABC123 yoki «matematika»</i>",
+            reply_markup=b.as_markup()
+        )
+    except TelegramBadRequest:
+        await callback.message.answer(
+            "🔍 <b>TEST QIDIRISH</b>\n\nTest kodini yoki sarlavhasini yozing:",
+            reply_markup=b.as_markup()
+        )
+    await state.set_state(AdminPanel.find_test)
+
+
+@router.message(AdminPanel.find_test)
+async def adm_find_test_input(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    query = message.text.strip().upper()
+    try: await message.delete()
+    except Exception: pass
+
+    from utils.ram_cache import get_all_tests_meta, get_test_meta_any
+
+    # 1. To'g'ridan-to'g'ri kod bo'yicha qidirish
+    meta = get_test_meta_any(query)
+
+    # 2. Agar topilmasa — sarlavha bo'yicha qidirish
+    if not meta:
+        query_low = query.lower()
+        all_tests = get_all_tests_meta()
+        matches = [
+            t for t in all_tests
+            if query_low in t.get("title", "").lower()
+            or query_low in t.get("test_id", "").upper()
+        ]
+
+        if not matches:
+            b = InlineKeyboardBuilder()
+            b.row(InlineKeyboardButton(text="🔍 Qayta qidirish", callback_data="adm_find_test"))
+            b.row(InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"))
+            await message.answer(
+                f"❌ <b>Topilmadi:</b> <code>{query}</code>\n\n"
+                "Test kodi yoki sarlavha bo'yicha qidirildi.",
+                reply_markup=b.as_markup()
+            )
+            await state.clear()
+            return
+
+        if len(matches) == 1:
+            # Bitta natija — darhol sozlamalarga
+            meta = matches[0]
+        else:
+            # Bir nechta — sahifalash bilan ro'yxat
+            await state.clear()
+            _find_cache[message.from_user.id] = {"matches": matches, "query": query}
+            await _show_find_results(message, matches, page=0, query=query,
+                                     uid=message.from_user.id)
+            return
+
+    # Topildi — sozlamalarga yo'naltirish
+    await state.clear()
+    tid = meta.get("test_id", "")
+    from handlers.profile import _show_test_settings
+    await _show_test_settings(message, meta, tid, edit=False,
+                               viewer_uid=message.from_user.id)
+
+
+# ── Find test pagination ────────────────────────────────────────
+FIND_PER_PAGE = 7
+_find_cache: dict = {}  # uid → {"matches": [...], "query": "..."}
+
+async def _show_find_results(msg, matches: list, page: int, query: str,
+                              edit: bool = False, uid: int = None):
+    total_pages = (len(matches) + FIND_PER_PAGE - 1) // FIND_PER_PAGE
+    page = max(0, min(page, total_pages - 1))
+    chunk = matches[page * FIND_PER_PAGE:(page + 1) * FIND_PER_PAGE]
+    offset = page * FIND_PER_PAGE
+
+    lines = [
+        f"🔍 <b>QIDIRUV:</b> <code>{query}</code>",
+        f"📋 {len(matches)} ta topildi  |  Sahifa {page+1}/{total_pages}\n",
+    ]
+    b = InlineKeyboardBuilder()
+
+    for i, t in enumerate(chunk, offset + 1):
+        tid     = t.get("test_id", "")
+        title   = t.get("title", "?")
+        qc      = t.get("question_count", 0)
+        creator = t.get("creator_name") or t.get("creator_username") or "?"
+        paused  = "⏸" if t.get("is_paused") else ""
+        lines.append(
+            f"{i}. {paused}<b>{title[:35]}</b>\n"
+            f"   🆔 <code>{tid}</code>  📋 {qc} savol  👤 {creator}"
+        )
+        b.row(InlineKeyboardButton(
+            text=f"⚙️ {i}. {title[:22]}",
+            callback_data=f"mytest_settings_{tid}"
+        ))
+
+    # Nav tugmalar
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"adm_find_p_{page-1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"adm_find_p_{page+1}"))
+    if nav:
+        b.row(*nav)
+    b.row(
+        InlineKeyboardButton(text="🔍 Qayta", callback_data="adm_find_test"),
+        InlineKeyboardButton(text="⬅️ Admin", callback_data="admin_panel"),
+    )
+
+    text = "\n".join(lines)
+    try:
+        if edit:
+            await msg.edit_text(text, reply_markup=b.as_markup())
+        else:
+            await msg.answer(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await msg.answer(text, reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data.startswith("adm_find_p_"))
+async def adm_find_page_cb(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    page = int(callback.data[11:])
+    uid  = callback.from_user.id
+    cached = _find_cache.get(uid)
+    if not cached:
+        return await callback.answer("❌ Qidiruv muddati o'tdi. Qayta qidiring.", show_alert=True)
+    await _show_find_results(
+        callback.message,
+        cached["matches"],
+        page=page,
+        query=cached["query"],
+        edit=True,
+        uid=uid
+    )
+
+
+# ══ JSON IMPORT — tayyor test JSON fayllarini bazaga yuklash ═══
+#
+# Format: bitta JSON = bitta test, quyidagi kabi tuzilish bilan:
+#   {"title": "...", "category": "...", "questions": [
+#       {"type": "multiple_choice", "question": "...", "options": [...],
+#        "correct": "...", "explanation": "...", "accepted_answers": [],
+#        "points": 1}, ...
+#   ], ...}
+# (bot avval eksport qilgan yoki shu tuzilishga mos har qanday JSON)
+#
+# /import_json bosilgach admin bir nechta .json faylni birma-bir
+# yuboradi — har biri alohida test sifatida darhol saqlanadi.
+# /done yoki /cancel bilan rejimdan chiqiladi.
+
+@router.message(Command("import_json"))
+async def cmd_import_json(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.set_state(AdminPanel.waiting_json)
+    await state.update_data(_import_json_count=0)
+    await message.answer(
+        "📥 <b>JSON import rejimi</b>\n\n"
+        "Tayyor test JSON fayllarini birma-bir yuboring —\n"
+        "har biri alohida test sifatida <b>darhol</b> saqlanadi.\n\n"
+        "📌 Har bir fayl <code>questions</code> ro'yxatini o'z ichiga\n"
+        "olishi kerak (bot ichki formatiga mos).\n\n"
+        "✅ Tugatgach: /done\n"
+        "❌ Bekor qilish: /cancel"
+    )
+
+
+@router.message(F.document, AdminPanel.waiting_json)
+async def import_json_file(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    doc = message.document
+    if not doc.file_name.lower().endswith(".json"):
+        return await message.answer("❌ Faqat <b>.json</b> fayllar qabul qilinadi. (/done — tugatish)")
+
+    status = await message.answer(f"⏳ <code>{doc.file_name}</code> tahlil qilinmoqda...")
+    try:
+        file_obj = await message.bot.get_file(doc.file_id)
+        buf = await message.bot.download_file(file_obj.file_path)
+        raw = buf.read().decode("utf-8")
+    except Exception as e:
+        return await status.edit_text(f"❌ Faylni yuklab bo'lmadi: {e}")
+
+    try:
+        data = json.loads(raw)
+    except Exception as e:
+        return await status.edit_text(f"❌ JSON formatida xato:\n<code>{e}</code>")
+
+    from utils.db import import_test_from_json, validate_json_test
+    ok, err = validate_json_test(data)
+    if not ok:
+        return await status.edit_text(
+            f"❌ <b>{doc.file_name}</b> — noto'g'ri format:\n<code>{err}</code>"
+        )
+
+    try:
+        tid = await import_test_from_json(
+            message.from_user.id, data,
+            creator_name=message.from_user.full_name or "",
+            creator_username=message.from_user.username or "",
+        )
+    except Exception as e:
+        log.error(f"import_json_file xato: {e}", exc_info=True)
+        return await status.edit_text(f"❌ Saqlashda xato:\n<code>{e}</code>")
+
+    d = await state.get_data()
+    n = d.get("_import_json_count", 0) + 1
+    await state.update_data(_import_json_count=n)
+
+    qc = len(data.get("questions", []))
+    bu = (await message.bot.me()).username
+    await status.edit_text(
+        f"✅ <b>{n}-test saqlandi!</b>\n\n"
+        f"📝 {data.get('title', 'Nomsiz')}\n"
+        f"🆔 <code>{tid}</code>\n"
+        f"📋 {qc} ta savol\n"
+        f"🔗 <code>https://t.me/{bu}?start={tid}</code>\n\n"
+        f"➡️ Keyingi JSON faylni yuboring, yoki /done"
+    )
+
