@@ -159,21 +159,7 @@ async def _show_next_question(bot, cid, msg_id, qs, idx, state, uid):
             photo_id = pm_match.group(1).strip()
     if photo_id:
         try:
-            storage_chat_id = q.get("photo_storage_chat_id")
-            storage_message_id = q.get("photo_storage_message_id")
-            if storage_chat_id and storage_message_id:
-                # Rasmning manbasi har doim STORAGE kanalidagi YANGI xabar.
-                # caption='' eski metadata/captionni foydalanuvchiga olib o'tmasligini ta'minlaydi.
-                await bot.copy_message(
-                    chat_id=cid,
-                    from_chat_id=int(storage_chat_id),
-                    message_id=int(storage_message_id),
-                    caption="",
-                    protect_content=True,
-                )
-            else:
-                # Eski testlar uchun backward compatibility.
-                await bot.send_photo(cid, photo_id, protect_content=True)
+            await bot.send_photo(cid, photo_id, protect_content=True)
         except Exception as e:
             log.error(f"Inline rasm xato: {e}")
     text, kb, is_text = _build_question_content(qs, idx, time_left=QUESTION_SEC)
@@ -707,18 +693,7 @@ async def _send_question_new(bot, cid, state, uid):
             photo_id_first = pm_f.group(1).strip()
     if photo_id_first:
         try:
-            storage_chat_id = q_first.get("photo_storage_chat_id")
-            storage_message_id = q_first.get("photo_storage_message_id")
-            if storage_chat_id and storage_message_id:
-                await bot.copy_message(
-                    chat_id=cid,
-                    from_chat_id=int(storage_chat_id),
-                    message_id=int(storage_message_id),
-                    caption="",
-                    protect_content=True,
-                )
-            else:
-                await bot.send_photo(cid, photo_id_first, protect_content=True)
+            await bot.send_photo(cid, photo_id_first, protect_content=True)
         except Exception as e:
             log.error(f"Inline rasm xato: {e}")
     text, kb, is_text = _build_question_content(qs, idx, time_left=QUESTION_SEC)

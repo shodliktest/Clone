@@ -423,17 +423,7 @@ async def _send_poll(bot, cid, state):
                 q["photo"] = resolved      # joriy sessiyada ham keshlanadi
                 await state.update_data(qs=qs)
                 photo_id = resolved
-            storage_chat_id = q.get("photo_storage_chat_id")
-            storage_message_id = q.get("photo_storage_message_id")
-            if storage_chat_id and storage_message_id:
-                await bot.copy_message(
-                    chat_id=cid,
-                    from_chat_id=int(storage_chat_id),
-                    message_id=int(storage_message_id),
-                    caption="",
-                )
-            else:
-                await bot.send_photo(cid, photo_id)
+            await bot.send_photo(cid, photo_id)
         except Exception as e:
             log.error(f"Poll rasm xato: {e}")
 
