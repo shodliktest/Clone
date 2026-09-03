@@ -213,6 +213,22 @@ class GroupTrackerMiddleware(BaseMiddleware):
                     member_count=mc,
                 )
 
+                # MUHIM: guruh RAM'da qolib ketmasligi uchun yangi guruhni
+                # darhol Supabase'ga persist qilamiz. Oldingi kodda bu joyda
+                # faqat ram.add_known_group() bor edi; natijada bot reboot
+                # qilinsa, middleware orqali topilgan guruh yo'qolardi.
+                # Faqat yangi/inactive guruh qayta qo'shilganda DB yozuvi
+                # qilinadi — har bir guruh xabarida DB'ga murojaat qilinmaydi.
+                try:
+                    from utils import tg_db
+                    saved = await tg_db.save_known_groups()
+                    if saved:
+                        log.info(f"Guruh Supabase'ga saqlandi: {chat.title} ({chat.id})")
+                    else:
+                        log.warning(f"Guruh RAM'ga qo'shildi, lekin Supabase'ga saqlanmadi: {chat.title} ({chat.id})")
+                except Exception as e:
+                    log.error(f"Guruhni Supabase'ga saqlashda xato: {e}")
+
         return await handler(event, data)
 
 
