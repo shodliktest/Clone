@@ -475,8 +475,8 @@ async def start_inline_test(callback: CallbackQuery, state: FSMContext):
         meta = get_test_meta(tid) or {}
 
     # Ruxsat tekshiruvi
-    allowed = meta.get("allowed_users", [])
-    if allowed and uid not in allowed:
+    from utils.premium import can_access
+    if not await can_access(meta, uid):
         return await _send_no_access(callback, meta)
 
     # Urinishlar cheklovi

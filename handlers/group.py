@@ -169,6 +169,9 @@ async def group_start_poll(callback: CallbackQuery):
     if not test:
         return await callback.answer("❌ Test topilmadi.", show_alert=True)
 
+    if not await _group_test_access(tid, uid, test):
+        return await callback.answer("🔐 Bu testni guruhda boshlash uchun sizga ruxsat berilmagan.", show_alert=True)
+
     qs = [q for q in test.get("questions",[])
           if q.get("type","multiple_choice") in ("multiple_choice","true_false")]
     if not qs:
@@ -384,6 +387,9 @@ async def group_start_inline(callback: CallbackQuery):
     test = await _load_test(callback.bot, chat_id, tid)
     if not test:
         return await callback.answer("❌ Test topilmadi.", show_alert=True)
+
+    if not await _group_test_access(tid, uid, test):
+        return await callback.answer("🔐 Bu testni guruhda boshlash uchun sizga ruxsat berilmagan.", show_alert=True)
 
     qs = test.get("questions", [])
     if not qs:
@@ -1224,6 +1230,29 @@ async def cmd_quiz_start_inline(message: Message):
     await cmd_quiz_start(message)
 
 
+
+
+async def _group_test_access(tid: str, uid: int, test: dict | None = None) -> bool:
+    """Guruh testi uchun yagona access tekshiruvi: allowed_users yoki active Premium."""
+    try:
+        from utils.ram_cache import get_test_meta
+        from utils.premium import can_access
+        meta = get_test_meta(tid) or {}
+        if not meta and test:
+            meta = {"allowed_users": test.get("allowed_users", [])}
+        return await can_access(meta, uid)
+    except Exception as e:
+        log.error("group access check xato tid=%s uid=%s: %s", tid, uid, e)
+        # Access nazorati ishlamasa restricted testni tasodifan ochib yubormaslik.
+        try:
+            from utils.ram_cache import get_test_meta
+            meta = get_test_meta(tid) or {}
+            allowed = {int(x) for x in (meta.get("allowed_users") or [])}
+            return not allowed or int(uid) in allowed
+        except Exception:
+            return False
+
+
 async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
     """Guruhda test boshlash — asosiy logika. start.py va cmd_quiz_start ishlatadi."""
     if is_test_paused(tid):
@@ -1238,24 +1267,17 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
     if not test:
         return await bot.send_message(chat_id, f"❌ <code>{tid}</code> kodli test topilmadi.", protect_content=True)
 
-    # ── Kirish nazorati ───────────────────────────────────────
-    from utils.ram_cache import get_test_meta as _gtm
-    from config import ADMIN_USERNAME
-    _meta_g  = _gtm(tid) or {}
-    _allowed = _meta_g.get("allowed_users", [])
-    if _allowed and uid not in _allowed:
+    # ── Kirish nazorati: allowed_users + active Premium ───────
+    if not await _group_test_access(tid, uid, test):
+        from config import ADMIN_USERNAME
         b = InlineKeyboardBuilder()
-        b.row(InlineKeyboardButton(
-            text="📩 Adminga murojat",
-            url=f"https://t.me/{ADMIN_USERNAME}"
-        ))
+        b.row(InlineKeyboardButton(text="📩 Adminga murojat", url=f"https://t.me/{ADMIN_USERNAME}"))
         return await bot.send_message(
             chat_id,
             f"🔐 <b>Kirish cheklangan</b>\n\n"
-            f"Bu testga kirishga ruxsatingiz yo'q.\n"
+            f"Bu testni guruhda boshlash uchun ruxsatingiz yo'q.\n"
             f"Ruxsat olish uchun @{ADMIN_USERNAME} ga yozing.",
-            reply_markup=b.as_markup(),
-            protect_content=True
+            reply_markup=b.as_markup(), protect_content=True
         )
 
     if mode == "inline":

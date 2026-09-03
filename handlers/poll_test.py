@@ -115,8 +115,8 @@ async def start_poll(callback: CallbackQuery, state: FSMContext):
             logging.getLogger(__name__).warning(f"ref check poll: {_re}")
 
     # Ruxsat tekshiruvi
-    allowed = meta.get("allowed_users", [])
-    if allowed and uid not in allowed:
+    from utils.premium import can_access
+    if not await can_access(meta, uid):
         return await _send_no_access(callback, meta)
 
     # Urinishlar cheklovi
