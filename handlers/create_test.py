@@ -515,14 +515,19 @@ async def _upload_images_to_channel(bot, questions: list) -> tuple:
 
             try:
                 photo = BufferedInputFile(img_bytes, filename=fname)
+                # Storage kanalida rasmni CAPTIONsiz saqlaymiz.
+                # Asosiy referens — aynan kanalga yuborilgan yangi message_id.
                 msg = await bot.send_photo(
                     media_channel, photo,
-                    caption="",
                     disable_notification=True,
                 )
                 last_send_ts = asyncio.get_event_loop().time()
                 if msg.photo:
+                    # Fayl importidagi mavjud storage mexanizmi: kanalga yangi
+                    # xabar yuboriladi va uning yangi file_id + message_id saqlanadi.
                     q["photo"] = msg.photo[-1].file_id
+                    q["photo_storage_chat_id"] = int(media_channel)
+                    q["photo_storage_message_id"] = int(msg.message_id)
                     uploaded += 1
                 q.pop("_img_bytes", None)
                 q.pop("_img_ext", None)
@@ -1939,7 +1944,8 @@ async def catch_poll_photo(message: Message, state: FSMContext):
 
     uid = message.from_user.id
     src_file_id   = message.photo[-1].file_id
-    saved_file_id = None   # faqat kanalga yuklangandan keyin to'ldiriladi
+    saved_file_id = None   # kanal qaytargan yangi file_id
+    saved_message_id = None  # kanal yaratgan YANGI message_id
 
     from config import STORAGE_CHANNEL_ID
     if not STORAGE_CHANNEL_ID:
@@ -1956,16 +1962,22 @@ async def catch_poll_photo(message: Message, state: FSMContext):
             if elapsed < MIN_INTERVAL:
                 await asyncio.sleep(MIN_INTERVAL - elapsed)
             try:
+                # Forward manbasi faqat upload uchun ishlatiladi.
+                # Test keyinchalik ORIGINAL forwarddan emas, STORAGE kanalidagi
+                # yangi xabardan olinadi. Caption ataylab berilmaydi.
                 copied = await message.bot.send_photo(
                     chat_id=STORAGE_CHANNEL_ID,
                     photo=src_file_id,
-                    caption="",
                     disable_notification=True,
                 )
                 _last_channel_send_ts = asyncio.get_event_loop().time()
                 if copied.photo:
                     saved_file_id = copied.photo[-1].file_id
-                    log.info(f"catch_poll_photo: rasm kanalga yuklandi -> {saved_file_id[:25]}...")
+                    saved_message_id = int(copied.message_id)
+                    log.info(
+                        f"catch_poll_photo: storage -> chat={STORAGE_CHANNEL_ID}, "
+                        f"message_id={saved_message_id}, file_id={saved_file_id[:25]}..."
+                    )
                 break
             except TelegramRetryAfter as e:
                 log.warning(f"catch_poll_photo: flood control, {e.retry_after}s kutilmoqda (urinish {attempt}/{MAX_ATTEMPTS})")
@@ -1986,8 +1998,12 @@ async def catch_poll_photo(message: Message, state: FSMContext):
             )
 
     async with _get_poll_lock(uid):
-        if saved_file_id:
-            _pending_photo[uid] = saved_file_id
+        if saved_file_id and saved_message_id:
+            _pending_photo[uid] = {
+                "file_id": saved_file_id,
+                "storage_chat_id": int(STORAGE_CHANNEL_ID),
+                "storage_message_id": int(saved_message_id),
+            }
         else:
             _pending_photo.pop(uid, None)   # eskisi bo'lsa ham tozalaymiz
     await _del(message.bot, message.chat.id, message.message_id)
@@ -2010,8 +2026,8 @@ async def catch_poll(message: Message, state: FSMContext):
     uid = message.from_user.id
     async with _get_poll_lock(uid):
         # Bevosita oldin rasm kelgan bo'lsa — shu savolga biriktiramiz
-        photo_id = _pending_photo.pop(uid, None)
-        log.info(f"catch_poll: uid={uid}, photo_id={'BOR: '+photo_id[:25]+'...' if photo_id else 'YO`Q'}")
+        photo_ref = _pending_photo.pop(uid, None)
+        log.info(f"catch_poll: uid={uid}, photo_ref={'BOR' if photo_ref else 'YO`Q'}")
 
         d  = await state.get_data()
         qs = d.get("questions", [])
@@ -2023,8 +2039,14 @@ async def catch_poll(message: Message, state: FSMContext):
             "explanation": p.explanation or "",
             "points":      1
         }
-        if photo_id:
-            new_q["photo"] = photo_id
+        if photo_ref:
+            if isinstance(photo_ref, dict):
+                new_q["photo"] = photo_ref.get("file_id")
+                new_q["photo_storage_chat_id"] = photo_ref.get("storage_chat_id")
+                new_q["photo_storage_message_id"] = photo_ref.get("storage_message_id")
+            else:
+                # Eski RAM state bilan backward compatibility.
+                new_q["photo"] = photo_ref
         qs.append(new_q)
         await state.update_data(questions=qs)
         count = len(qs)

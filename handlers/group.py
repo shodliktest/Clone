@@ -272,7 +272,18 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
         # Rasm bo'lsa — poll oldidan yuborish
         if photo_id:
             try:
-                await bot.send_photo(chat_id, photo_id, caption="", protect_content=True)
+                storage_chat_id = q.get("photo_storage_chat_id")
+                storage_message_id = q.get("photo_storage_message_id")
+                if storage_chat_id and storage_message_id:
+                    await bot.copy_message(
+                        chat_id=chat_id,
+                        from_chat_id=int(storage_chat_id),
+                        message_id=int(storage_message_id),
+                        caption="",
+                        protect_content=True,
+                    )
+                else:
+                    await bot.send_photo(chat_id, photo_id, protect_content=True)
                 await asyncio.sleep(0.5)
             except Exception as e:
                 log.error(f"Rasm yuborishda xato (savol {current}): {e}")
@@ -501,7 +512,18 @@ async def _run_inline_session(
                 qtxt     = qtxt[pm_match.end():].strip()
         if photo_id:
             try:
-                await bot.send_photo(chat_id, photo_id, caption="", protect_content=True)
+                storage_chat_id = q.get("photo_storage_chat_id")
+                storage_message_id = q.get("photo_storage_message_id")
+                if storage_chat_id and storage_message_id:
+                    await bot.copy_message(
+                        chat_id=chat_id,
+                        from_chat_id=int(storage_chat_id),
+                        message_id=int(storage_message_id),
+                        caption="",
+                        protect_content=True,
+                    )
+                else:
+                    await bot.send_photo(chat_id, photo_id, protect_content=True)
                 await asyncio.sleep(0.5)
             except Exception as e:
                 log.error(f"Inline rasm yuborishda xato (savol {i+1}): {e}")
