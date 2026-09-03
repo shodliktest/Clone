@@ -1015,9 +1015,9 @@ async def save_known_groups() -> bool:
     if not groups:
         return True
     try:
-        rows = [{"chat_id": int(cid), "data": gdata} for cid, gdata in groups.items()]
+        rows = [{"group_id": int(cid), "data": gdata} for cid, gdata in groups.items()]
         for i in range(0, len(rows), 500):
-            await sb.upsert_many("known_groups", rows[i:i+500], on_conflict="chat_id")
+            await sb.upsert_many("known_groups", rows[i:i+500], on_conflict="group_id")
         log.info(f"known_groups saqlandi: {len(groups)} ta")
         return True
     except Exception as e:
@@ -1031,7 +1031,7 @@ async def load_known_groups():
     from utils import ram_cache as ram
     try:
         rows = await sb.select("known_groups")
-        groups = {str(r["chat_id"]): dict(r.get("data") or {}) for r in rows}
+        groups = {str(r["group_id"]): dict(r.get("data") or {}) for r in rows}
         if groups:
             ram.set_known_groups(groups)
             log.info(f"known_groups yuklandi: {len(groups)} ta guruh")
