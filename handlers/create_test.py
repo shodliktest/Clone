@@ -125,37 +125,7 @@ _poll_debounce:    dict = {}  # {uid: asyncio.Task}
 _save_in_progress: set  = set()   # Double-click himoyasi
 _poll_progress: dict = {}  # {uid: progress_msg_id}
 _poll_count:    dict = {}  # {uid: savol soni}
-# Forward pairing registry: {uid: {source_message_id: Future[file_id|None]}}.
-# Future is created at the very start of the photo handler, so a concurrently
-# arriving Quiz can wait for the preceding photo upload instead of racing it.
-_photo_registry: dict = {}
-_photo_registry_lock: dict = {}
-_channel_upload_lock = asyncio.Lock()
-
-
-def _get_photo_registry_lock(uid: int) -> asyncio.Lock:
-    lock = _photo_registry_lock.get(uid)
-    if lock is None:
-        lock = asyncio.Lock()
-        _photo_registry_lock[uid] = lock
-    return lock
-
-
-def _register_photo(uid: int, message_id: int) -> asyncio.Future:
-    reg = _photo_registry.setdefault(uid, {})
-    fut = reg.get(message_id)
-    if fut is None:
-        fut = asyncio.get_running_loop().create_future()
-        reg[message_id] = fut
-    return fut
-
-
-def _cleanup_photo_registry(uid: int):
-    reg = _photo_registry.get(uid)
-    if reg is not None and not reg:
-        _photo_registry.pop(uid, None)
-        _photo_registry_lock.pop(uid, None)
-
+_pending_photo: dict = {}  # {uid: [photo_record, ...]} — FIFO rasm navbati; har poll chapdagi bitta rasmni oladi
 
 # aiogram handle_as_tasks=True bilan har bir update ALOHIDA asyncio.Task
 # sifatida, bir-biriga nisbatan PARALLEL ishga tushadi. Foydalanuvchi
@@ -553,6 +523,8 @@ async def _upload_images_to_channel(bot, questions: list) -> tuple:
                 last_send_ts = asyncio.get_event_loop().time()
                 if msg.photo:
                     q["photo"] = msg.photo[-1].file_id
+                    q["photo_message_id"] = int(msg.message_id)
+                    q["photo_channel_id"] = int(media_channel)
                     uploaded += 1
                 q.pop("_img_bytes", None)
                 q.pop("_img_ext", None)
@@ -1937,8 +1909,7 @@ async def method_poll(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
     _poll_progress[uid] = callback.message.message_id
     _poll_count[uid] = 0
-    _photo_registry.pop(uid, None)
-    _photo_registry_lock.pop(uid, None)
+    _pending_photo.pop(uid, None)
     await state.set_state(CreateTest.waiting_polls)
 
 
@@ -1948,142 +1919,212 @@ async def method_poll(callback: CallbackQuery, state: FSMContext):
 # yuboradi, foydalanuvchidan qat'iy nazar).
 _last_channel_send_ts = 0.0
 
+# QuizBot forward oqimi uchun FIFO buffer.
+# Muhim: aiogram handlerlari parallel task bo'lishi mumkin, shuning uchun
+# "pending photo"ni vaqtga emas, Telegram chat message_id tartibiga bog'laymiz.
+_forward_events: dict = {}      # uid -> [{kind, message, message_id}]
+_forward_flush_tasks: dict = {} # uid -> Task
+_forward_queue_locks: dict = {} # uid -> Lock
+
+
+def _get_forward_queue_lock(uid: int) -> asyncio.Lock:
+    lock = _forward_queue_locks.get(uid)
+    if lock is None:
+        lock = asyncio.Lock()
+        _forward_queue_locks[uid] = lock
+    return lock
+
+
+async def _save_forward_photo(message: Message) -> dict | None:
+    """QuizBot'dan kelgan rasmni storage kanaliga saqlaydi."""
+    global _last_channel_send_ts
+    from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
+    from config import STORAGE_CHANNEL_ID
+
+    if not STORAGE_CHANNEL_ID:
+        log.error("QuizBot photo: STORAGE_CHANNEL_ID sozlanmagan")
+        return None
+
+    src_file_id = message.photo[-1].file_id
+    MIN_INTERVAL = 1.1
+    MAX_ATTEMPTS = 8
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        elapsed = asyncio.get_event_loop().time() - _last_channel_send_ts
+        if elapsed < MIN_INTERVAL:
+            await asyncio.sleep(MIN_INTERVAL - elapsed)
+        try:
+            copied = await message.bot.send_photo(
+                chat_id=STORAGE_CHANNEL_ID,
+                photo=src_file_id,
+                caption=f"📷 QuizBot | user={message.from_user.id} | source={message.message_id}",
+                disable_notification=True,
+            )
+            _last_channel_send_ts = asyncio.get_event_loop().time()
+            if not copied.photo:
+                return None
+            saved_file_id = copied.photo[-1].file_id
+            return {
+                "file_id": saved_file_id,
+                "storage_message_id": int(copied.message_id),
+                "photo_channel_id": int(STORAGE_CHANNEL_ID),
+                "source_message_id": int(message.message_id),
+            }
+        except TelegramRetryAfter as e:
+            log.warning("QuizBot photo flood: %ss (%s/%s)", e.retry_after, attempt, MAX_ATTEMPTS)
+            await asyncio.sleep(e.retry_after + 1)
+        except TelegramNetworkError as e:
+            log.warning("QuizBot photo network: %s (%s/%s)", e, attempt, MAX_ATTEMPTS)
+            await asyncio.sleep(min(2 * attempt, 10))
+        except Exception as e:
+            log.error("QuizBot photo storage error: %s: %s", type(e).__name__, e)
+            if attempt < MAX_ATTEMPTS:
+                await asyncio.sleep(min(2 * attempt, 10))
+    return None
+
+
+async def _process_forward_photo(message: Message, state: FSMContext, uid: int):
+    saved = await _save_forward_photo(message)
+    if saved:
+        # FIFO: har rasm faqat keyingi quizga. Keyingi quiz mustaqil qoladi.
+        _pending_photo.setdefault(uid, []).append(saved)
+    else:
+        # Saqlanmagan rasm pairingga kirmaydi.
+        pass
+        await message.answer("⚠️ Rasmni saqlab bo‘lmadi. Shu rasm + quizni qayta forward qiling.")
+    await _del(message.bot, message.chat.id, message.message_id)
+
+
+async def _process_forward_poll(message: Message, state: FSMContext, uid: int):
+    from config import STORAGE_CHANNEL_ID
+    if message.poll.type != "quiz":
+        await _del(message.bot, message.chat.id, message.message_id)
+        await message.answer("❌ Faqat <b>Viktorina (Quiz)</b> turi qabul qilinadi!")
+        return
+
+    p = message.poll
+    labels = ["A)", "B)", "C)", "D)", "E)", "F)", "G)", "H)", "I)", "J)"]
+    opts = [f"{labels[i]} {op.text}" for i, op in enumerate(p.options[:10])]
+    clean_q = re.sub(r"^\[\d+/\d+\]\s*", "", p.question).strip()
+
+    photo_queue = _pending_photo.get(uid, [])
+    pending = photo_queue.pop(0) if photo_queue else None
+    if photo_queue:
+        _pending_photo[uid] = photo_queue
+    else:
+        _pending_photo.pop(uid, None)
+    photo_id = pending.get("file_id") if isinstance(pending, dict) else pending
+    new_q = {
+        "type": "multiple_choice",
+        "question": clean_q,
+        "options": opts,
+        "correct": opts[p.correct_option_id] if p.correct_option_id < len(opts) else opts[0],
+        "explanation": p.explanation or "",
+        "points": 1,
+    }
+    if photo_id:
+        new_q["photo"] = photo_id
+        if isinstance(pending, dict) and pending.get("storage_message_id") and pending.get("photo_channel_id"):
+            new_q["photo_message_id"] = int(pending["storage_message_id"])
+            new_q["photo_channel_id"] = int(pending["photo_channel_id"])
+
+    d = await state.get_data()
+    qs = d.get("questions", [])
+    qs.append(new_q)
+    await state.update_data(questions=qs)
+    await _del(message.bot, message.chat.id, message.message_id)
+
+    _poll_count[uid] = len(qs)
+    old_task = _poll_debounce.pop(uid, None)
+    if old_task:
+        old_task.cancel()
+    _poll_debounce[uid] = asyncio.create_task(_flush_polls(message.bot, message.chat.id, uid))
+
+
+async def _enqueue_forward_event(message: Message, state: FSMContext, kind: str):
+    uid = message.from_user.id
+    async with _get_forward_queue_lock(uid):
+        _forward_events.setdefault(uid, []).append({
+            "kind": kind,
+            "message": message,
+            "state": state,
+            "message_id": int(message.message_id),
+        })
+        task = _forward_flush_tasks.get(uid)
+        if task is None or task.done():
+            _forward_flush_tasks[uid] = asyncio.create_task(
+                _run_forward_queue(message.bot, message.chat.id, uid)
+            )
+
+
+async def _run_forward_queue(bot, cid: int, uid: int):
+    try:
+        await asyncio.sleep(0.45)
+        while True:
+            async with _get_forward_queue_lock(uid):
+                events = _forward_events.pop(uid, [])
+            if not events:
+                break
+            events.sort(key=lambda e: e["message_id"])
+            for event in events:
+                msg, state, kind = event["message"], event["state"], event["kind"]
+                cur_state = await state.get_state()
+                if cur_state != CreateTest.waiting_polls.state:
+                    await _del(msg.bot, msg.chat.id, msg.message_id)
+                    continue
+                if kind == "photo":
+                    await _process_forward_photo(msg, state, uid)
+                else:
+                    await _process_forward_poll(msg, state, uid)
+            async with _get_forward_queue_lock(uid):
+                more = bool(_forward_events.get(uid))
+            if not more:
+                break
+            await asyncio.sleep(0.05)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log.error("QuizBot FIFO worker xato uid=%s: %s", uid, e, exc_info=True)
+    finally:
+        _forward_flush_tasks.pop(uid, None)
+        if _forward_events.get(uid):
+            _forward_flush_tasks[uid] = asyncio.create_task(_run_forward_queue(bot, cid, uid))
+
 
 @router.message(F.photo, CreateTest.waiting_polls)
 async def catch_poll_photo(message: Message, state: FSMContext):
-    """QuizBot forward rasmi: avval ro'yxatga olinadi, keyin storage kanalga yuklanadi.
-
-    Pairing message_id tartibi bilan qilinadi. Shu sababli handlerlar parallel
-    ishga tushgan taqdirda ham keyingi Quiz o'zidan oldingi eng eski, hali
-    biriktirilmagan rasmni oladi. Storage kanalidan qaytgan YANGI file_idgina
-    savolga yoziladi.
-    """
-    global _last_channel_send_ts
-    from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
-
-    uid = message.from_user.id
-    source_mid = message.message_id
-    src_file_id = message.photo[-1].file_id
-
-    # MUHIM: uploaddan oldin future yaratamiz. Poll handler shu future'ni ko'rib
-    # upload tugashini kutishi mumkin.
-    async with _get_photo_registry_lock(uid):
-        fut = _register_photo(uid, source_mid)
-
-    saved_file_id = None
-    from config import STORAGE_CHANNEL_ID
-    if not STORAGE_CHANNEL_ID:
-        log.error("catch_poll_photo: STORAGE_CHANNEL_ID sozlanmagan")
-    else:
-        MIN_INTERVAL = 1.1
-        MAX_ATTEMPTS = 8
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            async with _channel_upload_lock:
-                elapsed = asyncio.get_running_loop().time() - _last_channel_send_ts
-                if elapsed < MIN_INTERVAL:
-                    await asyncio.sleep(MIN_INTERVAL - elapsed)
-                try:
-                    # Kanalga faqat rasm yuboriladi — caption yo'q.
-                    copied = await message.bot.send_photo(
-                        chat_id=STORAGE_CHANNEL_ID,
-                        photo=src_file_id,
-                        disable_notification=True,
-                    )
-                    _last_channel_send_ts = asyncio.get_running_loop().time()
-                    if copied.photo:
-                        saved_file_id = copied.photo[-1].file_id
-                    break
-                except TelegramRetryAfter as e:
-                    _last_channel_send_ts = asyncio.get_running_loop().time()
-                    log.warning("catch_poll_photo: flood control, %ss kutilmoqda", e.retry_after)
-                    await asyncio.sleep(e.retry_after + 1)
-                except TelegramNetworkError as e:
-                    log.warning("catch_poll_photo: tarmoq xatosi (%s/%s): %s", attempt, MAX_ATTEMPTS, e)
-                    await asyncio.sleep(min(2 * attempt, 10))
-                except Exception as e:
-                    log.error("catch_poll_photo: kanalga yuklashda xato (%s): %s", type(e).__name__, e)
-                    break
-
-    # Future'ni aynan shu source message_id bilan yakunlaymiz.
-    if not fut.done():
-        fut.set_result(saved_file_id)
-
-    if saved_file_id is None:
-        log.error("catch_poll_photo: rasm saqlanmadi uid=%s mid=%s", uid, source_mid)
-        await message.answer("⚠️ Rasmni storage kanaliga saqlab bo'lmadi. Savol rasm-siz qo'shiladi.")
-
-    await _del(message.bot, message.chat.id, message.message_id)
+    """Faqat FIFO buffer'ga qo'shadi. Kanalga yuborish worker ichida amalga oshadi."""
+    await _enqueue_forward_event(message, state, "photo")
 
 
 @router.message(F.poll, CreateTest.waiting_polls)
 async def catch_poll(message: Message, state: FSMContext):
-    if message.poll.type != "quiz":
-        await _del(message.bot, message.chat.id, message.message_id)
-        return await message.answer("❌ Faqat <b>Viktorina (Quiz)</b> turi qabul qilinadi!")
+    """Faqat FIFO buffer'ga qo'shadi; photo/poll tartibi message_id bilan aniqlanadi."""
+    await _enqueue_forward_event(message, state, "poll")
 
-    import re as _re
-    p = message.poll
-    lts = ["A)", "B)", "C)", "D)", "E)", "F)"]
-    opts = [f"{lts[i]} {op.text}" for i, op in enumerate(p.options)]
-    clean_q = _re.sub(r"^\[\d+/\d+\]\s*", "", p.question).strip()
-    uid = message.from_user.id
 
-    # Handlerlar parallel bo'lishi mumkin. Photo handler Future'ni birinchi
-    # qadamdayoq yaratadi; biz esa juda qisqa scheduling oynasi berib, so'ng
-    # message_id bo'yicha qat'iy FIFO pairing qilamiz.
-    await asyncio.sleep(0.12)
-
-    async with _get_poll_lock(uid):
-        photo_id = None
-        reg = _photo_registry.get(uid, {})
-
-        # Poll'dan oldin kelgan, hali biriktirilmagan rasmlardan ENG ESKISI.
-        candidates = [mid for mid in reg if mid < message.message_id]
-        if candidates:
-            photo_mid = min(candidates)
-            fut = reg.pop(photo_mid)
-            try:
-                photo_id = await asyncio.wait_for(fut, timeout=25.0)
-            except asyncio.TimeoutError:
-                log.error("catch_poll: photo timeout uid=%s photo_mid=%s poll_mid=%s", uid, photo_mid, message.message_id)
-                photo_id = None
-            except Exception as e:
-                log.error("catch_poll: photo future xatosi: %s", e)
-                photo_id = None
-            _cleanup_photo_registry(uid)
-
-        d = await state.get_data()
-        qs = list(d.get("questions", []))
-        new_q = {
-            "type": "multiple_choice",
-            "question": clean_q,
-            "options": opts,
-            "correct": opts[p.correct_option_id],
-            "explanation": p.explanation or "",
-            "points": 1,
-        }
-        if photo_id:
-            new_q["photo"] = photo_id
-
-        qs.append(new_q)
-        await state.update_data(questions=qs)
-        count = len(qs)
-        log.info("catch_poll: uid=%s poll_mid=%s paired_photo=%s total=%s",
-                 uid, message.message_id, photo_id[:20] + "..." if photo_id else "YO'Q", count)
-
-    await _del(message.bot, message.chat.id, message.message_id)
-
-    _poll_count[uid] = count
-    old_task = _poll_debounce.pop(uid, None)
-    if old_task:
-        old_task.cancel()
-    _poll_debounce[uid] = asyncio.create_task(
-        _flush_polls(message.bot, message.chat.id, uid)
-    )
+async def _wait_forward_queue_idle(uid: int, timeout: float = 60.0):
+    """✅ Tayyor bosilganda pending forwardlar to‘liq qayta ishlanishini kutadi."""
+    task = _forward_flush_tasks.get(uid)
+    if task and not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except asyncio.TimeoutError:
+            log.error("QuizBot FIFO worker %ss ichida tugamadi uid=%s", timeout, uid)
+    # Worker tugashida yangi batch paydo bo‘lishi mumkin. Bir marta yana tekshiramiz.
+    task = _forward_flush_tasks.get(uid)
+    if task and not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
 
 
 @router.callback_query(F.data == "finish_polls", CreateTest.waiting_polls)
 async def finish_polls(callback: CallbackQuery, state: FSMContext):
+    # Progress xabari bosilganda ham hali navbatda turgan photo/poll yo‘qolmasin.
+    uid = callback.from_user.id
+    await _wait_forward_queue_idle(uid)
     d = await state.get_data()
     if not d.get("questions"):
         return await callback.answer("❌ Hali savol yo'q!", show_alert=True)
@@ -2445,6 +2486,17 @@ async def _do_save_test(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "cancel_create")
 async def cancel_create(callback: CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    # Cancel qilinganda pending forwardlar keyingi testga ko‘chib ketmasin.
+    task = _forward_flush_tasks.pop(uid, None)
+    if task and not task.done():
+        task.cancel()
+    _forward_events.pop(uid, None)
+    _pending_photo.pop(uid, None)
+    _poll_count.pop(uid, None)
+    debounce = _poll_debounce.pop(uid, None)
+    if debounce and not debounce.done():
+        debounce.cancel()
     await state.clear()
     await callback.answer()
     try:
