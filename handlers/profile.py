@@ -1082,7 +1082,7 @@ async def quiz_poll_export(callback: CallbackQuery, state: FSMContext):
         photo_id = q.get("photo") or q.get("image") or None
         if photo_id:
             try:
-                await callback.bot.send_photo(uid, photo_id)
+                await callback.bot.send_photo(uid, photo_id, caption="")
                 await _aio.sleep(0.3)
             except Exception as e:
                 log.error(f"Quiz eksport rasm xato {i}: {e}")
@@ -1092,9 +1092,7 @@ async def quiz_poll_export(callback: CallbackQuery, state: FSMContext):
         full_text, poll_qtxt = split_long_question(qtxt)
         if full_text:
             try:
-                
-                for _part in full_text:
-                    await callback.bot.send_message(uid, _part)
+                await callback.bot.send_message(uid, full_text)
                 await _aio.sleep(0.3)
             except Exception as e:
                 log.error(f"Uzun savol matnini yuborishda xato {i}: {e}")
