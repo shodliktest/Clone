@@ -1965,51 +1965,143 @@ async def _show_loops(ev, edit=False):
 
 
 # ══ LIVE MONITOR ══════════════════════════════════════════════
+async def _get_all_live_sessions() -> list:
+    from utils.ram_cache import get_live_sessions
+    from utils.tg_db import get_web_live_sessions
+    sessions = get_live_sessions()             # bot ichida (poll/inline)
+    sessions += await get_web_live_sessions()  # Vercel web orqali
+    return sessions
+
+
 @router.callback_query(F.data == "adm_live")
 async def adm_live_cb(callback: CallbackQuery):
     await callback.answer()
     if not is_admin(callback.from_user.id): return
-    await _show_live(callback.message, edit=True)
+    await _show_live_root(callback.message, edit=True)
 
 
 @router.callback_query(F.data == "adm_live_refresh")
 async def adm_live_refresh_cb(callback: CallbackQuery):
     await callback.answer("🔄")
     if not is_admin(callback.from_user.id): return
-    await _show_live(callback.message, edit=True)
+    await _show_live_root(callback.message, edit=True)
 
 
-async def _show_live(msg, edit=False):
-    from utils.ram_cache import get_live_sessions, get_live_by_test
-    sessions  = get_live_sessions()
-    by_test   = get_live_by_test()
+async def _show_live_root(msg, edit=False):
+    """1-bosqich: Quiz Live / Web Live tanlash."""
+    sessions = await _get_all_live_sessions()
+    bot_n = sum(1 for s in sessions if s["mode"] in ("poll", "inline"))
+    web_n = sum(1 for s in sessions if s["mode"] == "web")
 
-    lines = ["📡 <b>LIVE MONITOR</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n"]
-
-    if not sessions:
-        lines.append("😴 Hozir hech kim test yechmayapti")
-    else:
-        lines.append(f"🟢 Aktiv: <b>{len(sessions)} kishi</b>\n")
-        for tid, sess_list in by_test.items():
-            title = sess_list[0].get("title", tid)
-            lines.append(f"📝 <b>{title[:35]}</b> — {len(sess_list)} kishi")
-            for s in sess_list[:5]:
-                mode_icon = "📊" if s["mode"] == "poll" else "📋"
-                chat = s["chat_title"]
-                lines.append(
-                    f"  {mode_icon} Savol {s['idx']}/{s['total']} | "
-                    f"⏱ {s['elapsed']} | 🏘 {chat}"
-                )
-            if len(sess_list) > 5:
-                lines.append(f"  ... va yana {len(sess_list)-5} kishi")
-            lines.append("")
-
+    text = (
+        "📡 <b>LIVE MONITOR</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🟢 Jami aktiv: <b>{len(sessions)} kishi</b>\n\n"
+        "Qaysi turini ko'rmoqchisiz?"
+    )
     b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text=f"🤖 Quiz Live ({bot_n})", callback_data="adm_live_type:bot"))
+    b.row(InlineKeyboardButton(text=f"🌐 Web Live ({web_n})",  callback_data="adm_live_type:web"))
     b.row(
         InlineKeyboardButton(text="🔄 Yangilash", callback_data="adm_live_refresh"),
         InlineKeyboardButton(text="⬅️ Admin",     callback_data="admin_panel"),
     )
-    text = "\n".join(lines)
+    await _send_or_edit(msg, text, b, edit)
+
+
+@router.callback_query(F.data.startswith("adm_live_type:"))
+async def adm_live_type_cb(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    kind = callback.data.split(":", 1)[1]  # "bot" | "web"
+    await _show_live_subjects(callback.message, kind, edit=True)
+
+
+async def _show_live_subjects(msg, kind: str, edit=False):
+    """2-bosqich: shu turdagi fanlar ro'yxati (inline tugma, har birida son)."""
+    sessions = await _get_all_live_sessions()
+    if kind == "web":
+        sessions = [s for s in sessions if s["mode"] == "web"]
+        header = "🌐 <b>WEB LIVE</b>"
+    else:
+        sessions = [s for s in sessions if s["mode"] in ("poll", "inline")]
+        header = "🤖 <b>QUIZ LIVE</b>"
+
+    by_test = {}
+    for s in sessions:
+        by_test.setdefault(s["test_id"], []).append(s)
+    # Barqaror tartib — index orqali keyingi bosqichda qayta topish uchun
+    test_ids = sorted(by_test.keys())
+
+    text = f"{header}\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    if not test_ids:
+        text += "😴 Hozir hech kim yechmayapti"
+    else:
+        text += "Qaysi fanni ko'rmoqchisiz?"
+
+    b = InlineKeyboardBuilder()
+    for i, tid in enumerate(test_ids):
+        sess_list = by_test[tid]
+        title = sess_list[0].get("title", tid)
+        b.row(InlineKeyboardButton(
+            text=f"📝 {title[:35]} ({len(sess_list)})",
+            callback_data=f"adm_live_subj:{kind}:{i}",
+        ))
+    b.row(
+        InlineKeyboardButton(text="🔄 Yangilash", callback_data=f"adm_live_type:{kind}"),
+        InlineKeyboardButton(text="⬅️ Orqaga",    callback_data="adm_live"),
+    )
+    await _send_or_edit(msg, text, b, edit)
+
+
+@router.callback_query(F.data.startswith("adm_live_subj:"))
+async def adm_live_subj_cb(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id): return
+    _, kind, idx_str = callback.data.split(":", 2)
+    await _show_live_users(callback.message, kind, int(idx_str), edit=True)
+
+
+async def _show_live_users(msg, kind: str, idx: int, edit=False):
+    """3-bosqich: shu fanni yechayotganlar ro'yxati — ism, familiya, @username."""
+    sessions = await _get_all_live_sessions()
+    if kind == "web":
+        sessions = [s for s in sessions if s["mode"] == "web"]
+        icon = "🌐"
+    else:
+        sessions = [s for s in sessions if s["mode"] in ("poll", "inline")]
+        icon = "🤖"
+
+    by_test = {}
+    for s in sessions:
+        by_test.setdefault(s["test_id"], []).append(s)
+    test_ids = sorted(by_test.keys())
+
+    if idx >= len(test_ids):
+        text = f"{icon} <b>Bu fan endi aktiv emas</b>"
+        sess_list, title, tid = [], "", ""
+    else:
+        tid = test_ids[idx]
+        sess_list = by_test[tid]
+        title = sess_list[0].get("title", tid)
+        text = f"{icon} <b>{title[:40]}</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        text += f"👥 <b>{len(sess_list)} kishi</b> yechyapti:\n\n"
+        for s in sess_list:
+            uname = f" (@{s['username']})" if s.get("username") else ""
+            mode_icon = "📊" if s["mode"] == "poll" else "🌐" if s["mode"] == "web" else "📋"
+            text += (
+                f"{mode_icon} <b>{s.get('name') or ('User ' + s['uid'])}</b>{uname}\n"
+                f"    Savol {s['idx']}/{s['total']} | ⏱ {s['elapsed']}\n"
+            )
+
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="🔄 Yangilash", callback_data=f"adm_live_subj:{kind}:{idx}"),
+        InlineKeyboardButton(text="⬅️ Orqaga",    callback_data=f"adm_live_type:{kind}"),
+    )
+    await _send_or_edit(msg, text, b, edit)
+
+
+async def _send_or_edit(msg, text: str, b: InlineKeyboardBuilder, edit: bool):
     try:
         if edit:
             await msg.edit_text(text, reply_markup=b.as_markup())
