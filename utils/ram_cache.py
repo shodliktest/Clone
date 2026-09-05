@@ -864,6 +864,7 @@ import time as _time
 
 def live_start(uid: int, test: dict, mode: str = "inline",
                chat_id: int = None, chat_title: str = None):
+    u = get_user(uid) or {}
     live = _get("_live_sessions", {})
     live[str(uid)] = {
         "uid":        str(uid),
@@ -872,6 +873,8 @@ def live_start(uid: int, test: dict, mode: str = "inline",
         "mode":       mode,
         "chat_id":    str(chat_id or uid),
         "chat_title": chat_title or "Shaxsiy",
+        "name":       u.get("name") or f"User {uid}",
+        "username":   u.get("username") or "",
         "started_at": _time.time(),
         "idx":        0,
         "total":      len(test.get("questions", [])),

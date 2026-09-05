@@ -1131,3 +1131,68 @@ def get_index_info() -> dict:
         "stats_dirty":  _stats_dirty,
         "users_dirty":  _users_dirty,
     }
+
+
+async def get_web_live_sessions() -> list:
+    """
+    Web (Vercel proxy.js) orqali test yechayotgan foydalanuvchilarni
+    Supabase'dagi 'live_sessions' jadvalidan o'qiydi va admin.py dagi
+    RAM formatiga (ram_cache.get_live_sessions bilan bir xil shakl)
+    moslab qaytaradi. Shu ikkovi keyin admin.py ichida birlashtiriladi.
+
+    proxy.js quyidagi ustunlarga yozadi (live/start, live/update):
+      session_id, user_id, test_id, test_title, source, idx,
+      total_q, started_at, last_seen
+    """
+    if not ready():
+        return []
+    try:
+        rows = await sb.select("live_sessions")
+    except Exception as e:
+        log.error(f"get_web_live_sessions: {e}")
+        return []
+
+    now = datetime.now(timezone.utc)
+    result = []
+    stale = []
+    for r in rows:
+        last_seen_raw = r.get("last_seen") or r.get("started_at")
+        try:
+            last_seen = datetime.fromisoformat(str(last_seen_raw).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        elapsed_sec = int((now - last_seen).total_seconds())
+        # 10 daqiqadan ortiq "ping" bo'lmasa — brauzer yopilgan/uzilgan deb hisoblaymiz
+        if elapsed_sec > 600:
+            sid = r.get("session_id")
+            if sid:
+                stale.append(sid)
+            continue
+        try:
+            started = datetime.fromisoformat(str(r.get("started_at")).replace("Z", "+00:00"))
+            total_elapsed = int((now - started).total_seconds())
+        except Exception:
+            total_elapsed = elapsed_sec
+        m, sec = divmod(max(total_elapsed, 0), 60)
+        result.append({
+            "uid":        str(r.get("user_id", "")),
+            "test_id":    r.get("test_id", ""),
+            "title":      r.get("test_title", "?"),
+            "mode":       "web",
+            "chat_id":    str(r.get("user_id", "")),
+            "chat_title": "Web",
+            "name":       r.get("user_name") or f"User {r.get('user_id', '')}",
+            "username":   r.get("user_username") or "",
+            "idx":        r.get("idx", 0) or 0,
+            "total":      r.get("total_q", 0) or 0,
+            "elapsed":    f"{m}:{sec:02d}",
+        })
+
+    if stale:
+        for sid in stale:
+            try:
+                await sb.delete("live_sessions", "session_id", sid)
+            except Exception as e:
+                log.warning(f"stale live_sessions o'chirilmadi ({sid}): {e}")
+
+    return result
