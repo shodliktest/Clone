@@ -466,7 +466,7 @@ async def method_file(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         reply_markup=b.as_markup()
     )
-    await state.update_data(_multi_pending=[], _multi_done=[])
+    await state.update_data(_multi_pending=[], _multi_done=[], _multi_status_msg_id=None)
     await state.set_state(CreateTest.upload_files_multi)
 
 
@@ -631,13 +631,27 @@ async def upload_files_multi_collect(message: Message, state: FSMContext):
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text=f"✅ Tugatdim ({len(pending)} ta fayl)", callback_data="multi_files_done"))
     b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_create"))
-    await message.answer(
+    text = (
         f"📎 <b>{len(pending)} ta fayl qabul qilindi:</b>\n"
         + "\n".join(f"  • {p['file_name']}" for p in pending[-10:])
-        + "\n\nYana fayl yuborishingiz mumkin, yoki tugating 👇",
-        parse_mode="HTML",
-        reply_markup=b.as_markup()
+        + "\n\nYana fayl yuborishingiz mumkin, yoki tugating 👇"
     )
+
+    status_id = d.get("_multi_status_msg_id")
+    edited = False
+    if status_id:
+        try:
+            await message.bot.edit_message_text(
+                text, chat_id=message.chat.id, message_id=status_id,
+                parse_mode="HTML", reply_markup=b.as_markup()
+            )
+            edited = True
+        except Exception:
+            pass  # eski xabar o'chirilgan/tahrirlanmaydi — yangisini yuboramiz
+
+    if not edited:
+        sent = await message.answer(text, parse_mode="HTML", reply_markup=b.as_markup())
+        await state.update_data(_multi_status_msg_id=sent.message_id)
 
 
 @router.callback_query(F.data == "multi_files_done", CreateTest.upload_files_multi)
