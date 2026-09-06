@@ -2400,9 +2400,9 @@ async def _ask_title(msg, state: FSMContext, category: str, file_name: str = "")
             f"<b>📊 QIYINLIK DARAJASI</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━"
         )
-        if hasattr(msg, 'edit_text'):
+        try:
             await msg.edit_text(text, parse_mode="HTML", reply_markup=difficulty_kb())
-        else:
+        except Exception:
             await msg.answer(text, parse_mode="HTML", reply_markup=difficulty_kb())
         return
 
@@ -2426,20 +2426,25 @@ async def _ask_title(msg, state: FSMContext, category: str, file_name: str = "")
     await state.set_state(CreateTest.set_title)
 
     if hasattr(msg, 'edit_text'):
-        await msg.edit_text(
-            f"📁 Fan: <b>{category}</b>\n\n"
-            f"<b>🏷 Test nomini yozing:</b>\n"
-            f"<i>Yoki pastdagi tugma bilan fayl nomidan oling</i>",
-            parse_mode="HTML",
-            reply_markup=b.as_markup() if file_name else None
-        )
-    else:
-        await msg.answer(
-            f"<b>🏷 Test nomini yozing:</b>\n"
-            f"<i>Yoki pastdagi tugma bilan fayl nomidan oling</i>",
-            parse_mode="HTML",
-            reply_markup=b.as_markup() if file_name else None
-        )
+        try:
+            await msg.edit_text(
+                f"📁 Fan: <b>{category}</b>\n\n"
+                f"<b>🏷 Test nomini yozing:</b>\n"
+                f"<i>Yoki pastdagi tugma bilan fayl nomidan oling</i>",
+                parse_mode="HTML",
+                reply_markup=b.as_markup() if file_name else None
+            )
+            return
+        except Exception:
+            pass  # foydalanuvchi xabari edit qilinmaydi — pastda yangi xabar yuboramiz
+
+    await msg.answer(
+        f"📁 Fan: <b>{category}</b>\n\n"
+        f"<b>🏷 Test nomini yozing:</b>\n"
+        f"<i>Yoki pastdagi tugma bilan fayl nomidan oling</i>",
+        parse_mode="HTML",
+        reply_markup=b.as_markup() if file_name else None
+    )
 
 
 @router.callback_query(F.data == "title_from_file", CreateTest.set_title)
