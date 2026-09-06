@@ -15,6 +15,8 @@ class CreateTest(StatesGroup):
     waiting_polls  = State()
     set_poll_time  = State()
     upload_file    = State()
+    upload_files_multi = State()  # Ko'p fayl: fayllar yuborilyapti, navbatga qo'yiladi
+    multi_mode_choice  = State()  # Ko'p fayl: "Alohida" yoki "Birlashtirilgan" tanlanadi
     reupload_file  = State()
     set_subject    = State()
     set_title      = State()
