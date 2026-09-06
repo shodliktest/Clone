@@ -458,15 +458,19 @@ async def method_file(callback: CallbackQuery, state: FSMContext):
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Turni bosing → namuna ko'rasiz\n"
         "Shu formatda fayl yuborasiz:\n\n"
+        "<i>💡 Bir nechta fayl yuborishingiz mumkin —\n"
+        "bittadan ketma-ket yoki birga (albom)\n"
+        "qilib. Tugagach ✅ Tugatdim tugmasini bosing.</i>\n\n"
         "<i>💡 Yaratilgan test ▶️ Inline va 📊 Poll\n"
         "ikki rejimda ishlaydi!</i>",
         parse_mode="HTML",
         reply_markup=b.as_markup()
     )
-    await state.set_state(CreateTest.upload_file)
+    await state.update_data(_multi_pending=[], _multi_done=[])
+    await state.set_state(CreateTest.upload_files_multi)
 
 
-@router.callback_query(F.data.startswith("sample_"), CreateTest.upload_file)
+@router.callback_query(F.data.startswith("sample_"), CreateTest.upload_files_multi)
 async def send_sample(callback: CallbackQuery):
     await callback.answer()
     key = callback.data[7:]
@@ -594,6 +598,62 @@ async def _upload_images_to_channel(bot, questions: list) -> tuple:
 
     log.info(f"Rasmlar Telegram STORAGE_CHANNEL_ID'ga: {uploaded} muvaffaqiyatli, {failed} xato")
     return questions, uploaded, failed, total_img
+
+
+@router.message(F.document, CreateTest.upload_files_multi)
+async def upload_files_multi_collect(message: Message, state: FSMContext):
+    """
+    Ko'p-fayl rejimi: har kelgan faylni faqat yuklab olib navbatga
+    qo'shadi (hali parse qilmaydi). "✅ Tugatdim" bosilgach, fayllar
+    ketma-ket _run_next_queued_file() orqali ishlanadi.
+    """
+    doc = message.document
+    if not doc.file_name.lower().endswith((".txt", ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".xlsm")):
+        return await message.answer("❌ Faqat TXT, PDF yoki DOCX fayllar qabul qilinadi!")
+
+    d = await state.get_data()
+    pending = d.get("_multi_pending", [])
+
+    try:
+        file   = await message.bot.get_file(doc.file_id)
+        suffix = os.path.splitext(doc.file_name)[1].lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = tmp.name
+        await message.bot.download_file(file.file_path, tmp_path)
+    except Exception as e:
+        log.error(f"upload_files_multi_collect yuklab olish xato: {e}", exc_info=True)
+        return await message.answer(f"❌ «{doc.file_name}» yuklab olinmadi. Qayta yuboring.")
+
+    pending.append({"tmp_path": tmp_path, "file_name": doc.file_name})
+    await state.update_data(_multi_pending=pending)
+    await _del(message.bot, message.chat.id, message.message_id)
+
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text=f"✅ Tugatdim ({len(pending)} ta fayl)", callback_data="multi_files_done"))
+    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_create"))
+    await message.answer(
+        f"📎 <b>{len(pending)} ta fayl qabul qilindi:</b>\n"
+        + "\n".join(f"  • {p['file_name']}" for p in pending[-10:])
+        + "\n\nYana fayl yuborishingiz mumkin, yoki tugating 👇",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.callback_query(F.data == "multi_files_done", CreateTest.upload_files_multi)
+async def multi_files_done(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    d = await state.get_data()
+    pending = d.get("_multi_pending", [])
+    if not pending:
+        return await callback.answer("❌ Hali birorta fayl yubormadingiz!", show_alert=True)
+
+    first, *rest = pending
+    # Faqat 1 ta fayl bo'lsa — A/B tanlovisiz, oddiy bitta-test oqimi
+    is_multi = len(pending) > 1
+    await state.update_data(_multi_pending=[], _multi_queue=rest, _multi_done=[],
+                             _multi_active=is_multi)
+    await _run_next_queued_file(callback.message, state, first)
 
 
 @router.message(F.document, CreateTest.upload_file)
@@ -752,6 +812,155 @@ async def upload_file(message: Message, state: FSMContext):
         await status.edit_text("❌ Faylni o\'qishda xatolik. Boshqa fayl yoki formatni sinab ko\'ring.")
 
 
+async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, file_id: str = ""):
+    """
+    tmp_path'dagi faylni parse qilib, natijani (savollar soni,
+    belgilanmagan savollar, rasm) ko'rsatadi. upload_file (bitta fayl)
+    va _run_next_queued_file (ko'p fayl navbati) ikkalasi ham shu
+    funksiyani ishlatadi — parse mantig'i bitta joyda saqlanadi.
+    """
+    questions = parse_file(tmp_path)
+    has_img_qs = any(q.get("_has_image") for q in questions)
+    if has_img_qs:
+        await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
+    else:
+        await state.update_data(_file_name=file_name)
+        try: os.remove(tmp_path)
+        except Exception: pass
+
+    if not questions:
+        return await status.edit_text(
+            f"❌ <b>«{file_name}» faylida savollar topilmadi!</b>\n\n"
+            "Quyidagi formatlar qo\'llab-quvvatlanadi:\n"
+            "• <b>Standart:</b> <code>===A) To\'g\'ri javob</code>\n"
+            "• <b>==== + #:</b> Savol → ==== → #To\'g\'ri → ====\n"
+            "• <b>Jadval:</b> Savol | To\'g\'ri | Muqobil...\n"
+            "• <b>PDF:</b> ? savol → =Javob",
+            parse_mode="HTML",
+        )
+
+    total    = len(questions)
+    unmarked = sum(1 for q in questions if not q.get("_marked"))
+
+    img_count = sum(1 for q in questions if q.get("_img_bytes"))
+    img_in_file = 0
+    try:
+        if os.path.exists(tmp_path):
+            _ii = check_images_in_file(tmp_path)
+            img_in_file = _ii.get("count", 0)
+    except Exception:
+        img_in_file = img_count
+
+    img_upload_summary = ""
+    if img_count > 0:
+        await status.edit_text(
+            f"🖼 <b>{img_count} ta rasm test bilan ulanmoqda...</b>\n"
+            f"<i>Iltimos kuting</i>",
+            parse_mode="HTML"
+        )
+        questions, up_ok, up_fail, up_total = await _upload_images_to_channel(bot, questions)
+        if up_fail > 0:
+            img_upload_summary = (
+                f"🖼 Rasmlar: <b>{up_ok}/{up_total}</b> muvaffaqiyatli, "
+                f"<b>{up_fail}</b> ta xato bo'ldi\n"
+            )
+    elif img_in_file > 0:
+        log.info(f"Faylda {img_in_file} rasm bor, savolga bog'lanmadi")
+
+    await state.update_data(questions=questions, _file_id=file_id)
+
+    if unmarked > 0:
+        b = InlineKeyboardBuilder()
+        b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
+        b.button(text="🤖 AI bilan yechish",   callback_data="uj_ai")
+        b.button(text="📨 Adminga murojaat",   callback_data="uj_admin")
+        b.button(text="▶️ Shundayicha davom",  callback_data="uj_skip")
+        b.adjust(1)
+        img_line = ""
+        if img_count > 0:
+            img_line = f"🖼 Rasmli: <b>{img_count}</b> ta (test bilan ulandi)\n"
+        elif img_in_file > 0:
+            img_line = f"⚠️ Faylda {img_in_file} rasm bor, lekin bog\'lanmadi\n"
+        await status.edit_text(
+            f"📋 <b>«{file_name}» — {total} TA SAVOL TOPILDI</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
+            f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n"
+            + img_line + img_upload_summary +
+            f"\n<i>To\'g\'ri javob aniqlanmagan. Nima qilamiz?</i>",
+            parse_mode="HTML",
+            reply_markup=b.as_markup()
+        )
+    else:
+        if img_upload_summary:
+            await status.edit_text(img_upload_summary, parse_mode="HTML")
+        await _ask_poll_time(status, state, total)
+
+
+async def _run_next_queued_file(msg, state, next_file: dict):
+    """
+    Ko'p-fayl navbatidagi keyingi faylni ishga tushiradi.
+    next_file: {"tmp_path": str, "file_name": str}
+    """
+    status = await msg.answer(f"⏳ «{next_file['file_name']}» tahlil qilinmoqda...")
+    await state.set_state(CreateTest.upload_file)
+    try:
+        await _parse_and_present(msg.bot, status, state, next_file["tmp_path"], next_file["file_name"])
+    except Exception as e:
+        log.error(f"_run_next_queued_file xato: {e}", exc_info=True)
+        await status.edit_text(
+            f"❌ «{next_file['file_name']}» faylini o'qishda xatolik. "
+            "Keyingi faylga o'tamiz..."
+        )
+        await asyncio.sleep(1)
+        # Bu faylni "0 savol" bilan tugagan deb belgilab, davom etamiz
+        await state.update_data(questions=[], _file_name=next_file["file_name"])
+        await _ask_poll_time(status, state, 0)
+
+
+async def _ask_multi_mode(msg, state):
+    """
+    Barcha fayllar tahlil qilingandan va poll_time so'ralgandan keyin
+    chaqiriladi. Foydalanuvchidan A/B tanlovini so'raydi:
+      - Alohida  → har fayl o'z nomi bilan alohida test bo'ladi
+      - Birlashtirilgan → barcha fayl savollari bitta testga qo'shiladi
+    """
+    d    = await state.get_data()
+    done = d.get("_multi_done", [])
+    total_q = sum(len(f["questions"]) for f in done)
+    files_list = "\n".join(f"  • {f['file_name']} ({len(f['questions'])} ta savol)" for f in done)
+
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="📂 Alohida testlar",       callback_data="multimode_separate"))
+    b.row(InlineKeyboardButton(text="🔗 Bitta birlashtirilgan test", callback_data="multimode_merged"))
+    await msg.answer(
+        f"<b>✅ {len(done)} TA FAYL TAHLIL QILINDI</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{files_list}\n\n"
+        f"📊 Jami: <b>{total_q} ta savol</b>\n\n"
+        f"<b>Qanday saqlaymiz?</b>\n"
+        f"📂 <b>Alohida testlar</b> — har fayl o'z nomi bilan alohida test\n"
+        f"🔗 <b>Birlashtirilgan</b> — barchasi bitta umumiy testga\n\n"
+        f"<i>Sozlamalar (fan, qiyinlik, vaqt...) endi bir marta so'raladi\n"
+        f"va barcha testlarga qo'llaniladi.</i>",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("multimode_"))
+async def set_multi_mode(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    mode = callback.data.split("_", 1)[1]  # "separate" | "merged"
+    await state.update_data(_multi_mode=mode)
+    mode_label = "📂 Alohida testlar" if mode == "separate" else "🔗 Birlashtirilgan test"
+    await callback.message.edit_text(
+        f"{mode_label}\n\n📁 Qaysi fanga tegishli?",
+        reply_markup=subject_kb(extra_subjects=_get_user_subjects(callback.from_user.id))
+    )
+    await state.set_state(CreateTest.set_subject)
+
+
 @router.callback_query(F.data.startswith("fp_use_"), CreateTest.upload_file)
 async def fp_use_existing(callback: CallbackQuery, state: FSMContext):
     """
@@ -901,6 +1110,38 @@ async def fp_force_reparse(callback: CallbackQuery, state: FSMContext):
 
 
 async def _ask_poll_time(msg, state, q_count: int):
+    """
+    Bitta faylning savollari tayyor bo'lganda chaqiriladi.
+    Ko'p-fayl rejimida (navbatda hali fayl bo'lsa) — joriy fayl
+    natijasini saqlab, navbatdagi faylni avtomatik ishga tushiradi.
+    Navbat tugagach — barcha fayllar uchun UMUMIY "necha soniya?"
+    so'rovi (poll_time) faqat bir marta ko'rsatiladi.
+    """
+    d     = await state.get_data()
+    queue = d.get("_multi_queue", [])
+    if queue:
+        # Joriy faylning natijasini "tugagan fayllar" ro'yxatiga qo'shamiz
+        done = d.get("_multi_done", [])
+        done.append({
+            "file_name": d.get("_file_name", "Nomsiz"),
+            "questions": d.get("questions", []),
+        })
+        next_file = queue.pop(0)
+        await state.update_data(_multi_done=done, _multi_queue=queue)
+        await _run_next_queued_file(msg, state, next_file)
+        return
+
+    # Navbat bo'sh — ko'p-fayl bo'lgan bo'lsa, oxirgi faylni ham "tugagan"ga qo'shamiz
+    if d.get("_multi_active"):
+        done = d.get("_multi_done", [])
+        done.append({
+            "file_name": d.get("_file_name", "Nomsiz"),
+            "questions": d.get("questions", []),
+        })
+        await state.update_data(_multi_done=done)
+        total_all = sum(len(f["questions"]) for f in done)
+        q_count = total_all
+
     b = InlineKeyboardBuilder()
     for s in POLL_TIMES:
         b.add(InlineKeyboardButton(text=f"⏱ {s}s", callback_data=f"ptime_{s}"))
@@ -2111,6 +2352,13 @@ async def set_pt(callback: CallbackQuery, state: FSMContext):
     pt  = int(callback.data[6:])
     await state.update_data(poll_time=pt)
     ptt = f"{pt} soniya/savol" if pt else "Vaqtsiz"
+
+    d = await state.get_data()
+    if d.get("_multi_active"):
+        await callback.message.edit_text(f"⏱ <b>Savol vaqti: {ptt}</b>")
+        await _ask_multi_mode(callback.message, state)
+        return
+
     await callback.message.edit_text(
         f"⏱ <b>Savol vaqti: {ptt}</b>\n\n"
         f"📁 Qaysi fanga tegishli?",
@@ -2124,7 +2372,26 @@ async def set_pt(callback: CallbackQuery, state: FSMContext):
 # ═══════════════════════════════════════════════════════════
 
 async def _ask_title(msg, state: FSMContext, category: str, file_name: str = ""):
-    """Test nomini so'rash — qo'lda yoki fayl nomidan"""
+    """Test nomini so'rash — qo'lda yoki fayl nomidan.
+    Ko'p-fayl 'separate' rejimida title umuman so'ralmaydi — har fayl
+    o'z nomi bilan saqlanadi, shuning uchun to'g'ridan-to'g'ri
+    qiyinlik darajasiga o'tkaziladi."""
+    d = await state.get_data()
+    if d.get("_multi_active") and d.get("_multi_mode") == "separate":
+        await state.update_data(category=category)
+        await state.set_state(CreateTest.set_difficulty)
+        text = (
+            f"📁 Fan: <b>{category}</b>\n"
+            f"<i>📂 Alohida testlar — har biri o'z fayl nomi bilan saqlanadi</i>\n\n"
+            f"<b>📊 QIYINLIK DARAJASI</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        if hasattr(msg, 'edit_text'):
+            await msg.edit_text(text, parse_mode="HTML", reply_markup=difficulty_kb())
+        else:
+            await msg.answer(text, parse_mode="HTML", reply_markup=difficulty_kb())
+        return
+
     b = InlineKeyboardBuilder()
     if file_name:
         # Fayl nomidan tozalangan nom
@@ -2320,6 +2587,110 @@ async def save_test(callback: CallbackQuery, state: FSMContext):
         _save_in_progress.discard(uid)
 
 
+async def _save_one_test(callback: CallbackQuery, title: str, category: str,
+                          difficulty: str, chosen_vis: str, time_limit, poll_time,
+                          passing_score, max_attempts, questions: list,
+                          source_hash="", source_name="", source_size=0,
+                          send_summary=True):
+    """
+    Bitta test yaratadi: create_test() chaqiradi, natija xabarini
+    (+ kalit, + baza e'loni) yuboradi. _do_save_test buni bir marta
+    (oddiy/merged) yoki bir necha marta (separate) chaqiradi.
+    Qaytaradi: tid (test_id)
+    """
+    uid = callback.from_user.id
+    clean_qs = [{k: v for k, v in q.items() if not k.startswith("_")} for q in questions]
+    td = {
+        "title":         title or "Nomsiz",
+        "category":      category or "Boshqa",
+        "difficulty":    difficulty or "medium",
+        "visibility":    chosen_vis,
+        "time_limit":    time_limit or 0,
+        "poll_time":     poll_time if poll_time is not None else 30,
+        "passing_score": passing_score if passing_score is not None else 60,
+        "max_attempts":  max_attempts or 0,
+        "questions":     clean_qs,
+        "_source_file_hash": source_hash,
+        "_source_file_name": source_name,
+        "_source_file_size": source_size,
+    }
+    tid = await create_test(
+        uid, td,
+        creator_name=callback.from_user.full_name or "",
+        creator_username=callback.from_user.username or "",
+    )
+    bu   = (await callback.bot.me()).username
+    link = f"https://t.me/{bu}?start={tid}"
+    pt_t = f"{td['poll_time']}s/savol" if td.get("poll_time") else "Vaqtsiz"
+    tl_t = f"{td['time_limit']} daqiqa" if td.get("time_limit") else "Cheksiz"
+    diff_map = {
+        "easy": "🟢 Oson", "medium": "🟡 O'rtacha",
+        "hard": "🔴 Qiyin", "expert": "⚡ Ekspert"
+    }
+    diff = diff_map.get(td["difficulty"], "")
+    vis_map = {"public": "🌍 Ommaviy", "link": "🔗 Ssilka", "private": "🔒 Shaxsiy"}
+    vis  = vis_map.get(td["visibility"], "")
+
+    if send_summary:
+        qs   = td["questions"]
+        keys = (
+            f"🔑 <b>JAVOBLAR KALITI</b> — <code>{tid}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+        for i, q in enumerate(qs, 1):
+            corr = q.get("correct", "?")
+            keys += f"<b>{i}.</b> {corr}\n"
+
+        info_text = (
+            "🎉 <b>TEST MUVAFFAQIYATLI YARATILDI!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 Kod: <code>{tid}</code>\n"
+            f"🔗 Ssilka: <code>{link}</code>\n\n"
+            f"📝 Mavzu: <b>{td['title']}</b>\n"
+            f"📁 Fan: {td['category']}\n"
+            f"📊 Qiyinlik: {diff}\n"
+            f"🔒 Ko'rinish: {vis}\n"
+            f"📋 Savollar: <b>{len(qs)} ta</b>\n"
+            f"⏱ Umumiy vaqt: {tl_t}\n"
+            f"⏱ Poll vaqti: {pt_t}\n"
+            f"🎯 O'tish foizi: <b>{td['passing_score']}%</b>\n\n"
+            "👇 <b>Boshlash usulini tanlang:</b>"
+        )
+        try:
+            await callback.message.edit_text(info_text, reply_markup=test_created_kb(tid, bu))
+        except Exception:
+            await callback.message.answer(info_text, reply_markup=test_created_kb(tid, bu))
+        if len(keys) <= 4000:
+            await callback.message.answer(keys)
+    else:
+        # Ko'p-fayl 'separate' rejimida — qisqa bitta qatorli xabar
+        await callback.message.answer(
+            f"✅ <b>{td['title']}</b> — <code>{tid}</code> ({len(td['questions'])} ta savol)\n"
+            f"🔗 <code>{link}</code>",
+            parse_mode="HTML"
+        )
+
+    try:
+        from utils.baza_publisher import publish_to_baza
+        await publish_to_baza(
+            bot           = callback.bot,
+            tid           = tid,
+            title         = td["title"],
+            questions     = td["questions"],
+            creator_id    = uid,
+            creator_name  = callback.from_user.full_name or "",
+            bot_username  = bu,
+            category      = td.get("category", ""),
+            difficulty    = td.get("difficulty", "medium"),
+            passing_score = td.get("passing_score", 60),
+        )
+    except Exception as _bpe:
+        import logging
+        logging.getLogger(__name__).warning(f"Baza publish xato: {_bpe}")
+
+    return tid
+
+
 async def _do_save_test(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
     chosen_vis = callback.data[4:]
@@ -2346,101 +2717,60 @@ async def _do_save_test(callback: CallbackQuery, state: FSMContext):
             return
     # ━━━━━━━━━━━━━━━━━━━━━━━━
     d = await state.get_data()
-    # Savollardan vaqtinchalik (_ bilan boshlanuvchi) maydonlarni tozalaymiz
-    # Lekin "photo" va "image" qoladi (web_test rasmni ko'rsatishi uchun)
-    raw_qs = d.get("questions", [])
-    clean_qs = []
-    for q in raw_qs:
-        cq = {k: v for k, v in q.items() if not k.startswith("_")}
-        clean_qs.append(cq)
-    td = {
-        "title":         d.get("title", "Nomsiz"),
-        "category":      d.get("category", "Boshqa"),
-        "difficulty":    d.get("difficulty", "medium"),
-        "visibility":    chosen_vis,
-        "time_limit":    d.get("time_limit", 0),
-        "poll_time":     d.get("poll_time", 30),
-        "passing_score": d.get("passing_score", 60),
-        "max_attempts":  d.get("max_attempts", 0),
-        "questions":     clean_qs,
-        # Fayl-tanish uchun — agar shu test fayldan yaratilgan bo'lsa
-        "_source_file_hash": d.get("_source_file_hash", ""),
-        "_source_file_name": d.get("_source_file_name", ""),
-        "_source_file_size": d.get("_source_file_size", 0),
-    }
-    tid  = await create_test(
-        callback.from_user.id, td,
-        creator_name=callback.from_user.full_name or "",
-        creator_username=callback.from_user.username or "",
-    )
-    bu   = (await callback.bot.me()).username
-    link = f"https://t.me/{bu}?start={tid}"
-    pt_t = f"{td['poll_time']}s/savol" if td.get("poll_time") else "Vaqtsiz"
-    tl_t = f"{td['time_limit']} daqiqa" if td.get("time_limit") else "Cheksiz"
-    diff_map = {
-        "easy": "🟢 Oson", "medium": "🟡 O'rtacha",
-        "hard": "🔴 Qiyin", "expert": "⚡ Ekspert"
-    }
-    diff = diff_map.get(td["difficulty"], "")
-    vis_map = {"public": "🌍 Ommaviy", "link": "🔗 Ssilka", "private": "🔒 Shaxsiy"}
-    vis  = vis_map.get(td["visibility"], "")
-
-    await state.clear()
-
-    # Kalit javoblar matni
-    qs   = td["questions"]
-    keys = (
-        f"🔑 <b>JAVOBLAR KALITI</b> — <code>{tid}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    )
-    for i, q in enumerate(qs, 1):
-        corr = q.get("correct", "?")
-        keys += f"<b>{i}.</b> {corr}\n"
-
-    # Test haqida to'liq ma'lumot + kalit + tugmalar
-    info_text = (
-        "🎉 <b>TEST MUVAFFAQIYATLI YARATILDI!</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 Kod: <code>{tid}</code>\n"
-        f"🔗 Ssilka: <code>{link}</code>\n\n"
-        f"📝 Mavzu: <b>{td['title']}</b>\n"
-        f"📁 Fan: {td['category']}\n"
-        f"📊 Qiyinlik: {diff}\n"
-        f"🔒 Ko'rinish: {vis}\n"
-        f"📋 Savollar: <b>{len(qs)} ta</b>\n"
-        f"⏱ Umumiy vaqt: {tl_t}\n"
-        f"⏱ Poll vaqti: {pt_t}\n"
-        f"🎯 O'tish foizi: <b>{td['passing_score']}%</b>\n\n"
-        "👇 <b>Boshlash usulini tanlang:</b>"
+    common = dict(
+        category=d.get("category", "Boshqa"), difficulty=d.get("difficulty", "medium"),
+        chosen_vis=chosen_vis, time_limit=d.get("time_limit", 0),
+        poll_time=d.get("poll_time", 30), passing_score=d.get("passing_score", 60),
+        max_attempts=d.get("max_attempts", 0),
     )
 
-    try:
-        await callback.message.edit_text(info_text, reply_markup=test_created_kb(tid, bu))
-    except Exception:
-        await callback.message.answer(info_text, reply_markup=test_created_kb(tid, bu))
-
-    # Kalitni alohida xabar sifatida yuborish
-    if len(keys) <= 4000:
-        await callback.message.answer(keys)
-
-    # ── Baza guruhiga e'lon qilish ──
-    try:
-        from utils.baza_publisher import publish_to_baza
-        await publish_to_baza(
-            bot           = callback.bot,
-            tid           = tid,
-            title         = td["title"],
-            questions     = td["questions"],
-            creator_id    = uid,
-            creator_name  = callback.from_user.full_name or "",
-            bot_username  = bu,
-            category      = td.get("category", ""),
-            difficulty    = td.get("difficulty", "medium"),
-            passing_score = td.get("passing_score", 60),
+    if d.get("_multi_active") and d.get("_multi_mode") == "separate":
+        # ── N ta fayl → N ta alohida test, umumiy sozlamalar bilan ──
+        done = d.get("_multi_done", [])
+        await callback.message.edit_text(
+            f"⏳ <b>{len(done)} ta test yaratilmoqda...</b>", parse_mode="HTML"
         )
-    except Exception as _bpe:
-        import logging
-        logging.getLogger(__name__).warning(f"Baza publish xato: {_bpe}")
+        created = []
+        for f in done:
+            import re as _re
+            title = f["file_name"]
+            for ext in ('.docx', '.doc', '.pdf', '.txt', '.xlsx', '.xls'):
+                title = title.replace(ext, '').replace(ext.upper(), '')
+            title = _re.sub(r'[_\-]+', ' ', title).strip()
+            title = _re.sub(r'\s+', ' ', title).strip() or "Nomsiz"
+            tid = await _save_one_test(
+                callback, title=title, questions=f["questions"],
+                send_summary=False, **common,
+            )
+            created.append((title, tid, len(f["questions"])))
+
+        await state.clear()
+        summary = "\n".join(f"  • {t} — <code>{i}</code> ({n} ta savol)" for t, i, n in created)
+        await callback.message.answer(
+            f"🎉 <b>{len(created)} TA TEST YARATILDI!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n{summary}",
+            parse_mode="HTML"
+        )
+        return
+
+    # ── Oddiy (bitta fayl) yoki 'merged' (birlashtirilgan) — bitta test ──
+    raw_qs = d.get("questions", [])
+    if d.get("_multi_active") and d.get("_multi_mode") == "merged":
+        # _multi_done'da barcha N ta fayl (oxirgisi ham) allaqachon bor —
+        # ularning savollarini bitta ro'yxatga birlashtiramiz
+        done = d.get("_multi_done", [])
+        raw_qs = []
+        for f in done:
+            raw_qs.extend(f["questions"])
+
+    await _save_one_test(
+        callback, title=d.get("title", "Nomsiz"), questions=raw_qs,
+        source_hash=d.get("_source_file_hash", ""),
+        source_name=d.get("_source_file_name", ""),
+        source_size=d.get("_source_file_size", 0),
+        send_summary=True, **common,
+    )
+    await state.clear()
 
 
 @router.callback_query(F.data == "cancel_create")
