@@ -1203,9 +1203,23 @@ async def skip_q_cb(callback: CallbackQuery, state: FSMContext):
 async def inline_pause_menu(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     uid = callback.from_user.id
+    d = await state.get_data()
+    # Bot restartidan keyin eski inline Pauza tugmasi bosilsa, bo'sh
+    # FSM bilan yangi "paused" sessiya yaratib qo'ymaslik kerak.
+    if not d.get("qs") or not d.get("test"):
+        await state.clear()
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await callback.bot.send_message(
+            uid,
+            "🏠 <b>Asosiy menyu</b>\n\nEski test sessiyasi topilmadi. Yangi testni menyudan boshlashingiz mumkin.",
+            reply_markup=main_kb(uid, "private")
+        )
+        return
     _cancel_timer(uid)
     await state.set_state(TestSolving.paused)
-    d   = await state.get_data()
     tot = len(d.get("qs", []))
     idx = d.get("idx", 0)
     try:
@@ -1223,8 +1237,20 @@ async def resume_inline(callback: CallbackQuery, state: FSMContext):
     uid    = callback.from_user.id
     cid    = callback.message.chat.id if callback.message else uid
     msg_id = callback.message.message_id
+    d = await state.get_data()
+    if not d.get("qs") or not d.get("test"):
+        await state.clear()
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await callback.bot.send_message(
+            uid,
+            "🏠 <b>Asosiy menyu</b>\n\nEski test sessiyasi topilmadi. Yangi testni menyudan boshlashingiz mumkin.",
+            reply_markup=main_kb(uid, "private")
+        )
+        return
     await state.set_state(TestSolving.answering)
-    d   = await state.get_data()
     qs  = d.get("qs", [])
     idx = d.get("idx", 0)
     if idx < len(qs):
@@ -1320,7 +1346,7 @@ async def _finish_inline(bot, cid, state, d):
         result_text = "⚠️ <b>Test yarim qoldirildi</b>\n\n" + result_text
 
     try:
-        kb = result_kb(tid, rid)
+        kb = result_kb(tid, rid, include_home=False)
     except Exception as e:
         log.error(f"_finish_inline result_kb xato: {e}")
         kb = None
@@ -1376,6 +1402,17 @@ async def _finish_inline(bot, cid, state, d):
                 await bot.send_message(cid, result_text)
             except Exception as e2:
                 log.error(f"_finish_inline fallback xato: {e2}")
+
+    # Test tugagach pastdagi ReplyKeyboard doimiy asosiy menyuga qaytadi.
+    try:
+        await bot.send_message(
+            cid,
+            "🏠 <b>Asosiy menyu</b> 👇",
+            reply_markup=main_kb(uid, "private"),
+            protect_content=True
+        )
+    except Exception as e:
+        log.warning(f"_finish_inline main menu xato: {e}")
 
 
 # ── Referal tekshirish callback ──────────────────────────────

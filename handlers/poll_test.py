@@ -598,6 +598,31 @@ async def cancel_poll(callback: CallbackQuery, state: FSMContext):
         )
 
 
+# ── STALE REPLY KEYBOARD GUARD ────────────────────────────────
+@router.message(F.text.in_({"⏸ Pauza", "▶️ Davom etish", "⏹ Tugatish"}))
+async def stale_poll_control(message, state: FSMContext):
+    """
+    Bot qayta ishga tushganda eski ReplyKeyboard Telegram klientida qolishi mumkin,
+    ammo FSM sessiyasi xotiradan yo'qoladi. Bunday xabar hech qachon jim qolmasin:
+    foydalanuvchini xavfsiz tarzda asosiy menyuga qaytaramiz.
+    Active/paused poll uchun yuqoridagi state-specific handlerlar ishlaydi.
+    """
+    cur = await state.get_state()
+    if cur in (PollTest.active.state, PollTest.paused.state):
+        return
+    uid = message.from_user.id
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await state.clear()
+    await message.bot.send_message(
+        message.chat.id,
+        "🏠 <b>Asosiy menyu</b>\n\nEski test boshqaruv tugmasi tozalandi. Yangi testni menyudan boshlashingiz mumkin.",
+        reply_markup=main_kb(uid, "private")
+    )
+
+
 # ── Majburiy to'xtatib poll boshlaш ──────────────────────────
 @router.callback_query(F.data.startswith("force_start_poll_"))
 async def force_start_poll(callback: CallbackQuery, state: FSMContext):
@@ -695,9 +720,12 @@ async def _finish_poll(bot, cid, state, d):
             f"• Yoki quyidagi tugmani bosing 👇"
         )
         await bot.send_message(cid, demo_text, reply_markup=b.as_markup())
+        await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"))
         return
 
-    await bot.send_message(cid, result_text, reply_markup=result_kb(tid, rid))
+    await bot.send_message(cid, result_text, reply_markup=result_kb(tid, rid, include_home=False))
+    # Test tugagach ReplyKeyboard yana doimiy asosiy menyuga qaytadi.
+    await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"))
 
 
 # ── ReplyKeyboard tugmalari (pastdagi tugmalar) ───────────────
