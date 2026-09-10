@@ -6,7 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 from utils.db import get_leaderboard, get_all_tests
-from utils.ram_cache import get_test_meta, get_global_leaderboard, get_group_leaderboard
+from utils.ram_cache import get_test_meta, get_global_leaderboard, get_group_leaderboard, get_daily_user_leaderboard, get_daily_group_leaderboard, get_daily_test_leaderboard, daily_seconds_left
 
 log    = logging.getLogger(__name__)
 router = Router()
@@ -20,6 +20,32 @@ async def lb_msg(message: Message):
 async def lb_cb(callback: CallbackQuery):
     await callback.answer()
     await _show_global_lb(callback.message, edit=True)
+
+@router.callback_query(F.data == "daily_leaderboard")
+async def daily_lb_cb(callback: CallbackQuery):
+    await callback.answer()
+    users=get_daily_user_leaderboard()
+    tests=get_daily_test_leaderboard()
+    left=daily_seconds_left()
+    h,left2=divmod(left,3600); m=left2//60
+    text=f"📅 <b>KUNLIK REYTING</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n⏳ Yangilanishgacha: {h:02d}:{m:02d}\n\n"
+    text += "👤 <b>USERLAR TOP 20</b>\n"
+    for i,u in enumerate(users,1): text += f"{i}. <b>{u.get('name','?')}</b> — {u.get('score',0):g}% ({u.get('attempts',0)} test)\n"
+    text += "\n📚 <b>TESTLAR TOP 20</b>\n"
+    for i,t in enumerate(tests,1): text += f"{i}. <b>{t.get('title','?')}</b> — 👥{t.get('solves',0)} | ⭐{t.get('avg_score',0):g}%\n"
+    b=InlineKeyboardBuilder(); b.row(InlineKeyboardButton(text="👥 Kunlik guruh",callback_data="daily_group_leaderboard")); b.row(InlineKeyboardButton(text="⬅️ Asosiy reyting",callback_data="leaderboard")); b.row(InlineKeyboardButton(text="🏠 Menyu",callback_data="main_menu"))
+    try: await callback.message.edit_text(text,reply_markup=b.as_markup())
+    except TelegramBadRequest: await callback.message.answer(text,reply_markup=b.as_markup())
+
+@router.callback_query(F.data == "daily_group_leaderboard")
+async def daily_group_lb_cb(callback: CallbackQuery):
+    await callback.answer()
+    rows=get_daily_group_leaderboard(); left=daily_seconds_left(); h,rem=divmod(left,3600); m=rem//60
+    text=f"👥 <b>KUNLIK GURUH REYTINGI</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n⏳ {h:02d}:{m:02d} qoldi\n\n"
+    for i,u in enumerate(rows,1): text+=f"{i}. <b>{u.get('name','?')}</b> — {u.get('score',0):g}% ({u.get('correct',0)}/{u.get('total',0)})\n"
+    b=InlineKeyboardBuilder(); b.row(InlineKeyboardButton(text="⬅️ Kunlik reyting",callback_data="daily_leaderboard")); b.row(InlineKeyboardButton(text="🏆 Asosiy reyting",callback_data="leaderboard"))
+    try: await callback.message.edit_text(text,reply_markup=b.as_markup())
+    except TelegramBadRequest: await callback.message.answer(text,reply_markup=b.as_markup())
 
 @router.callback_query(F.data == "group_leaderboard")
 async def group_lb_cb(callback: CallbackQuery):
@@ -70,6 +96,7 @@ async def _show_global_lb(msg, edit=False):
         bar    = "█" * filled + "░" * (10 - filled)
         text  += f"{medal} <b>{name}</b>\n   <code>[{bar}]</code> {avg}% | {total} test\n\n"
 
+    b.row(InlineKeyboardButton(text="📅 Kunlik reyting", callback_data="daily_leaderboard"))
     b.row(InlineKeyboardButton(text="👥 Guruh reytingi", callback_data="group_leaderboard"))
     b.row(InlineKeyboardButton(text="📋 Test reytinglari", callback_data="lb_tests_list"))
     b.row(InlineKeyboardButton(text="🏠 Menyu", callback_data="main_menu"))
