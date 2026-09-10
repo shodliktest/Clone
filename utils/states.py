@@ -13,6 +13,7 @@ class PollTest(StatesGroup):
 class CreateTest(StatesGroup):
     choose_method  = State()
     waiting_polls  = State()
+    waiting_regular_polls = State()  # Anonim viktorina — har savoldan keyin javob so'raladi
     set_poll_time  = State()
     upload_file    = State()
     upload_files_multi = State()  # Ko'p fayl: fayllar yuborilyapti, navbatga qo'yiladi
