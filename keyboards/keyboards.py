@@ -190,7 +190,8 @@ def result_kb(tid, rid, include_home=True):
             )
         ),
     )
-    b.row(InlineKeyboardButton(text="🏠 Bosh sahifa", callback_data="main_menu"))
+    if include_home:
+        b.row(InlineKeyboardButton(text="🏠 Bosh sahifa", callback_data="main_menu"))
     return b.as_markup()
 
 
