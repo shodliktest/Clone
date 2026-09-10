@@ -3,6 +3,7 @@ import os, re, logging, tempfile, asyncio
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
 from aiogram.fsm.context import FSMContext
+from aiogram.filters import StateFilter
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
 
@@ -280,6 +281,7 @@ async def create_start(message: Message, state: FSMContext):
     b.row(InlineKeyboardButton(text="📁 Fayl (TXT/PDF/DOCX)", callback_data="method_file"))
     b.row(InlineKeyboardButton(text="💬 Chat orqali (matn)",  callback_data="method_text"))
     b.row(InlineKeyboardButton(text="📊 QuizBot forward",     callback_data="method_poll"))
+    b.row(InlineKeyboardButton(text="📋 Anonim viktorina forward", callback_data="method_regular_poll"))
     b.row(InlineKeyboardButton(text="❌ Bekor",               callback_data="cancel_create"))
     await message.answer(
         "<b>➕ TEST YARATISH</b>\n"
@@ -289,6 +291,9 @@ async def create_start(message: Message, state: FSMContext):
         "   ikki rejimda ishlaydi!\n\n"
         "📊 <b>QuizBotdan forward</b> — @QuizBot savollarini\n"
         "   uzating. TXT yuklab olish + Poll rejimi!\n\n"
+        "📋 <b>Anonim viktorina forward</b> — to'g'ri javob\n"
+        "   Telegram tomonidan berilmagani uchun, har\n"
+        "   savoldan keyin javobni o'zingiz belgilaysiz.\n\n"
         "<i>💡 Namunani ko'rish uchun turni tanlang</i>",
         parse_mode="HTML",
         reply_markup=b.as_markup()
@@ -2197,6 +2202,108 @@ async def method_poll(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CreateTest.waiting_polls)
 
 
+@router.callback_query(F.data == "method_regular_poll", CreateTest.choose_method)
+@router.callback_query(F.data == "method_regular_poll", CreateTest.choose_method)
+async def method_regular_poll(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(questions=[], poll_time=30)
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="✅ Tayyor", callback_data="finish_polls"))
+    b.row(InlineKeyboardButton(text="❌ Bekor",  callback_data="cancel_create"))
+    await callback.message.edit_text(
+        "<b>📋 ANONIM VIKTORINA FORWARD</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "1️⃣ Anonim viktorina (Poll) savollarini shu yerga\n"
+        "   forward qiling — nechta bo'lsa ham\n"
+        "2️⃣ Rasmli savol bo'lsa — avval rasmni, keyin\n"
+        "   poll'ni forward qiling\n"
+        "3️⃣ Hammasi yuborilgach — <b>✅ Tayyor</b> bosing\n\n"
+        "<i>💡 To'g'ri javob Telegram tomonidan berilmagani\n"
+        "uchun, tugagach barcha savollarni bittada\n"
+        "seryalik yoki AI bilan belgilaysiz — xuddi fayldan\n"
+        "yuklaganda bo'lgani kabi.</i>",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
+    )
+    uid = callback.from_user.id
+    _poll_progress[uid] = callback.message.message_id
+    _poll_count[uid] = 0
+    _photo_registry.pop(uid, None)
+    _photo_registry_lock.pop(uid, None)
+    await state.set_state(CreateTest.waiting_regular_polls)
+
+
+@router.message(F.poll, CreateTest.waiting_regular_polls)
+async def catch_regular_poll(message: Message, state: FSMContext):
+    """
+    Anonim viktorina (regular poll): Telegram to'g'ri javobni bermaydi,
+    shuning uchun savol '_marked: False' bilan (belgilanmagan holda)
+    to'g'ridan-to'g'ri questions ro'yxatiga qo'shiladi — hech qanday
+    to'xtash yoki tugma yo'q. Nechta forward qilinsa ham (masalan 100 ta),
+    catch_poll (Quiz)dagi bilan bir xil debounce (_flush_polls) orqali
+    faqat bitta progress xabari ko'rsatiladi. "✅ Tayyor" bosilgach,
+    barcha belgilanmagan savollar bittada seryalik/AI/admin/skip
+    oqimiga tushadi (fayl yuklashdagi kabi).
+    """
+    import re as _re
+    p = message.poll
+    lts = ["A)", "B)", "C)", "D)", "E)", "F)"]
+    opts = [f"{lts[i]} {op.text}" for i, op in enumerate(p.options)]
+    clean_q = _re.sub(r"^\[\d+/\d+\]\s*", "", p.question).strip()
+    uid = message.from_user.id
+
+    await asyncio.sleep(0.12)  # rasm bilan bir xil pairing oynasi
+
+    async with _get_poll_lock(uid):
+        photo_id = None
+        reg = _photo_registry.get(uid, {})
+        candidates = [mid for mid in reg if mid < message.message_id]
+        if candidates:
+            photo_mid = min(candidates)
+            fut = reg.pop(photo_mid)
+            try:
+                photo_id = await asyncio.wait_for(fut, timeout=25.0)
+            except Exception as e:
+                log.error("catch_regular_poll: photo pairing xato: %s", e)
+                photo_id = None
+            _cleanup_photo_registry(uid)
+
+        d = await state.get_data()
+        qs = list(d.get("questions", []))
+        new_q = {
+            "type": "multiple_choice",
+            "question": clean_q,
+            "options": opts,
+            "correct": "",
+            "explanation": "",
+            "points": 1,
+            "_marked": False,
+        }
+        if photo_id:
+            new_q["photo"] = photo_id
+            # E'TIBOR: _has_image qasddan qo'yilmagan. Bu maydon butun tizimda
+            # "savol matni rasm ICHIDA, Vision bilan o'qish kerak" degani.
+            # Bu yerda savol matni allaqachon Telegram poll'dan to'liq keladi —
+            # rasm faqat QO'SHIMCHA. Shu sabab bu savol oddiy matnli
+            # "belgilanmagan savol" sifatida ko'riladi (seryalik bilan
+            # belgilanadi, yoki belgilanmasdan qoldirilib keyin web'da
+            # qo'lda tahrirlanadi) — AI Vision yo'liga tushmaydi.
+
+        qs.append(new_q)
+        await state.update_data(questions=qs)
+        count = len(qs)
+
+    await _del(message.bot, message.chat.id, message.message_id)
+
+    _poll_count[uid] = count
+    old_task = _poll_debounce.pop(uid, None)
+    if old_task:
+        old_task.cancel()
+    _poll_debounce[uid] = asyncio.create_task(
+        _flush_polls(message.bot, message.chat.id, uid)
+    )
+
+
 # Kanalga rasm yuborishda ham flood control'ga uchramaslik uchun,
 # _upload_images_to_channel bilan bir xil minimal oraliq va uid bo'yicha
 # oxirgi yuborish vaqtini kuzatamiz (global — botning o'zi bitta chatga
@@ -2204,7 +2311,7 @@ async def method_poll(callback: CallbackQuery, state: FSMContext):
 _last_channel_send_ts = 0.0
 
 
-@router.message(F.photo, CreateTest.waiting_polls)
+@router.message(F.photo, StateFilter(CreateTest.waiting_polls, CreateTest.waiting_regular_polls))
 async def catch_poll_photo(message: Message, state: FSMContext):
     """QuizBot forward rasmi: avval ro'yxatga olinadi, keyin storage kanalga yuklanadi.
 
@@ -2337,12 +2444,42 @@ async def catch_poll(message: Message, state: FSMContext):
     )
 
 
-@router.callback_query(F.data == "finish_polls", CreateTest.waiting_polls)
+@router.callback_query(F.data == "finish_polls", StateFilter(CreateTest.waiting_polls, CreateTest.waiting_regular_polls))
 async def finish_polls(callback: CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
     d = await state.get_data()
-    if not d.get("questions"):
+    questions = d.get("questions", [])
+    if not questions:
         return await callback.answer("❌ Hali savol yo'q!", show_alert=True)
     await callback.answer()
+
+    unmarked = sum(1 for q in questions if not q.get("_marked", True))
+    if unmarked > 0:
+        # Belgilanmagan savollar bor — fayl oqimidagi kabi seryalik/AI/admin/skip
+        # so'raladi. State'ni 'upload_file'ga o'tkazamiz, chunki uj_* handlerlar
+        # shu holatga bog'langan — bir xil mexanizmni qayta ishlatamiz.
+        await state.set_state(CreateTest.upload_file)
+        total = len(questions)
+        b = InlineKeyboardBuilder()
+        b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
+        b.button(text="🤖 AI bilan yechish",   callback_data="uj_ai")
+        b.button(text="📨 Adminga murojaat",   callback_data="uj_admin")
+        b.button(text="▶️ Shundayicha davom",  callback_data="uj_skip")
+        b.adjust(1)
+        img_count = sum(1 for q in questions if q.get("photo"))
+        img_line = f"🖼 Rasmli: <b>{img_count}</b> ta (test bilan ulandi)\n" if img_count else ""
+        await callback.message.edit_text(
+            f"📋 <b>{total} TA SAVOL QABUL QILINDI</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
+            f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n"
+            + img_line +
+            f"\n<i>To'g'ri javob aniqlanmagan. Nima qilamiz?</i>",
+            parse_mode="HTML",
+            reply_markup=b.as_markup()
+        )
+        return
+
     b = InlineKeyboardBuilder()
     for s in POLL_TIMES:
         b.add(InlineKeyboardButton(text=f"⏱ {s}s", callback_data=f"ptime_{s}"))
