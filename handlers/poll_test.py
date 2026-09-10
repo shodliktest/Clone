@@ -526,6 +526,15 @@ async def _poll_timeout(bot, cid, state, expected_idx, wait_sec):
 
 @router.callback_query(F.data == "pause_poll", PollTest.active)
 async def pause_poll(callback: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    if not d.get("qs") or not d.get("test"):
+        log.info("STALE_INLINE_CONTROL uid=%s data=pause_poll state=active_without_data -> main_menu", callback.from_user.id)
+        await callback.answer("Test sessiyasi topilmadi.")
+        await state.clear()
+        try: await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception: pass
+        await callback.bot.send_message(callback.from_user.id, "🏠 <b>Asosiy menyu</b>", reply_markup=main_kb(callback.from_user.id, "private"))
+        return
     await callback.answer("⏸")
     cid = callback.message.chat.id if callback.message and callback.message.chat else callback.from_user.id
     _cancel_timer(cid)
@@ -541,6 +550,15 @@ async def pause_poll(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "resume_poll", PollTest.paused)
 async def resume_poll(callback: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    if not d.get("qs") or not d.get("test"):
+        log.info("STALE_INLINE_CONTROL uid=%s data=resume_poll state=paused_without_data -> main_menu", callback.from_user.id)
+        await callback.answer("Test sessiyasi topilmadi.")
+        await state.clear()
+        try: await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception: pass
+        await callback.bot.send_message(callback.from_user.id, "🏠 <b>Asosiy menyu</b>", reply_markup=main_kb(callback.from_user.id, "private"))
+        return
     await callback.answer("▶️")
     await state.set_state(PollTest.active)
     cid = callback.message.chat.id if callback.message and callback.message.chat else callback.from_user.id
@@ -596,31 +614,6 @@ async def cancel_poll(callback: CallbackQuery, state: FSMContext):
             cid, "❌ <b>Test to'xtatildi.</b>",
             reply_markup=main_kb(uid, "private")
         )
-
-
-# ── STALE REPLY KEYBOARD GUARD ────────────────────────────────
-@router.message(F.text.in_({"⏸ Pauza", "▶️ Davom etish", "⏹ Tugatish"}))
-async def stale_poll_control(message, state: FSMContext):
-    """
-    Bot qayta ishga tushganda eski ReplyKeyboard Telegram klientida qolishi mumkin,
-    ammo FSM sessiyasi xotiradan yo'qoladi. Bunday xabar hech qachon jim qolmasin:
-    foydalanuvchini xavfsiz tarzda asosiy menyuga qaytaramiz.
-    Active/paused poll uchun yuqoridagi state-specific handlerlar ishlaydi.
-    """
-    cur = await state.get_state()
-    if cur in (PollTest.active.state, PollTest.paused.state):
-        return
-    uid = message.from_user.id
-    try:
-        await message.delete()
-    except Exception:
-        pass
-    await state.clear()
-    await message.bot.send_message(
-        message.chat.id,
-        "🏠 <b>Asosiy menyu</b>\n\nEski test boshqaruv tugmasi tozalandi. Yangi testni menyudan boshlashingiz mumkin.",
-        reply_markup=main_kb(uid, "private")
-    )
 
 
 # ── Majburiy to'xtatib poll boshlaш ──────────────────────────
@@ -773,9 +766,21 @@ async def reply_cancel_poll(message, state: FSMContext):
     from config import ADMIN_IDS
     from aiogram.types import ReplyKeyboardRemove
     cur = await state.get_state()
-    if cur not in (PollTest.active.state, PollTest.paused.state):
-        return
     uid = message.from_user.id
+    if cur not in (PollTest.active.state, PollTest.paused.state):
+        # Telegram klientida eski ReplyKeyboard qolgan bo'lsa, hech qachon jim qolmaymiz.
+        log.info("STALE_REPLY_CONTROL uid=%s text=%r state=%r -> main_menu", uid, message.text, cur)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await state.clear()
+        await message.bot.send_message(
+            message.chat.id,
+            "🏠 <b>Asosiy menyu</b>\n\nEski test boshqaruv tugmasi tozalandi. Yangi testni menyudan boshlashingiz mumkin.",
+            reply_markup=main_kb(uid, "private")
+        )
+        return
     d   = await state.get_data()
     if uid != d.get("uid", uid) and uid not in ADMIN_IDS:
         return await message.answer("🚫 Faqat siz boshlagan testni to'xtata olasiz!")
@@ -803,3 +808,70 @@ async def reply_cancel_poll(message, state: FSMContext):
             cid, "❌ <b>Test to'xtatildi.</b>",
             reply_markup=main_kb(uid, "private")
         )
+
+
+# ── STALE REPLY KEYBOARD GUARD (HAR DOIM ENG OXIRIDA) ─────────
+# Muhim: bu handler active/paused state handlerlaridan OLDIN turmasligi kerak.
+# Aks holda F.text mos kelgani uchun dispatcher shu yerda to'xtab, haqiqiy
+# Pauza/Davom etish handleriga umuman yetib bormaydi.
+@router.message(F.text.in_({"⏸ Pauza", "▶️ Davom etish", "⏹ Tugatish"}))
+async def stale_poll_control(message, state: FSMContext):
+    cur = await state.get_state()
+    if cur in (PollTest.active.state, PollTest.paused.state):
+        # Normal state-specific handlerlar bundan oldin ishlashi kerak.
+        return
+    uid = message.from_user.id
+    log.info("STALE_REPLY_CONTROL uid=%s text=%r state=%r -> main_menu", uid, message.text, cur)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await state.clear()
+    await message.bot.send_message(
+        message.chat.id,
+        "🏠 <b>Asosiy menyu</b>\n\nEski test boshqaruv tugmasi tozalandi. Yangi testni menyudan boshlashingiz mumkin.",
+        reply_markup=main_kb(uid, "private")
+    )
+
+
+# ── STALE INLINE CALLBACK GUARDS ───────────────────────────────
+# Bot restartidan keyin eski inline tugmalar ham jim qolmasin.
+@router.callback_query(F.data == "pause_poll")
+async def stale_pause_poll_callback(callback: CallbackQuery, state: FSMContext):
+    cur = await state.get_state()
+    d = await state.get_data()
+    if cur == PollTest.active.state and d.get("qs") and d.get("test"):
+        # Bu holatga yuqoridagi state-specific handler javob beradi.
+        return
+    log.info("STALE_INLINE_CONTROL uid=%s data=%r state=%r -> main_menu", callback.from_user.id, callback.data, cur)
+    await callback.answer("Test sessiyasi tugagan. Asosiy menyuga qaytdingiz.")
+    await state.clear()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.bot.send_message(
+        callback.from_user.id,
+        "🏠 <b>Asosiy menyu</b>\n\nEski test sessiyasi topilmadi.",
+        reply_markup=main_kb(callback.from_user.id, "private")
+    )
+
+
+@router.callback_query(F.data == "resume_poll")
+async def stale_resume_poll_callback(callback: CallbackQuery, state: FSMContext):
+    cur = await state.get_state()
+    d = await state.get_data()
+    if cur == PollTest.paused.state and d.get("qs") and d.get("test"):
+        return
+    log.info("STALE_INLINE_CONTROL uid=%s data=%r state=%r -> main_menu", callback.from_user.id, callback.data, cur)
+    await callback.answer("Test sessiyasi tugagan. Asosiy menyuga qaytdingiz.")
+    await state.clear()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.bot.send_message(
+        callback.from_user.id,
+        "🏠 <b>Asosiy menyu</b>\n\nEski test sessiyasi topilmadi.",
+        reply_markup=main_kb(callback.from_user.id, "private")
+    )
