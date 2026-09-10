@@ -374,6 +374,15 @@ async def save_result(user_id, test_id, result, via_link=False):
     """
     rid = ram.save_result_to_ram(user_id, test_id, result, via_link=via_link)
 
+    # 24 soatlik RAM reytinglari
+    try:
+        user_name = (ram.get_user(user_id) or {}).get("name", f"User {user_id}")
+        ram.update_daily_user(str(user_id), user_name, result.get("percentage", 0))
+        meta0 = ram.get_test_meta(test_id) or {}
+        ram.update_daily_test(test_id, meta0.get("title", test_id), result.get("percentage", 0))
+    except Exception as e:
+        log.warning(f"daily leaderboard update xato: {e}")
+
     # Test meta statistika yangilash
     meta = ram.get_test_meta(test_id)
     if meta:
