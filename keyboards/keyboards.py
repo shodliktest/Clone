@@ -169,7 +169,7 @@ def test_created_kb(tid, bot_username=""):
     return b.as_markup()
 
 
-def result_kb(tid, rid):
+def result_kb(tid, rid, include_home=True):
     from handlers.webauth import WEBAPP_URL as _WU
     _web = f"{_WU}/web_test.html?id={tid}"
     b = InlineKeyboardBuilder()
