@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import tempfile
+import asyncio
 
 log = logging.getLogger(__name__)
 
@@ -301,6 +302,42 @@ def _resolve_correct_idx(q: dict, opts: list) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════
+# FLOOD CONTROL HIMOYASI
+# ═══════════════════════════════════════════════════════════════
+# Baza guruhiga ketma-ket bir necha test e'lon qilinganda (masalan
+# ko'p-fayl 'separate' rejimida N ta test), har biri 2-3 ta Telegram
+# chaqiruv qiladi — himoyasiz bo'lsa flood control tez ushlaydi va
+# fayl guruhga umuman yuborilmay qoladi. Shu sabab:
+#   1) har alohida chaqiruv _send_with_retry orqali — TelegramRetryAfter
+#      chiqsa Telegram aytgan vaqtni kutib qayta urinadi;
+#   2) publish_to_baza chaqiruvlarining O'ZI orasida ham global lock +
+#      minimal interval bor — N ta test ketma-ket saqlansa ham,
+#      guruhga yuborish avtomatik ravishda sekinlashtiriladi.
+
+_baza_publish_lock = asyncio.Lock()
+_last_baza_publish_ts = 0.0
+_BAZA_MIN_INTERVAL = 2.5  # bitta publish_to_baza ~3 ta chaqiruv qiladi, shu sabab kattaroq oraliq
+
+async def _send_with_retry(coro_fn, *args, max_attempts: int = 5, **kwargs):
+    """coro_fn(*args, **kwargs) ni chaqiradi; TelegramRetryAfter chiqsa
+    kutib qayta urinadi. Muvaffaqiyatli natijani qaytaradi."""
+    from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await coro_fn(*args, **kwargs)
+        except TelegramRetryAfter as e:
+            wait = e.retry_after + 1
+            log.warning(f"baza_publisher: flood control, {wait}s kutilmoqda (urinish {attempt}/{max_attempts})")
+            await asyncio.sleep(wait)
+        except TelegramNetworkError as e:
+            log.warning(f"baza_publisher: tarmoq xatosi (urinish {attempt}/{max_attempts}): {e}")
+            await asyncio.sleep(min(2 * attempt, 10))
+    # Oxirgi urinish — xato bo'lsa chaqiruvchiga chiqib ketadi (try/except bilan qamralgan)
+    return await coro_fn(*args, **kwargs)
+
+
+# ═══════════════════════════════════════════════════════════════
 # ASOSIY FUNKSIYA
 # ═══════════════════════════════════════════════════════════════
 
@@ -330,6 +367,16 @@ async def publish_to_baza(
     if not gid:
         log.info("BAZA_GROUP_ID yo'q — chiqib ketdi")
         return
+
+    # Ketma-ket chaqirilgan publish_to_baza'lar orasida minimal oraliqni
+    # majburlaymiz — separate rejimida N ta test bir zumda saqlansa ham,
+    # guruhga yuborish avtomatik sekinlashadi, flood control ushlamaydi.
+    global _last_baza_publish_ts
+    async with _baza_publish_lock:
+        elapsed = asyncio.get_running_loop().time() - _last_baza_publish_ts
+        if elapsed < _BAZA_MIN_INTERVAL:
+            await asyncio.sleep(_BAZA_MIN_INTERVAL - elapsed)
+        _last_baza_publish_ts = asyncio.get_running_loop().time()
 
     try:
         from aiogram.types import BufferedInputFile
@@ -384,7 +431,8 @@ async def publish_to_baza(
         )
 
         # ── 2. DOCX guruhga, TXT esa Storage kanalga (database) ──
-        file_msg = await bot.send_document(
+        file_msg = await _send_with_retry(
+            bot.send_document,
             chat_id=gid,
             document=doc_file,
             caption=caption,
@@ -397,7 +445,8 @@ async def publish_to_baza(
 
         if storage_gid:
             try:
-                await bot.send_document(
+                await _send_with_retry(
+                    bot.send_document,
                     chat_id=storage_gid,
                     document=txt_file,
                     caption=f"📦 {title} | {tid}",
@@ -445,7 +494,8 @@ async def publish_to_baza(
             f"👇 Boshlash: Web Yoki Quiz"
         )
 
-        await bot.send_message(
+        await _send_with_retry(
+            bot.send_message,
             chat_id=gid,
             text=card,
             reply_to_message_id=file_msg.message_id,
