@@ -292,7 +292,7 @@ async def main():
     _protect = is_protect_content()
 
     bot = Bot(token=BOT_TOKEN,
-              default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=_protect))
+              default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=False))
     dp  = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(ForceJoinMiddleware())
     dp.callback_query.middleware(ForceJoinMiddleware())
@@ -337,7 +337,13 @@ async def main():
         users = await tg_db.get_users()
         if users: ram.set_users(users)
         settings = await tg_db.get_settings_tg()
-        if settings: ram.set_all_settings(settings)
+        if settings:
+            ram.set_all_settings(settings)
+        persisted_security = await tg_db.get_security_tg()
+        if persisted_security:
+            ram.set_security("protect_content", bool(persisted_security.get("protect_content", False)))
+        # Supabase'dan yuklangan global himoyani JORIY bot instance'iga ham darhol qo'llaymiz.
+        bot.default.protect_content = ram.is_protect_content()
         log.info(f"✅ Yuklandi: {ram.stats()['tests']} test meta, {ram.stats()['users']} user (savollar lazy)")
         _blocked_mod.load()
     else:
@@ -595,7 +601,7 @@ async def _main_no_signals():
     _protect = is_protect_content()
 
     bot = Bot(token=BOT_TOKEN,
-              default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=_protect))
+              default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=False))
     dp  = Dispatcher(storage=MemoryStorage())
     # ── Barcha middlewarelar (main() bilan bir xil) ──
     dp.message.middleware(ForceJoinMiddleware())
@@ -679,7 +685,13 @@ async def _main_no_signals():
         users = await tg_db.get_users()
         if users: ram.set_users(users)
         settings = await tg_db.get_settings_tg()
-        if settings: ram.set_all_settings(settings)
+        if settings:
+            ram.set_all_settings(settings)
+        persisted_security = await tg_db.get_security_tg()
+        if persisted_security:
+            ram.set_security("protect_content", bool(persisted_security.get("protect_content", False)))
+        # Supabase'dan yuklangan global himoyani JORIY bot instance'iga ham darhol qo'llaymiz.
+        bot.default.protect_content = ram.is_protect_content()
         log.info(f"✅ Yuklandi: {ram.stats()['tests']} test meta, {ram.stats()['users']} user")
         _blocked_mod.load()
 
