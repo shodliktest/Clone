@@ -106,6 +106,17 @@ async def inline_handler(query: InlineQuery):
     await query.answer(results, cache_time=0, is_personal=True)
 
 
+def build_test_announcement(test: dict, bot_username: str):
+    """
+    Broadcast uchun inline ulashishdagi XUDDI O'SHA test kartochkasini
+    tayyorlaydi. Natija (text, inline keyboard) bitta manbadan olinadi,
+    shuning uchun inline va broadcast ko'rinishi bir-biridan ajralib ketmaydi.
+    """
+    result = _make_result(test, bot_username, demo=False)
+    content = result.input_message_content
+    return content.message_text, result.reply_markup
+
+
 def _make_result(test: dict, bot_username: str, demo=False) -> InlineQueryResultArticle:
     tid   = test.get("test_id", "")
     title = test.get("title", "Nomsiz")
