@@ -960,6 +960,33 @@ async def save_settings(settings_dict: dict) -> bool:
         return False
 
 
+async def save_security(security: dict) -> bool:
+    """Global security sozlamasini app_settings ichida alohida namespace sifatida saqlaydi."""
+    if not ready():
+        return False
+    try:
+        row = await sb.select_one("app_settings", "id", 1)
+        data = dict((row or {}).get("data") or {})
+        data["__security__"] = dict(security or {})
+        await sb.upsert("app_settings", {"id": 1, "data": data}, on_conflict="id")
+        return True
+    except Exception as e:
+        log.error(f"save_security: {e}")
+        return False
+
+async def get_security_tg() -> dict:
+    """Bot restartidan keyin global security sozlamasini qaytaradi."""
+    if not ready():
+        return {}
+    try:
+        row = await sb.select_one("app_settings", "id", 1)
+        data = (row or {}).get("data") or {}
+        sec = data.get("__security__") or {}
+        return dict(sec) if isinstance(sec, dict) else {}
+    except Exception as e:
+        log.error(f"get_security_tg: {e}")
+        return {}
+
 async def get_settings_tg() -> dict:
     if not ready():
         return {}
