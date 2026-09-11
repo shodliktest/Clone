@@ -93,9 +93,18 @@ async def start_poll(callback: CallbackQuery, state: FSMContext):
     is_demo_poll = callback.data.startswith("start_demopoll_")
     raw    = callback.data[15:] if is_demo_poll else callback.data[11:]
     via_link = raw.endswith("_link")
-    tid    = raw[:-5].upper() if via_link else raw.upper()
-    uid    = callback.from_user.id
-    meta   = get_test_meta(tid) or {}
+    # Test ID ni case-sensitive holatda saqlaymiz. Broadcast deep-link
+    # orqali kelgan ID lar (masalan, zvr9jx) .upper() qilinsa RAM lookup
+    # muvaffaqiyatsiz bo‘lishi mumkin. Eski uppercase ID lar uchun fallback ham bor.
+    tid = raw[:-5] if via_link else raw
+    uid = callback.from_user.id
+    meta = get_test_meta(tid) or {}
+    if not meta and tid.upper() != tid:
+        meta = get_test_meta(tid.upper()) or {}
+    if not meta and tid.lower() != tid:
+        meta = get_test_meta(tid.lower()) or {}
+    if meta:
+        tid = meta.get("test_id", tid)
 
     # ── Referral tekshiruvi ──
     if not is_demo_poll:

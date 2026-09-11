@@ -220,9 +220,19 @@ async def cmd_start(message: Message, state: FSMContext):
             return
 
         if param.lower().startswith("poll_"):
-            tid  = param[5:].upper()
-            test = get_test_by_id(tid) or await _gtf(tid)
+            # Deep-link ID ni aynan saqlaymiz. Test ID lar lowercase bo‘lishi mumkin;
+            # avvalgi .upper() lookup sabab e’lon qilingan Quiz Test ochilganda
+            # test topilmay, bot jim qolishi mumkin edi.
+            tid = param[5:]
+            test = get_test_by_id(tid)
+            if not test and tid.upper() != tid:
+                test = get_test_by_id(tid.upper())
+            if not test and tid.lower() != tid:
+                test = get_test_by_id(tid.lower())
+            if not test:
+                test = await _gtf(tid)
             if test:
+                tid = test.get("test_id", tid)
                 await message.answer(welcome, reply_markup=main_kb(uid, chat_type))
                 # To'g'ridan poll boshlaymiz — foydalanuvchi allaqachon tanlagan
                 b = InlineKeyboardBuilder()
