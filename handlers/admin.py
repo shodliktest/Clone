@@ -1,5 +1,5 @@
 """👑 ADMIN PANEL"""
-import json, logging, asyncio
+import json, logging
 from datetime import datetime, timezone
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
@@ -7,7 +7,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest
 
 from config import ADMIN_IDS
 from utils import ram_cache as ram
@@ -21,111 +21,6 @@ _forward_mode_users: set[int] = set()
 UTC    = timezone.utc
 
 def is_admin(uid): return uid in ADMIN_IDS
-
-# test_id -> broadcast job. RAM-only control state; recipient list is snapshotted
-# at start so users added during a broadcast are handled on the next announcement.
-_test_broadcast_jobs: dict[str, dict] = {}
-
-
-async def _send_test_announcement(bot, uid: int, text: str, reply_markup):
-    """Telegram rate-limit va transient xatolarni xavfsiz boshqarib yuborish."""
-    while True:
-        try:
-            return await bot.send_message(
-                uid, text, parse_mode="HTML", reply_markup=reply_markup
-            )
-        except TelegramRetryAfter as e:
-            delay = max(1.0, float(e.retry_after))
-            await asyncio.sleep(delay)
-        except TelegramForbiddenError:
-            raise
-
-
-async def _run_test_broadcast(bot, admin_message: Message, test: dict, recipients: list[str]):
-    tid = str(test.get("test_id", ""))
-    job = _test_broadcast_jobs.get(tid)
-    if not job:
-        return
-
-    try:
-        info = await bot.me()
-        from handlers.inline_mode import build_test_announcement
-        text, markup = build_test_announcement(test, info.username)
-    except Exception as e:
-        log.exception("test broadcast payload error %s: %s", tid, e)
-        _test_broadcast_jobs.pop(tid, None)
-        return await admin_message.answer(f"❌ Test e'lonini tayyorlashda xato: <code>{str(e)[:300]}</code>")
-
-    status = await admin_message.answer(
-        f"⏳ <b>Test e'lon qilinmoqda...</b>\n\n"
-        f"📝 {test.get('title','?')}\n"
-        f"📊 0/{len(recipients)}\n"
-        f"✅ 0  ❌ 0  ⏭ 0\n\n"
-        f"🛑 Bekor qilish tugmasi orqali to'xtatish mumkin.",
-        reply_markup=InlineKeyboardBuilder().row(
-            InlineKeyboardButton(text="🛑 E'lonni to'xtatish", callback_data=f"test_broadcast_cancel_{tid}")
-        ).as_markup()
-    )
-
-    ok = fail = skipped = 0
-    total = len(recipients)
-    for index, uid_str in enumerate(recipients, 1):
-        if job.get("cancelled"):
-            break
-        try:
-            await _send_test_announcement(bot, int(uid_str), text, markup)
-            ok += 1
-        except TelegramForbiddenError:
-            fail += 1
-            # Botni bloklagan userni kelajakdagi broadcastlardan chiqaramiz.
-            try:
-                ram.set_blocked(int(uid_str), True)
-            except Exception:
-                pass
-        except Exception as e:
-            fail += 1
-            log.warning("test broadcast %s -> %s: %s", tid, uid_str, e)
-
-        # 20 msg/s dan oshmasin; RetryAfter bo'lsa _send_test_announcement kutadi.
-        if index % 20 == 0:
-            await asyncio.sleep(1.0)
-
-        if index % 20 == 0 or index == total:
-            try:
-                await status.edit_text(
-                    f"{'🛑' if job.get('cancelled') else '⏳'} <b>Test e'loni</b>\n\n"
-                    f"📝 {test.get('title','?')}\n"
-                    f"📊 {index}/{total}\n"
-                    f"✅ {ok}  ❌ {fail}  ⏭ {skipped}",
-                    reply_markup=(InlineKeyboardBuilder().row(
-                        InlineKeyboardButton(text="🛑 E'lonni to'xtatish", callback_data=f"test_broadcast_cancel_{tid}")
-                    ).as_markup() if not job.get('cancelled') else None)
-                )
-            except Exception:
-                pass
-
-    cancelled = bool(job.get("cancelled"))
-    _test_broadcast_jobs.pop(tid, None)
-    final_title = "🛑 <b>TEST E'LONI TO'XTATILDI</b>" if cancelled else "✅ <b>TEST E'LONI YAKUNLANDI</b>"
-    try:
-        await status.edit_text(
-            f"{final_title}\n\n"
-            f"📝 <b>{test.get('title','?')}</b>\n"
-            f"🆔 <code>{tid}</code>\n\n"
-            f"👥 Qamrov: <b>{total}</b>\n"
-            f"✅ Yuborildi: <b>{ok}</b>\n"
-            f"❌ Xato: <b>{fail}</b>\n"
-            f"⏭ O'tkazildi: <b>{skipped}</b>\n"
-            f"📊 Jarayon: <b>{ok + fail}/{total}</b>",
-            reply_markup=InlineKeyboardBuilder().row(
-                InlineKeyboardButton(text="📢 Yana e'lon", callback_data=f"test_announce_{tid}"),
-                InlineKeyboardButton(text="⬅️ Test", callback_data=f"adm_test_{tid}")
-            ).as_markup()
-        )
-    except Exception:
-        pass
-
-
 
 
 # ══ ADMIN PANEL ASOSIY ════════════════════════════════════════
@@ -738,7 +633,6 @@ async def adm_test_detail(callback: CallbackQuery):
             text="🌐 Tahrirlash (web)",
             url=f"{WEBAPP_URL}/edit.html?id={tid}"
         ))
-        b.row(InlineKeyboardButton(text="📢 Testni e'lon qilish", callback_data=f"test_announce_{tid}"))
         b.row(InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"del_test_{tid}"))
     cat = meta.get("category","")[:30]
     b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"adm_cat_{cat}_0"))
@@ -1002,79 +896,6 @@ async def admin_download_txt(callback: CallbackQuery):
         doc,
         caption=f"📄 <b>{test.get('title','?')}</b>\n{len(test.get('questions',[]))} savol | {tid}"
     )
-
-
-# ══ TEST BROADCAST — AYNAN TANLANGAN TEST ═══════════════════════
-@router.callback_query(F.data.startswith("test_announce_confirm_"))
-async def test_announce_confirm(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    tid = callback.data[len("test_announce_confirm_"): ]
-    meta = ram.get_test_meta_any(tid) or {}
-    if not meta or not meta.get("is_active", True) or meta.get("is_deleted", False):
-        return await callback.answer("❌ Test mavjud emas yoki o'chirilgan.", show_alert=True)
-    if tid in _test_broadcast_jobs:
-        return await callback.answer("⏳ Bu test allaqachon e'lon qilinmoqda.", show_alert=True)
-
-    users = ram.get_users()
-    recipients = [str(uid) for uid, u in users.items() if not u.get("is_blocked")]
-    if not recipients:
-        return await callback.answer("❌ Faol user topilmadi.", show_alert=True)
-
-    await callback.answer("📢 E'lon boshlandi")
-    _test_broadcast_jobs[tid] = {
-        "cancelled": False,
-        "admin_id": callback.from_user.id,
-        "started_at": datetime.now(UTC).timestamp(),
-        "total": len(recipients),
-    }
-    # Callback handlerni bloklamaymiz: event loop boshqa update'larni ham qabul qiladi.
-    asyncio.create_task(_run_test_broadcast(callback.bot, callback.message, meta, recipients))
-
-
-@router.callback_query(F.data.startswith("test_announce_"))
-async def test_announce_preview(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
-    tid = callback.data[len("test_announce_"):]
-    meta = ram.get_test_meta_any(tid) or {}
-    if not meta or not meta.get("is_active", True) or meta.get("is_deleted", False):
-        return await callback.answer("❌ Faqat faol testni e'lon qilish mumkin.", show_alert=True)
-
-    users = ram.get_users()
-    recipients = [str(uid) for uid, u in users.items() if not u.get("is_blocked")]
-    if not recipients:
-        return await callback.answer("❌ E'lon qilinadigan faol user topilmadi.", show_alert=True)
-
-    await callback.answer()
-    b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="✅ Tasdiqlash va yuborish", callback_data=f"test_announce_confirm_{tid}"))
-    b.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"adm_test_{tid}"))
-    await callback.message.edit_text(
-        f"📢 <b>TEST E'LONI</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📝 <b>{meta.get('title','?')}</b>\n"
-        f"🆔 <code>{tid}</code>\n"
-        f"📋 {meta.get('question_count',0)} ta savol\n\n"
-        f"👥 Qabul qiluvchilar: <b>{len(recipients)}</b> ta user\n\n"
-        f"⚠️ Userlarga inline ulashishdagi <b>to'liq test kartochkasi va barcha inline tugmalar</b> yuboriladi.\n\n"
-        f"Yuborishni tasdiqlaysizmi?",
-        reply_markup=b.as_markup()
-    )
-
-
-@router.callback_query(F.data.startswith("test_broadcast_cancel_"))
-async def test_announce_cancel(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return await callback.answer("🚫", show_alert=True)
-    tid = callback.data[len("test_broadcast_cancel_"): ]
-    job = _test_broadcast_jobs.get(tid)
-    if not job:
-        return await callback.answer("ℹ️ E'lon allaqachon tugagan.", show_alert=True)
-    if job.get("admin_id") != callback.from_user.id:
-        return await callback.answer("🚫 Bu e'lonni faqat uni boshlagan admin to'xtata oladi.", show_alert=True)
-    job["cancelled"] = True
-    await callback.answer("🛑 To'xtatish belgisi berildi.")
 
 
 # ══ BROADCAST ══════════════════════════════════════════════════
@@ -1965,14 +1786,13 @@ async def sec_protect_on(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("❌ Ruxsat yo'q!", show_alert=True)
 
-    from utils.ram_cache import set_security
+    from utils.ram_cache import set_protect_content, get_security
     from utils import tg_db
-    set_security("protect_content", True)
-
-    # Sozlamani TG ga saqlash
+    set_protect_content(True)
+    await tg_db.save_security(get_security())
+    # Joriy bot instance ham darhol yangi defaultni ishlatsin.
     try:
-        from utils.ram_cache import get_all_settings
-        await tg_db.save_settings(get_all_settings())
+        callback.bot.default.protect_content = True
     except Exception:
         pass
 
@@ -1987,13 +1807,13 @@ async def sec_protect_off(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("❌ Ruxsat yo'q!", show_alert=True)
 
-    from utils.ram_cache import set_security
+    from utils.ram_cache import set_protect_content, get_security
     from utils import tg_db
-    set_security("protect_content", False)
-
+    set_protect_content(False)
+    await tg_db.save_security(get_security())
+    # Joriy bot instance ham darhol yangi defaultni ishlatsin.
     try:
-        from utils.ram_cache import get_all_settings
-        await tg_db.save_settings(get_all_settings())
+        callback.bot.default.protect_content = False
     except Exception:
         pass
 

@@ -23,7 +23,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
 from aiogram.exceptions import TelegramBadRequest
 
-from utils.ram_cache import get_test_meta
+from utils.ram_cache import get_test_meta, is_protect_content
 
 log    = logging.getLogger(__name__)
 router = Router()
@@ -568,7 +568,7 @@ async def _run_vote(bot, chat_id, tests, done):
             is_anonymous=False,
             allows_multiple_answers=False,
             open_period=VOTE_SECONDS,
-            protect_content=True,
+            protect_content=is_protect_content(),
         )
         sched["vote_msg_id"]  = vote_msg.message_id
         sched["vote_poll_id"] = vote_msg.poll.id

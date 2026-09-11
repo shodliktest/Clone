@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 
 from utils.db import get_all_tests, get_test_full, save_result
-from utils.ram_cache import get_test_by_id, is_test_paused, get_test_meta
+from utils.ram_cache import get_test_by_id, is_test_paused, get_test_meta, is_protect_content
 from utils.states import TestSolving
 from keyboards.keyboards import main_kb, inline_pause_kb, CAT_ICONS, get_cat_icon
 
@@ -159,7 +159,7 @@ async def _show_next_question(bot, cid, msg_id, qs, idx, state, uid):
             photo_id = pm_match.group(1).strip()
     if photo_id:
         try:
-            await bot.send_photo(cid, photo_id, protect_content=True)
+            await bot.send_photo(cid, photo_id, protect_content=is_protect_content())
         except Exception as e:
             log.error(f"Inline rasm xato: {e}")
     text, kb, is_text = _build_question_content(qs, idx, time_left=QUESTION_SEC)
@@ -168,7 +168,7 @@ async def _show_next_question(bot, cid, msg_id, qs, idx, state, uid):
         new_msg_id = msg_id
     except TelegramBadRequest:
         msg = await bot.send_message(cid, text, reply_markup=kb,
-        protect_content=True)
+        protect_content=is_protect_content())
         new_msg_id = msg.message_id
 
     await state.update_data(q_msg_id=new_msg_id, answered_this=False)
@@ -693,12 +693,12 @@ async def _send_question_new(bot, cid, state, uid):
             photo_id_first = pm_f.group(1).strip()
     if photo_id_first:
         try:
-            await bot.send_photo(cid, photo_id_first, protect_content=True)
+            await bot.send_photo(cid, photo_id_first, protect_content=is_protect_content())
         except Exception as e:
             log.error(f"Inline rasm xato: {e}")
     text, kb, is_text = _build_question_content(qs, idx, time_left=QUESTION_SEC)
     msg = await bot.send_message(cid, text, reply_markup=kb,
-        protect_content=True)
+        protect_content=is_protect_content())
     await state.update_data(q_msg_id=msg.message_id, answered_this=False)
 
     if is_text:
@@ -730,7 +730,7 @@ async def _edit_question(bot, cid, msg_id, state, uid):
     except TelegramBadRequest:
         # Edit imkoni bo'lmasa yangi yuborish
         msg = await bot.send_message(cid, text, reply_markup=kb,
-        protect_content=True)
+        protect_content=is_protect_content())
         msg_id = msg.message_id
         await state.update_data(q_msg_id=msg_id)
 
@@ -903,7 +903,7 @@ async def _question_timeout(bot, cid, state, uid, expected_idx, wait_sec):
                     "⏸ <b>TEST PAUZALAND</b>\n\nDavom etish yoki to'xtatish:",
                     reply_markup=inline_pause_kb()
                 ,
-        protect_content=True)
+        protect_content=is_protect_content())
         else:
             # Xato deb belgilab, izoh bilan edit qil, 30s keyingi
             q    = qs[expected_idx] if expected_idx < len(qs) else {}
@@ -1156,13 +1156,13 @@ async def text_answer_handler(message: Message, state: FSMContext):
             msg = await message.bot.send_message(
                 cid, result_text, reply_markup=next_kb.as_markup()
             ,
-        protect_content=True)
+        protect_content=is_protect_content())
             await state.update_data(q_msg_id=msg.message_id)
     except TelegramBadRequest:
         msg = await message.bot.send_message(
             cid, result_text, reply_markup=next_kb.as_markup()
         ,
-        protect_content=True)
+        protect_content=is_protect_content())
         await state.update_data(q_msg_id=msg.message_id)
 
     # 30s keyingi savol
@@ -1288,7 +1288,7 @@ async def cancel_test_cb(callback: CallbackQuery, state: FSMContext):
             pass
         try:
             await callback.bot.send_message(uid, "🏠 Asosiy menyu:",
-                reply_markup=main_kb(uid), protect_content=True)
+                reply_markup=main_kb(uid), protect_content=is_protect_content())
         except Exception:
             pass
 
@@ -1374,7 +1374,7 @@ async def _finish_inline(bot, cid, state, d):
             except TelegramBadRequest: pass
         try:
             await bot.send_message(cid, demo_text, reply_markup=b.as_markup(),
-                                   protect_content=True)
+                                   protect_content=is_protect_content())
         except Exception as e:
             log.error(f"_finish_inline demo send xato: {e}")
         return
@@ -1394,7 +1394,7 @@ async def _finish_inline(bot, cid, state, d):
     if not sent:
         try:
             await bot.send_message(cid, result_text, reply_markup=kb,
-                                   protect_content=True)
+                                   protect_content=is_protect_content())
         except Exception as e:
             log.error(f"_finish_inline send_message xato: {e}")
             # Oxirgi urinish — markup siz
@@ -1409,7 +1409,7 @@ async def _finish_inline(bot, cid, state, d):
             cid,
             "🏠 <b>Asosiy menyu</b> 👇",
             reply_markup=main_kb(uid, "private"),
-            protect_content=True
+            protect_content=is_protect_content()
         )
     except Exception as e:
         log.warning(f"_finish_inline main menu xato: {e}")

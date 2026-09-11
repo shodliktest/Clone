@@ -28,7 +28,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 
-from utils.ram_cache import get_test_by_id, is_test_paused
+from utils.ram_cache import get_test_by_id, is_test_paused, is_protect_content
 from utils.db import get_test_full, save_result
 from utils.scoring import calculate_score
 
@@ -115,7 +115,7 @@ async def _load_test(bot, chat_id: int, tid: str) -> Optional[dict]:
     test = get_test_by_id(tid)
     if not test or not test.get("questions"):
         try:
-            wm = await bot.send_message(chat_id, "⏳ <b>Test yuklanmoqda...</b>", protect_content=True)
+            wm = await bot.send_message(chat_id, "⏳ <b>Test yuklanmoqda...</b>", protect_content=is_protect_content())
         except Exception:
             wm = None
         test = await get_test_full(tid)
@@ -196,7 +196,7 @@ async def group_start_poll(callback: CallbackQuery):
     try: await callback.message.delete()
     except: pass
 
-    cdown = await callback.bot.send_message(chat_id, f"📝 <b>{test.get('title')}</b>", protect_content=True)
+    cdown = await callback.bot.send_message(chat_id, f"📝 <b>{test.get('title')}</b>", protect_content=is_protect_content())
     for emoji in COUNT_EMOJIS:
         await asyncio.sleep(0.8)
         try: await cdown.edit_text(emoji)
@@ -215,7 +215,7 @@ async def group_start_poll(callback: CallbackQuery):
         f"📢 Hamma qatnashing!",
         reply_markup=b.as_markup()
     ,
-        protect_content=True)
+        protect_content=is_protect_content())
 
     task = asyncio.create_task(
         _run_group_polls(callback.bot, chat_id, tid, qs, poll_time)
@@ -275,7 +275,7 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
         # Rasm bo'lsa — poll oldidan yuborish
         if photo_id:
             try:
-                await bot.send_photo(chat_id, photo_id, protect_content=True)
+                await bot.send_photo(chat_id, photo_id, protect_content=is_protect_content())
                 await asyncio.sleep(0.5)
             except Exception as e:
                 log.error(f"Rasm yuborishda xato (savol {current}): {e}")
@@ -288,7 +288,7 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
         full_text, poll_qtxt = split_long_question(qtxt, hdr_poll)
         if full_text:
             try:
-                await bot.send_message(chat_id, full_text, protect_content=True)
+                await bot.send_message(chat_id, full_text, protect_content=is_protect_content())
                 await asyncio.sleep(0.3)
             except Exception as e:
                 log.error(f"Uzun savol matnini yuborishda xato (savol {current}): {e}")
@@ -312,7 +312,7 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
                 open_period=poll_time if poll_time > 0 else None,
                 is_anonymous=False,
                 allows_multiple_answers=False,
-                protect_content=True,
+                protect_content=is_protect_content(),
             )
             if chat_id in _group_sessions:
                 _group_sessions[chat_id]["poll_map"][pm.poll.id] = i
@@ -331,7 +331,7 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
                         "❌ <b>Bot poll yubora olmadi!</b>\n"
                         "Botga guruhda admin yoki poll yuborish huquqi bering."
                     ,
-                        protect_content=True)
+                        protect_content=is_protect_content())
                 except: pass
                 _group_sessions.pop(chat_id, None)
                 return
@@ -423,7 +423,7 @@ async def group_start_inline(callback: CallbackQuery):
     except: pass
 
     # Countdown
-    cdown = await callback.bot.send_message(chat_id, f"📝 <b>{test.get('title')}</b>", protect_content=True)
+    cdown = await callback.bot.send_message(chat_id, f"📝 <b>{test.get('title')}</b>", protect_content=is_protect_content())
     for emoji in COUNT_EMOJIS:
         await asyncio.sleep(0.8)
         try: await cdown.edit_text(emoji)
@@ -442,7 +442,7 @@ async def group_start_inline(callback: CallbackQuery):
         f"📢 Tugmalar orqali javob bering!",
         reply_markup=b.as_markup()
     ,
-        protect_content=True)
+        protect_content=is_protect_content())
 
     task = asyncio.create_task(
         _run_inline_session(callback.bot, chat_id, tid, qs, poll_time, passing_score)
@@ -459,7 +459,7 @@ async def _flood_safe_send(bot, chat_id: int, text: str,
                 chat_id, text,
                 parse_mode="HTML", reply_markup=reply_markup
             ,
-                protect_content=True)
+                protect_content=is_protect_content())
         except TelegramBadRequest as e:
             log.error(f"Bad request: {e}")
             return None
@@ -507,7 +507,7 @@ async def _run_inline_session(
                 qtxt     = qtxt[pm_match.end():].strip()
         if photo_id:
             try:
-                await bot.send_photo(chat_id, photo_id, protect_content=True)
+                await bot.send_photo(chat_id, photo_id, protect_content=is_protect_content())
                 await asyncio.sleep(0.5)
             except Exception as e:
                 log.error(f"Inline rasm yuborishda xato (savol {i+1}): {e}")
@@ -682,7 +682,7 @@ async def _reveal_inline_answer(
         )
     except Exception:
         try:
-            await bot.send_message(chat_id, revealed, parse_mode="HTML", protect_content=True)
+            await bot.send_message(chat_id, revealed, parse_mode="HTML", protect_content=is_protect_content())
         except Exception: pass
 
     # Izoh
@@ -693,7 +693,7 @@ async def _reveal_inline_answer(
                 f"<blockquote>💡 {expl}</blockquote>",
                 parse_mode="HTML"
             ,
-                protect_content=True)
+                protect_content=is_protect_content())
         except Exception: pass
 
 
@@ -796,7 +796,7 @@ async def group_inline_stop(callback: CallbackQuery):
         )
         _inline_sessions.pop(chat_id, None)
     else:
-        await callback.bot.send_message(chat_id, "⏹ Test to'xtatildi.", protect_content=True)
+        await callback.bot.send_message(chat_id, "⏹ Test to'xtatildi.", protect_content=is_protect_content())
 
 
 # ══════════════════════════════════════════════════════════════
@@ -828,7 +828,7 @@ async def group_stop(callback: CallbackQuery):
     else:
         try: await callback.message.delete()
         except: pass
-        await callback.bot.send_message(chat_id, "⏹ Test to'xtatildi.", protect_content=True)
+        await callback.bot.send_message(chat_id, "⏹ Test to'xtatildi.", protect_content=is_protect_content())
 
 
 # ══════════════════════════════════════════════════════════════
@@ -869,7 +869,7 @@ async def _show_group_leaderboard(
             f"🏁 <b>TEST YAKUNLANDI!</b>\n📝 {test.get('title','Test')}\n\n{stop_txt}😔 Hech kim javob bermadi.",
             reply_markup=b.as_markup()
         ,
-            protect_content=True)
+            protect_content=is_protect_content())
         return
 
     # ── Natijalarni hisoblash ──
@@ -1134,9 +1134,9 @@ async def _send_text_leaderboard(
             reply_markup=b.as_markup(),
             reply_parameters=ReplyParameters(message_id=reply_to) if reply_to else None
         ,
-            protect_content=True)
+            protect_content=is_protect_content())
     except Exception:
-        await bot.send_message(chat_id, text, reply_markup=b.as_markup(), protect_content=True)
+        await bot.send_message(chat_id, text, reply_markup=b.as_markup(), protect_content=is_protect_content())
 
 
 
@@ -1159,7 +1159,7 @@ async def grestart(callback: CallbackQuery):
         chat_id,
         f"/quiz_start {tid} {mode_sfx}"
     ,
-        protect_content=True)
+        protect_content=is_protect_content())
 
 
 @router.callback_query(F.data.startswith("gsend_poll_"))
@@ -1176,7 +1176,7 @@ async def gsend_poll(callback: CallbackQuery):
             f"💡 Matnni bosing — avtomatik nusxa olinadi",
             parse_mode="HTML"
         ,
-            protect_content=True)
+            protect_content=is_protect_content())
     except Exception:
         await callback.answer(
             f"/quiz_start {tid} poll",
@@ -1197,7 +1197,7 @@ async def gsend_inline(callback: CallbackQuery):
             f"💡 Matnni bosing — avtomatik nusxa olinadi",
             parse_mode="HTML"
         ,
-            protect_content=True)
+            protect_content=is_protect_content())
     except Exception:
         await callback.answer(
             f"/quiz_start {tid} inline",
@@ -1256,16 +1256,16 @@ async def _group_test_access(tid: str, uid: int, test: dict | None = None) -> bo
 async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
     """Guruhda test boshlash — asosiy logika. start.py va cmd_quiz_start ishlatadi."""
     if is_test_paused(tid):
-        return await bot.send_message(chat_id, "⚠️ Bu test vaqtincha to\'xtatilgan!", protect_content=True)
+        return await bot.send_message(chat_id, "⚠️ Bu test vaqtincha to\'xtatilgan!", protect_content=is_protect_content())
 
     if chat_id in _group_sessions:
-        return await bot.send_message(chat_id, "⚠️ Guruhda allaqachon poll testi ketmoqda!\nAvval uni tugating: /quiz_stop", protect_content=True)
+        return await bot.send_message(chat_id, "⚠️ Guruhda allaqachon poll testi ketmoqda!\nAvval uni tugating: /quiz_stop", protect_content=is_protect_content())
     if chat_id in _inline_sessions:
-        return await bot.send_message(chat_id, "⚠️ Guruhda allaqachon inline test ketmoqda!\nAvval uni tugating: /quiz_stop", protect_content=True)
+        return await bot.send_message(chat_id, "⚠️ Guruhda allaqachon inline test ketmoqda!\nAvval uni tugating: /quiz_stop", protect_content=is_protect_content())
 
     test = await _load_test(bot, chat_id, tid)
     if not test:
-        return await bot.send_message(chat_id, f"❌ <code>{tid}</code> kodli test topilmadi.", protect_content=True)
+        return await bot.send_message(chat_id, f"❌ <code>{tid}</code> kodli test topilmadi.", protect_content=is_protect_content())
 
     # ── Kirish nazorati: allowed_users + active Premium ───────
     if not await _group_test_access(tid, uid, test):
@@ -1277,7 +1277,7 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
             f"🔐 <b>Kirish cheklangan</b>\n\n"
             f"Bu testni guruhda boshlash uchun ruxsatingiz yo'q.\n"
             f"Ruxsat olish uchun @{ADMIN_USERNAME} ga yozing.",
-            reply_markup=b.as_markup(), protect_content=True
+            reply_markup=b.as_markup(), protect_content=is_protect_content()
         )
 
     if mode == "inline":
@@ -1285,7 +1285,7 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
         poll_time     = test.get("poll_time", 30) or 30
         passing_score = float(test.get("passing_score", 60))
         if not qs:
-            return await bot.send_message(chat_id, "⚠️ Bu testda savollar yo\'q!", protect_content=True)
+            return await bot.send_message(chat_id, "⚠️ Bu testda savollar yo\'q!", protect_content=is_protect_content())
 
         import random, copy
         qs = copy.deepcopy(qs)
@@ -1299,7 +1299,7 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
             "poll_time": poll_time, "passing_score": passing_score,
             "cur_q": 0, "q_msg_id": None, "task": None, "locked": False,
         }
-        cdown = await bot.send_message(chat_id, f"📝 <b>{test.get('title')}</b>", parse_mode="HTML", protect_content=True)
+        cdown = await bot.send_message(chat_id, f"📝 <b>{test.get('title')}</b>", parse_mode="HTML", protect_content=is_protect_content())
         for emoji in COUNT_EMOJIS:
             await asyncio.sleep(0.8)
             try: await bot.edit_message_text(emoji, chat_id, cdown.message_id)
@@ -1326,7 +1326,7 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"📢 <b>Hamma qatnashing! Tugmalar orqali javob bering!</b>",
             parse_mode="HTML", reply_markup=b.as_markup(),
-            protect_content=True)
+            protect_content=is_protect_content())
         task = asyncio.create_task(
             _run_inline_session(bot, chat_id, tid, qs, poll_time, passing_score)
         )
@@ -1336,7 +1336,7 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
         qs = [q for q in test.get("questions", [])
               if q.get("type", "multiple_choice") in ("multiple_choice", "true_false")]
         if not qs:
-            return await bot.send_message(chat_id, "⚠️ Bu testda poll uchun savollar yo\'q!", protect_content=True)
+            return await bot.send_message(chat_id, "⚠️ Bu testda poll uchun savollar yo\'q!", protect_content=is_protect_content())
 
         poll_time = test.get("poll_time", 30) or 30
 
@@ -1351,7 +1351,7 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
             "answers": {}, "names": {}, "poll_map": {},
             "host_id": uid, "poll_time": poll_time, "task": None,
         }
-        cdown = await bot.send_message(chat_id, f"📝 <b>{test.get('title')}</b>", parse_mode="HTML", protect_content=True)
+        cdown = await bot.send_message(chat_id, f"📝 <b>{test.get('title')}</b>", parse_mode="HTML", protect_content=is_protect_content())
         for emoji in COUNT_EMOJIS:
             await asyncio.sleep(0.8)
             try: await bot.edit_message_text(emoji, chat_id, cdown.message_id)
@@ -1380,7 +1380,7 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"📢 <b>Hamma qatnashing!</b>{skip_txt}",
             parse_mode="HTML", reply_markup=b.as_markup(),
-            protect_content=True)
+            protect_content=is_protect_content())
         task = asyncio.create_task(
             _run_group_polls(bot, chat_id, tid, qs, poll_time)
         )
@@ -1532,7 +1532,7 @@ async def on_bot_added(event: ChatMemberUpdated):
                     f"  • <b>\"👥 Guruhda (Inline)\"</b> — inline usuli\n\n"
                     f"<i>💡 Poll uchun botga admin huquqi kerak.</i>",
                     reply_markup=b.as_markup(),
-                    protect_content=True
+                    protect_content=is_protect_content()
                 )
             except Exception as e:
                 log.warning(f"Guruh xabar: {e}")
