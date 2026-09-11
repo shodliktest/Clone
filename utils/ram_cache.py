@@ -612,6 +612,62 @@ def get_all_solvers_for_test_ram_only(tid):
 get_all_solvers_for_test = get_all_solvers_for_test_ram_only
 
 
+# ══ 24 SOATLIK DAILY LEADERBOARD (RAM-ONLY) ═════════════════════
+# Har bir bot ishga tushganidan qat'i nazar, aktiv 24 soatlik oynada
+# ma'lumot RAMda yuradi. Oyna tugashi bilan avtomatik yangilanadi.
+DAILY_TTL_SECONDS = 24 * 60 * 60
+
+def _daily_bucket():
+    now = datetime.now(UTC).timestamp()
+    b = _get("daily_bucket")
+    if not isinstance(b, dict) or now - float(b.get("started_at", now)) >= DAILY_TTL_SECONDS:
+        b = {"started_at": now, "users": {}, "groups": {}, "tests": {}}
+        _set("daily_bucket", b)
+    return b
+
+def daily_seconds_left():
+    b = _daily_bucket()
+    return max(0, int(DAILY_TTL_SECONDS - (datetime.now(UTC).timestamp() - float(b["started_at"]))))
+
+def _save_daily(b):
+    # faqat kerakli 20 talikni RAMda ushlab turamiz
+    for key in ("users", "groups", "tests"):
+        rows = list(b[key].values())
+        if key == "tests": rows.sort(key=lambda x: (x.get("solves",0), x.get("avg_score",0)), reverse=True)
+        else: rows.sort(key=lambda x: x.get("score",0), reverse=True)
+        b[key] = {str(x["id"]): x for x in rows[:20]}
+    _set("daily_bucket", b)
+
+def update_daily_user(uid_str, name, score):
+    b = _daily_bucket(); k=str(uid_str); old=b["users"].get(k)
+    b["users"][k] = {"id":k,"name":str(name)[:20],"score":max(float(score), float(old.get("score",0)) if old else 0),"attempts":(old.get("attempts",0)+1) if old else 1}
+    _save_daily(b)
+
+def update_daily_test(test_id, title, score):
+    b = _daily_bucket(); k=str(test_id); old=b["tests"].get(k)
+    attempts=(old.get("solves",0)+1) if old else 1
+    avg=((old.get("avg_score",0)* (attempts-1))+float(score))/attempts if attempts else 0
+    b["tests"][k]={"id":k,"title":str(title)[:25],"solves":attempts,"avg_score":round(avg,1)}
+    _save_daily(b)
+
+def get_daily_user_leaderboard():
+    b=_daily_bucket(); return sorted(b["users"].values(), key=lambda x:x.get("score",0), reverse=True)[:20]
+
+def get_daily_group_leaderboard():
+    b=_daily_bucket(); return sorted(b["groups"].values(), key=lambda x:x.get("score",0), reverse=True)[:20]
+
+def get_daily_test_leaderboard():
+    b=_daily_bucket(); return sorted(b["tests"].values(), key=lambda x:(x.get("solves",0),x.get("avg_score",0)), reverse=True)[:20]
+
+def update_daily_group(uid_str, name, score, correct, total):
+    b=_daily_bucket(); k=str(uid_str); old=b["groups"].get(k)
+    best=max(float(score), float(old.get("score",0)) if old else 0)
+    b["groups"][k]={"id":k,"name":str(name)[:20],"score":best,"correct":correct if score>=best else old.get("correct",0),"total":total if score>=best else old.get("total",0),"attempts":(old.get("attempts",0)+1) if old else 1}
+    _save_daily(b)
+
+def clear_daily_leaderboards():
+    _set("daily_bucket", {"started_at":datetime.now(UTC).timestamp(),"users":{},"groups":{},"tests":{}})
+
 # ══ GLOBAL LEADERBOARD (top 20) ═══════════════════════════════
 
 def get_global_leaderboard():
