@@ -220,9 +220,9 @@ async def cmd_start(message: Message, state: FSMContext):
             return
 
         if param.lower().startswith("poll_"):
-            # Deep-link ID ni aynan saqlaymiz. Test ID lar lowercase bo‘lishi mumkin;
-            # avvalgi .upper() lookup sabab e’lon qilingan Quiz Test ochilganda
-            # test topilmay, bot jim qolishi mumkin edi.
+            # E'lon qilingan Quiz Test ham oddiy Quiz Poll tugmasi bilan
+            # bir xil start oqimidan foydalanadi. Oraliq tugma yo'q: deep-link
+            # bosilganda aynan start_poll callback qiladigan ish bajariladi.
             tid = param[5:]
             test = get_test_by_id(tid)
             if not test and tid.upper() != tid:
@@ -234,19 +234,20 @@ async def cmd_start(message: Message, state: FSMContext):
             if test:
                 tid = test.get("test_id", tid)
                 await message.answer(welcome, reply_markup=main_kb(uid, chat_type))
-                # To'g'ridan poll boshlaymiz — foydalanuvchi allaqachon tanlagan
-                b = InlineKeyboardBuilder()
-                b.row(InlineKeyboardButton(
-                    text="📊 Quiz Poll boshlash",
-                    callback_data=f"start_poll_{tid}"
-                ))
-                title = test.get("title", "?")
-                await message.answer(
-                    f"📝 <b>{title}</b>\n\n"
-                    f"📊 Quiz Poll rejimi tanlandi.\n"
-                    f"Boshlash uchun tugmani bosing 👇",
-                    reply_markup=b.as_markup()
-                )
+                try:
+                    from handlers.poll_test import start_poll_session
+                    await start_poll_session(
+                        message.bot, state, uid, message.chat.id, tid,
+                        via_link=True, is_demo=False, message=message
+                    )
+                except Exception as exc:
+                    log.exception("POLL_DEEPLINK_START_FAILED tid=%s uid=%s", tid, uid)
+                    await message.answer(
+                        "❌ Quiz Pollni boshlashda xatolik yuz berdi.\n"
+                        "Iltimos, qayta urinib ko'ring."
+                    )
+            else:
+                await message.answer("❌ Test topilmadi.")
             return
 
         # ── GURUHDA ISHLASH — startgroup deep link ━━━━━━━━━━━━━━━━━━━━━━━━

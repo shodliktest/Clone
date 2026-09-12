@@ -78,84 +78,103 @@ async def route_poll_answer(poll_answer: PollAnswer, state: FSMContext, bot=None
             await _finish_poll(bot, cid, state, fresh)
 
 
-# ── Boshlash ──────────────────────────────────────────────────
+# ── Poll testni boshlashning yagona yo'li ─────────────────────
+async def start_poll_session(bot, state: FSMContext, uid: int, chat_id: int,
+                             tid: str, via_link: bool = False,
+                             is_demo: bool = False, message=None,
+                             callback: CallbackQuery = None):
+    """Oddiy tugma ham, /start=poll_ deep-link ham aynan shu oqimdan o'tadi."""
+    tid = str(tid or "").strip()
+    if not tid:
+        if callback:
+            return await callback.answer("❌ Test kodi topilmadi.", show_alert=True)
+        try:
+            await bot.send_message(chat_id, "❌ Test kodi topilmadi.")
+        except Exception:
+            pass
+        return
 
-@router.callback_query(F.data.startswith("start_poll_") | F.data.startswith("start_demopoll_"))
-async def start_poll(callback: CallbackQuery, state: FSMContext):
-    if callback.message and callback.message.chat.type in ("group","supergroup"):
-        return await callback.answer(
-            "📊 Poll test private chatda ishlaydi.\n"
-            "👥 Guruh uchun → \"Guruhda yechish\" tugmasini ishlating.",
-            show_alert=True
-        )
-
-    await callback.answer()
-    is_demo_poll = callback.data.startswith("start_demopoll_")
-    raw    = callback.data[15:] if is_demo_poll else callback.data[11:]
-    via_link = raw.endswith("_link")
-    # Test ID ni case-sensitive holatda saqlaymiz. Broadcast deep-link
-    # orqali kelgan ID lar (masalan, zvr9jx) .upper() qilinsa RAM lookup
-    # muvaffaqiyatsiz bo‘lishi mumkin. Eski uppercase ID lar uchun fallback ham bor.
-    tid = raw[:-5] if via_link else raw
-    uid = callback.from_user.id
+    # ID case'ini saqlaymiz, lekin eski uppercase ID lar uchun fallback qilamiz.
     meta = get_test_meta(tid) or {}
-    if not meta and tid.upper() != tid:
-        meta = get_test_meta(tid.upper()) or {}
-    if not meta and tid.lower() != tid:
-        meta = get_test_meta(tid.lower()) or {}
-    if meta:
-        tid = meta.get("test_id", tid)
+    if not meta:
+        for candidate in (tid.lower(), tid.upper()):
+            if candidate != tid:
+                meta = get_test_meta(candidate) or {}
+                if meta:
+                    tid = candidate
+                    break
 
-    # ── Referral tekshiruvi ──
-    if not is_demo_poll:
+    # Referral tekshiruvi
+    if not is_demo:
         try:
             from utils.ref_test import check_test_referral, send_referral_required_msg
-            _bu = (await callback.bot.me()).username
-            _ref = await check_test_referral(
-                callback.bot, uid, tid, meta, _bu
-            )
+            _bu = (await bot.me()).username
+            _ref = await check_test_referral(bot, uid, tid, meta, _bu)
             if not _ref["ok"]:
-                await send_referral_required_msg(
-                    callback, _ref, meta.get("title", tid), _bu
-                )
+                if callback:
+                    await send_referral_required_msg(
+                        callback, _ref, meta.get("title", tid), _bu
+                    )
+                else:
+                    from keyboards.keyboards import main_kb
+                    # Referral helper callbackga bog'liq bo'lgani uchun deep-linkda
+                    # foydalanuvchiga tushunarli fallback beramiz.
+                    try:
+                        await bot.send_message(
+                            chat_id,
+                            _ref.get("text", "🔐 Testni boshlash uchun referral sharti bajarilishi kerak."),
+                            reply_markup=_ref.get("reply_markup"),
+                        )
+                    except Exception:
+                        await bot.send_message(chat_id, "🔐 Testni boshlash uchun referral sharti bajarilishi kerak.")
                 return
-        except Exception as _re:
-            import logging
-            logging.getLogger(__name__).warning(f"ref check poll: {_re}")
+        except Exception as exc:
+            log.warning("ref check poll: %s", exc)
 
     # Ruxsat tekshiruvi
     from utils.premium import can_access
     if not await can_access(meta, uid):
-        return await _send_no_access(callback, meta)
+        if callback:
+            return await _send_no_access(callback, meta)
+        try:
+            title = meta.get("title", "Bu test")
+            await bot.send_message(chat_id, f"🔐 <b>Kirish cheklangan</b>\n\n<b>{title}</b> testiga kirishga ruxsatingiz yo'q.")
+        except Exception:
+            pass
+        return
 
     # Urinishlar cheklovi
     max_att = meta.get("max_attempts", 0)
     if max_att > 0 and uid not in allowed:
         from utils.ram_cache import get_test_stats_for_user
         stats = get_test_stats_for_user(uid, tid)
-        used  = stats.get("attempts", 0) if stats else 0
+        used = stats.get("attempts", 0) if stats else 0
         if used >= max_att:
             from config import ADMIN_USERNAME
             b = InlineKeyboardBuilder()
-            b.row(InlineKeyboardButton(text="📩 Adminga murojat",
-                                       url=f"https://t.me/{ADMIN_USERNAME}"))
+            b.row(InlineKeyboardButton(text="📩 Adminga murojat", url=f"https://t.me/{ADMIN_USERNAME}"))
             try:
-                await callback.message.answer(
-                    f"⛔ <b>Urinishlar tugadi</b>\n\n"
-                    f"Bu test uchun {max_att} ta urinish berilgan edi.\n"
-                    f"Siz {used} marta yechdingiz.",
+                await bot.send_message(
+                    chat_id,
+                    f"⛔ <b>Urinishlar tugadi</b>\n\nBu test uchun {max_att} ta urinish berilgan edi.\nSiz {used} marta yechdingiz.",
                     reply_markup=b.as_markup()
                 )
-            except Exception: pass
-            return await callback.answer("⛔ Urinishlar tugadi!", show_alert=True)
-
-    msg    = callback.message
-    chat_id= msg.chat.id if msg and msg.chat else uid
+            except Exception:
+                pass
+            if callback:
+                return await callback.answer("⛔ Urinishlar tugadi!", show_alert=True)
+            return
 
     if is_test_paused(tid):
-        return await callback.answer("⚠️ Bu test vaqtincha to'xtatilgan!", show_alert=True)
+        if callback:
+            return await callback.answer("⚠️ Bu test vaqtincha to'xtatilgan!", show_alert=True)
+        try:
+            await bot.send_message(chat_id, "⚠️ Bu test vaqtincha to'xtatilgan!")
+        except Exception:
+            pass
+        return
 
-    # ── Aktiv test tekshiruvi ─────────────────────────────────
+    # Aktiv test tekshiruvi — oddiy tugma va deep-link uchun bir xil.
     from utils.states import TestSolving as _TS
     cur = await state.get_state()
     active_states = (
@@ -164,57 +183,89 @@ async def start_poll(callback: CallbackQuery, state: FSMContext):
     )
     if cur in active_states:
         d = await state.get_data()
-        active_name  = d.get("test", {}).get("title", "Joriy test")
-        active_idx   = d.get("idx", 0)
+        active_name = d.get("test", {}).get("title", "Joriy test")
+        active_idx = d.get("idx", 0)
         active_total = len(d.get("qs", []))
-
         from config import ADMIN_IDS
         can_stop = (uid == d.get("uid", uid)) or (uid in ADMIN_IDS)
-
-        import re as _re
-        def _esc(s): return _re.sub(r'[<>&]', lambda m: {'<':'&lt;','>':'&gt;','&':'&amp;'}[m.group()], str(s))
-
         b = InlineKeyboardBuilder()
         if can_stop:
             b.row(InlineKeyboardButton(
                 text="⏹ Joriy testni to'xtatib, yangisini boshlash",
                 callback_data=f"force_start_poll_{tid}{'_link' if via_link else ''}"
             ))
-        b.row(InlineKeyboardButton(
-            text="▶️ Joriy testni davom ettirish",
-            callback_data="noop"
-        ))
-        await msg.answer(
-            f"⚠️ <b>Siz hozir test yechyapsiz!</b>\n\n"
-            f"📝 <b>{_esc(active_name)}</b>\n"
-            f"📊 Savol: {active_idx}/{active_total}\n\n"
-            f"{'Yangi test boshlash uchun avval joriy testni to\'xtating.' if can_stop else 'Faqat siz boshlagan test to\'xtatilishi mumkin.'}",
-            reply_markup=b.as_markup()
-        )
+        b.row(InlineKeyboardButton(text="▶️ Joriy testni davom ettirish", callback_data="noop"))
+        try:
+            await bot.send_message(
+                chat_id,
+                f"⚠️ <b>Siz hozir test yechyapsiz!</b>\n\n"
+                f"📝 <b>{active_name}</b>\n📊 Savol: {active_idx}/{active_total}\n\n"
+                f"{'Yangi test boshlash uchun avval joriy testni to\'xtating.' if can_stop else 'Faqat siz boshlagan test to\'xtatilishi mumkin.'}",
+                reply_markup=b.as_markup()
+            )
+        except Exception:
+            pass
         return
-    # ──────────────────────────────────────────────────────────
 
     test = get_test_by_id(tid)
     if not test or not test.get("questions"):
         load_msg = None
         try:
-            load_msg = await callback.bot.send_message(
-                chat_id, "⏳ <b>Test yuklanmoqda...</b>"
-            )
-        except Exception: pass
+            load_msg = await bot.send_message(chat_id, "⏳ <b>Test yuklanmoqda...</b>")
+        except Exception:
+            pass
         test = await get_test_full(tid)
         if load_msg:
-            try: await load_msg.delete()
-            except Exception: pass
+            try:
+                await load_msg.delete()
+            except Exception:
+                pass
 
     if not test:
-        return await callback.answer("❌ Test topilmadi.", show_alert=True)
+        if callback:
+            return await callback.answer("❌ Test topilmadi.", show_alert=True)
+        try:
+            await bot.send_message(chat_id, "❌ Test topilmadi.")
+        except Exception:
+            pass
+        return
 
-    try: await msg.delete()
-    except Exception: pass
+    if callback and callback.message:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+    elif message:
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
-    await _begin_poll(callback.bot, state, uid, chat_id, tid, via_link, test,
-                      is_demo=is_demo_poll)
+    log.info("POLL_START uid=%s tid=%s via_link=%s demo=%s", uid, tid, via_link, is_demo)
+    await _begin_poll(bot, state, uid, chat_id, tid, via_link, test, is_demo=is_demo)
+
+
+@router.callback_query(F.data.startswith("start_poll_") | F.data.startswith("start_demopoll_"))
+async def start_poll(callback: CallbackQuery, state: FSMContext):
+    if callback.message and callback.message.chat.type in ("group", "supergroup"):
+        return await callback.answer(
+            "📊 Poll test private chatda ishlaydi.\n"
+            "👥 Guruh uchun → \"Guruhda yechish\" tugmasini ishlating.",
+            show_alert=True
+        )
+
+    await callback.answer()
+    is_demo_poll = callback.data.startswith("start_demopoll_")
+    raw = callback.data[15:] if is_demo_poll else callback.data[11:]
+    via_link = raw.endswith("_link")
+    tid = raw[:-5] if via_link else raw
+    uid = callback.from_user.id
+    chat_id = callback.message.chat.id if callback.message and callback.message.chat else uid
+    await start_poll_session(
+        callback.bot, state, uid, chat_id, tid,
+        via_link=via_link, is_demo=is_demo_poll,
+        message=callback.message, callback=callback
+    )
 
 
 async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, is_demo=False):
