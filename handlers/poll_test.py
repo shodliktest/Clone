@@ -655,7 +655,12 @@ async def force_start_poll(callback: CallbackQuery, state: FSMContext):
     # Yangi poll boshlash
     raw = callback.data[len("force_start_poll_"):]
     via_link = raw.endswith("_link")
-    tid = raw[:-5].upper() if via_link else raw.upper()
+    tid = raw[:-5] if via_link else raw
+    if not get_test_meta(tid):
+        for _candidate in (tid.lower(), tid.upper()):
+            if _candidate != tid and get_test_meta(_candidate):
+                tid = _candidate
+                break
     await _begin_poll(callback.bot, state, uid, cid, tid, via_link)
 
 
