@@ -140,34 +140,33 @@ def set_security(key: str, value) -> dict:
     return get_security()
 
 def is_protect_content() -> bool:
+    """Global screenshot/forward himoyasi holati."""
     return bool(get_security().get("protect_content", False))
 
-def set_protect_content(value: bool) -> dict:
-    """Global screenshot/forward himoyasi. RAMdagi yagona manba."""
-    return set_security("protect_content", bool(value))
+def is_security_admin(uid) -> bool:
+    """Security uchun admin exemption.
 
-def is_admin_exempt_from_protection(uid: int) -> bool:
-    """Private chatdagi adminlarga protect_content ni chetlab o'tishga ruxsat beradi.
-
-    Asosiy ADMIN_IDS har doim exempt. Qo'shimcha role=admin ham exempt,
-    lekin role_expires_at mavjud bo'lsa uning muddati tugaganidan keyin emas.
-    Guruh/channel ID lar bu funksiyaga yuborilmasligi kerak.
+    ADMIN_IDS doim ruxsatli. Bundan tashqari role=admin bo'lgan foydalanuvchi
+    ham faol role muddati ichida screenshot/copy/forward qila oladi.
+    Bu funksiya faqat private-chatga yuboriladigan xabar siyosatida ishlatiladi.
     """
     try:
-        uid = int(uid)
+        uid_i = int(uid)
     except (TypeError, ValueError):
         return False
+
     try:
         from config import ADMIN_IDS
-        if uid in ADMIN_IDS:
+        if uid_i in ADMIN_IDS:
             return True
     except Exception:
         pass
 
-    user = get_user(uid)
-    if not isinstance(user, dict) or user.get("role") != "admin":
+    user = get_user(uid_i) or get_user(str(uid_i)) or {}
+    if str(user.get("role", "")).lower() != "admin":
         return False
 
+    # Muddatli admin roli bo'lsa, muddati tugagach exemption ham tugaydi.
     expires = user.get("role_expires_at")
     if not expires:
         return True
@@ -177,22 +176,23 @@ def is_admin_exempt_from_protection(uid: int) -> bool:
             exp = exp.replace(tzinfo=UTC)
         return datetime.now(UTC) <= exp
     except Exception:
-        # Noto'g'ri expiry bo'lsa xavfsizlik nuqtai nazaridan exempt qilmaymiz.
-        return False
+        # Noto'g'ri expiry sabab adminni bloklab qo'ymaslik uchun role'ni
+        # amaldagi admin deb qabul qilamiz; role tizimining o'zi keyin tuzatadi.
+        return True
 
-def protect_content_for_chat(chat_id: int) -> bool:
-    """Telegram chat uchun real-time protect_content siyosati.
+def is_protect_content_for_user(uid) -> bool:
+    """Muayyan private-chat uchun yakuniy protect_content siyosati.
 
-    Private chatda admin exempt. Guruh/channelda esa bitta xabar barcha
-    a'zolarga bir xil yuborilgani sababli global siyosat qo'llanadi.
+    Telegram protect_content'ni xabar bo'yicha qo'llaydi. Shuning uchun global
+    ON holatida adminlarga alohida False yuborish uchun recipient UID kerak.
     """
-    try:
-        cid = int(chat_id)
-    except (TypeError, ValueError):
-        return is_protect_content()
-    if cid > 0 and is_admin_exempt_from_protection(cid):
+    if is_security_admin(uid):
         return False
     return is_protect_content()
+
+def set_protect_content(value: bool) -> dict:
+    """Global screenshot/forward himoyasi. RAMdagi yagona manba."""
+    return set_security("protect_content", bool(value))
 
 
 # ══ TEST META ══════════════════════════════════════════════════

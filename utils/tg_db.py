@@ -950,21 +950,10 @@ async def _notify_updated_test(meta: dict, tid: str, old_qc: int, new_qc: int):
 # ══════════════════════════════════════════════════════════════
 
 async def save_settings(settings_dict: dict) -> bool:
-    """Oddiy settingsni saqlaydi va __security__ namespace'ni hech qachon
-    eski RAM qiymati bilan tasodifan ustidan yozmaydi. Security alohida
-    save_security() orqali boshqariladi, shuning uchun settings flush'lari
-    ON/OFF holatini buzmasligi kerak."""
     if not ready():
         return False
     try:
-        data = dict(settings_dict or {})
-        # Joriy DB security qiymatini saqlab qolamiz. Bu ayniqsa security
-        # toggle'dan keyin boshqa settings o'zgarganida muhim.
-        row = await sb.select_one("app_settings", "id", 1)
-        existing = dict((row or {}).get("data") or {})
-        if "__security__" in existing:
-            data["__security__"] = existing["__security__"]
-        await sb.upsert("app_settings", {"id": 1, "data": data}, on_conflict="id")
+        await sb.upsert("app_settings", {"id": 1, "data": settings_dict}, on_conflict="id")
         return True
     except Exception as e:
         log.error(f"save_settings: {e}")
