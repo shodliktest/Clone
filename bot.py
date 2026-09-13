@@ -237,7 +237,8 @@ class GroupTrackerMiddleware(BaseMiddleware):
 """🤖 BOT — Asosiy ishga tushirish"""
 import asyncio, logging
 from datetime import datetime, timezone, date, timedelta
-from aiogram import Bot, Dispatcher
+from aiogram import Dispatcher
+from utils.secure_bot import SecureBot
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -291,7 +292,7 @@ async def main():
     from utils.ram_cache import is_protect_content
     _protect = is_protect_content()
 
-    bot = Bot(token=BOT_TOKEN,
+    bot = SecureBot(token=BOT_TOKEN,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=False))
     dp  = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(ForceJoinMiddleware())
@@ -600,7 +601,7 @@ async def _main_no_signals():
     from utils.ram_cache import is_protect_content
     _protect = is_protect_content()
 
-    bot = Bot(token=BOT_TOKEN,
+    bot = SecureBot(token=BOT_TOKEN,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=False))
     dp  = Dispatcher(storage=MemoryStorage())
     # ── Barcha middlewarelar (main() bilan bir xil) ──
