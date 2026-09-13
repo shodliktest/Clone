@@ -7,7 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
 
 from utils.db import get_test_full, save_result
-from utils.ram_cache import get_test_by_id, get_daily, is_test_paused, get_test_meta
+from utils.ram_cache import get_test_by_id, get_daily, is_test_paused, get_test_meta, is_protect_content_for_user
 from utils.states import PollTest
 from utils.scoring import calculate_score, format_result
 from keyboards.keyboards import main_kb, result_kb, poll_pause_kb, poll_control_reply_kb, poll_pause_reply_kb
@@ -353,7 +353,7 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
         title_txt = f"📝 <b>{test.get('title','?')}</b>"
         if is_demo:
             title_txt = f"🔍 <b>[DEMO] {test.get('title','?')}</b>"
-        countdown = await bot.send_message(chat_id, title_txt)
+        countdown = await bot.send_message(chat_id, title_txt, protect_content=is_protect_content_for_user(uid))
         for emoji in COUNT_EMOJIS:
             await asyncio.sleep(0.8)
             try: await countdown.edit_text(emoji)
@@ -368,7 +368,8 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
         info = await bot.send_message(
             chat_id,
             f"{'🔍 [DEMO] ' if is_demo else ''}📊 <b>{test.get('title','POLL TEST')}</b> | {len(qs)} savol | ⏱ {pt}s{skip_txt}",
-            reply_markup=poll_control_reply_kb()
+            reply_markup=poll_control_reply_kb(),
+            protect_content=is_protect_content_for_user(uid),
         )
         await state.update_data(info_msg_id=info.message_id)
     except: pass
@@ -483,7 +484,7 @@ async def _send_poll(bot, cid, state):
                 q["photo"] = resolved      # joriy sessiyada ham keshlanadi
                 await state.update_data(qs=qs)
                 photo_id = resolved
-            await bot.send_photo(cid, photo_id)
+            await bot.send_photo(cid, photo_id, protect_content=is_protect_content_for_user(d.get("uid", cid)))
         except Exception as e:
             log.error(f"Poll rasm xato: {e}")
 
@@ -493,7 +494,7 @@ async def _send_poll(bot, cid, state):
     full_text, poll_q = split_long_question(qtxt, hdr)
     if full_text:
         try:
-            await bot.send_message(cid, full_text)
+            await bot.send_message(cid, full_text, protect_content=is_protect_content_for_user(d.get("uid", cid)))
         except Exception as e:
             log.error(f"Uzun savol matnini yuborishda xato: {e}")
         # Savol allaqachon alohida yuborildi — poll'ga faqat qisqa
@@ -513,7 +514,8 @@ async def _send_poll(bot, cid, state):
         pm = await bot.send_poll(
             chat_id=cid, question=question, options=clean_opts,
             type="quiz", correct_option_id=ci, explanation=expl,
-            is_anonymous=False, open_period=pt if pt > 0 else None
+            is_anonymous=False, open_period=pt if pt > 0 else None,
+            protect_content=is_protect_content_for_user(d.get("uid", cid)),
         )
         msgs = d.get("msg_ids", [])
         msgs.append(pm.message_id)
@@ -605,7 +607,8 @@ async def pause_poll(callback: CallbackQuery, state: FSMContext):
     await callback.bot.send_message(
         cid,
         f"⏸ <b>PAUZA</b> | Savol {d.get('idx',0)}/{len(d.get('qs',[]))}",
-        reply_markup=poll_pause_reply_kb()
+        reply_markup=poll_pause_reply_kb(),
+        protect_content=is_protect_content_for_user(d.get("uid", callback.from_user.id)),
     )
 
 @router.callback_query(F.data == "resume_poll", PollTest.paused)
@@ -632,7 +635,8 @@ async def resume_poll(callback: CallbackQuery, state: FSMContext):
         await callback.bot.send_message(
             cid,
             f"▶️ <b>Davom etildi</b> | Savol {idx}/{len(qs)}",
-            reply_markup=poll_control_reply_kb()
+            reply_markup=poll_control_reply_kb(),
+            protect_content=is_protect_content_for_user(d.get("uid", callback.from_user.id)),
         )
     except Exception: pass
     await _send_poll(callback.bot, cid, state)
@@ -672,7 +676,8 @@ async def cancel_poll(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         await callback.bot.send_message(
             cid, "❌ <b>Test to'xtatildi.</b>",
-            reply_markup=main_kb(uid, "private")
+            reply_markup=main_kb(uid, "private"),
+            protect_content=is_protect_content_for_user(uid),
         )
 
 
@@ -777,13 +782,13 @@ async def _finish_poll(bot, cid, state, d):
             f"• @{ADMIN_USERNAME} ga yozing\n"
             f"• Yoki quyidagi tugmani bosing 👇"
         )
-        await bot.send_message(cid, demo_text, reply_markup=b.as_markup())
-        await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"))
+        await bot.send_message(cid, demo_text, reply_markup=b.as_markup(), protect_content=is_protect_content_for_user(d.get("uid", cid)))
+        await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"), protect_content=is_protect_content_for_user(uid))
         return
 
-    await bot.send_message(cid, result_text, reply_markup=result_kb(tid, rid, include_home=False))
+    await bot.send_message(cid, result_text, reply_markup=result_kb(tid, rid, include_home=False), protect_content=is_protect_content_for_user(uid))
     # Test tugagach ReplyKeyboard yana doimiy asosiy menyuga qaytadi.
-    await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"))
+    await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"), protect_content=is_protect_content_for_user(uid))
 
 
 # ── ReplyKeyboard tugmalari (pastdagi tugmalar) ───────────────
@@ -801,7 +806,8 @@ async def reply_pause_poll(message, state: FSMContext):
     await message.bot.send_message(
         cid,
         f"⏸ <b>PAUZA</b> | Savol {d.get('idx', 0)}/{len(d.get('qs', []))}",
-        reply_markup=poll_pause_reply_kb()
+        reply_markup=poll_pause_reply_kb(),
+        protect_content=is_protect_content_for_user(d.get("uid", message.from_user.id)),
     )
 
 
@@ -819,7 +825,8 @@ async def reply_resume_poll(message, state: FSMContext):
         await message.bot.send_message(
             cid,
             f"▶️ <b>Davom etildi</b> | Savol {idx}/{len(qs)}",
-            reply_markup=poll_control_reply_kb()
+            reply_markup=poll_control_reply_kb(),
+            protect_content=is_protect_content_for_user(d.get("uid", callback.from_user.id)),
         )
     except Exception: pass
     await _send_poll(message.bot, cid, state)

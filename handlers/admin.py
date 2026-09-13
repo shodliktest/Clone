@@ -1952,7 +1952,7 @@ async def admin_security(callback: CallbackQuery):
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"<b>Screenshot/Forward himoyasi: {status_icon}</b>\n\n"
         f"{status_text}\n\n"
-        f"<i>⚠️ O'zgartirish bot qayta ishga tushirilganda kuchga kiradi</i>",
+        f"<i>⚡ O'zgarish darhol kuchga kiradi. Oldin yuborilgan himoyalangan xabarlar esa Telegram tomonidan qayta ochilmaydi.</i>",
         parse_mode="HTML",
         reply_markup=security_kb(protect)
     )
@@ -1969,12 +1969,14 @@ async def sec_protect_on(callback: CallbackQuery):
     from utils import tg_db
     set_security("protect_content", True)
 
-    # Sozlamani TG ga saqlash
-    try:
-        from utils.ram_cache import get_all_settings
-        await tg_db.save_settings(get_all_settings())
-    except Exception:
-        pass
+    # MUHIM: security app_settings ichidagi alohida namespace.
+    # save_settings() bilan yozish noto'g'ri edi va eski __security__ ni saqlamasligi mumkin.
+    saved = await tg_db.save_security({"protect_content": True})
+    # Joriy bot instance'iga restart qilmasdan darhol qo'llaymiz.
+    callback.bot.default.protect_content = True
+
+    if not saved:
+        log.error("SECURITY_SAVE_FAILED action=on")
 
     await callback.answer("🔒 Himoya yoqildi!", show_alert=True)
     await admin_security(callback)
@@ -1991,11 +1993,13 @@ async def sec_protect_off(callback: CallbackQuery):
     from utils import tg_db
     set_security("protect_content", False)
 
-    try:
-        from utils.ram_cache import get_all_settings
-        await tg_db.save_settings(get_all_settings())
-    except Exception:
-        pass
+    # Global security namespace'ini aniq False qilib saqlaymiz.
+    saved = await tg_db.save_security({"protect_content": False})
+    # Joriy bot instance'ida ham darhol ochamiz — restart shart emas.
+    callback.bot.default.protect_content = False
+
+    if not saved:
+        log.error("SECURITY_SAVE_FAILED action=off")
 
     await callback.answer("🔓 Himoya o'chirildi!", show_alert=True)
     await admin_security(callback)
