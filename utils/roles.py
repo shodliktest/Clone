@@ -139,6 +139,33 @@ def get_role(uid: int) -> str:
     _check_expire_role(uid, user)
     return user.get("role", "user")
 
+def should_protect_content(uid: int, admin_ids=None) -> bool:
+    """
+    Telegram message uchun protect_content siyosati.
+
+    Global himoya yoqilgan bo'lsa ham haqiqiy ``admin`` role yoki
+    config.ADMIN_IDS dagi foydalanuvchiga private chatda screenshot/forward
+    ruxsat beriladi. Role muddati tugagan bo'lsa get_role() uni user ga tushiradi.
+    """
+    try:
+        if admin_ids is None:
+            from config import ADMIN_IDS
+            admin_ids = ADMIN_IDS
+        if uid in (admin_ids or []):
+            return False
+    except Exception:
+        pass
+
+    try:
+        if get_role(int(uid)) == "admin":
+            return False
+    except Exception:
+        pass
+
+    from utils.ram_cache import is_protect_content
+    return is_protect_content()
+
+
 def get_role_label(uid: int) -> str:
     return ROLE_LABELS.get(get_role(uid), "👤 Foydalanuvchi")
 
