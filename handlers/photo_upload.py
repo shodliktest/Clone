@@ -1,3 +1,4 @@
+from utils.roles import should_protect_content
 """
 photo_upload.py — Rasmli savollar uchun yordamchi handler
 
@@ -18,7 +19,6 @@ import logging
 from aiogram import Router
 from aiogram.types import Message
 from aiogram.filters import Command
-from utils.ram_cache import is_protect_content_for_user
 
 log    = logging.getLogger(__name__)
 router = Router()
@@ -49,7 +49,7 @@ async def cmd_upload_photo(message: Message):
         "C) Variant\n"
         "D) Variant</pre>",
         parse_mode="HTML",
-        protect_content=is_protect_content_for_user(message.from_user.id),
+        protect_content=should_protect_content(user_id),
     )
 
 

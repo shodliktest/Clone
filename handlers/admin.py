@@ -1952,7 +1952,7 @@ async def admin_security(callback: CallbackQuery):
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"<b>Screenshot/Forward himoyasi: {status_icon}</b>\n\n"
         f"{status_text}\n\n"
-        f"<i>⚡ O'zgarish darhol kuchga kiradi. Oldin yuborilgan himoyalangan xabarlar esa Telegram tomonidan qayta ochilmaydi.</i>",
+        f"<i>⚠️ O'zgartirish darhol kuchga kiradi</i>",
         parse_mode="HTML",
         reply_markup=security_kb(protect)
     )
@@ -1969,14 +1969,12 @@ async def sec_protect_on(callback: CallbackQuery):
     from utils import tg_db
     set_security("protect_content", True)
 
-    # MUHIM: security app_settings ichidagi alohida namespace.
-    # save_settings() bilan yozish noto'g'ri edi va eski __security__ ni saqlamasligi mumkin.
-    saved = await tg_db.save_security({"protect_content": True})
-    # Joriy bot instance'iga restart qilmasdan darhol qo'llaymiz.
-    callback.bot.default.protect_content = True
-
-    if not saved:
-        log.error("SECURITY_SAVE_FAILED action=on")
+    # Security alohida namespace sifatida saqlanadi.
+    try:
+        from utils.ram_cache import get_security
+        await tg_db.save_security(get_security())
+    except Exception as e:
+        log.error("Security ON saqlashda xato: %s", e)
 
     await callback.answer("🔒 Himoya yoqildi!", show_alert=True)
     await admin_security(callback)
@@ -1993,13 +1991,11 @@ async def sec_protect_off(callback: CallbackQuery):
     from utils import tg_db
     set_security("protect_content", False)
 
-    # Global security namespace'ini aniq False qilib saqlaymiz.
-    saved = await tg_db.save_security({"protect_content": False})
-    # Joriy bot instance'ida ham darhol ochamiz — restart shart emas.
-    callback.bot.default.protect_content = False
-
-    if not saved:
-        log.error("SECURITY_SAVE_FAILED action=off")
+    try:
+        from utils.ram_cache import get_security
+        await tg_db.save_security(get_security())
+    except Exception as e:
+        log.error("Security OFF saqlashda xato: %s", e)
 
     await callback.answer("🔓 Himoya o'chirildi!", show_alert=True)
     await admin_security(callback)
