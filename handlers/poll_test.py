@@ -1,14 +1,13 @@
 """📊 POLL TEST — private chat, sanash emoji bilan"""
 import time, logging, re, asyncio
 from aiogram import Router, F
-from utils.ram_cache import protect_content_for_chat
 from aiogram.types import CallbackQuery, PollAnswer
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardButton
 
 from utils.db import get_test_full, save_result
-from utils.ram_cache import get_test_by_id, get_daily, is_test_paused, get_test_meta
+from utils.ram_cache import get_test_by_id, get_daily, is_test_paused, get_test_meta, is_protect_content_for_user
 from utils.states import PollTest
 from utils.scoring import calculate_score, format_result
 from keyboards.keyboards import main_kb, result_kb, poll_pause_kb, poll_control_reply_kb, poll_pause_reply_kb
@@ -438,6 +437,8 @@ async def _send_poll(bot, cid, state):
     d   = await state.get_data()
     qs  = d["qs"]
     idx = d["idx"]
+    uid = d.get("uid", cid)
+    _protect = is_protect_content_for_user(uid)
     if idx >= len(qs):
         await _finish_poll(bot, cid, state, d)
         return
@@ -484,7 +485,7 @@ async def _send_poll(bot, cid, state):
                 q["photo"] = resolved      # joriy sessiyada ham keshlanadi
                 await state.update_data(qs=qs)
                 photo_id = resolved
-            await bot.send_photo(cid, photo_id, protect_content=protect_content_for_chat(cid))
+            await bot.send_photo(cid, photo_id, protect_content=_protect)
         except Exception as e:
             log.error(f"Poll rasm xato: {e}")
 
@@ -494,7 +495,7 @@ async def _send_poll(bot, cid, state):
     full_text, poll_q = split_long_question(qtxt, hdr)
     if full_text:
         try:
-            await bot.send_message(cid, full_text, protect_content=protect_content_for_chat(cid))
+            await bot.send_message(cid, full_text, protect_content=_protect)
         except Exception as e:
             log.error(f"Uzun savol matnini yuborishda xato: {e}")
         # Savol allaqachon alohida yuborildi — poll'ga faqat qisqa
@@ -515,7 +516,7 @@ async def _send_poll(bot, cid, state):
             chat_id=cid, question=question, options=clean_opts,
             type="quiz", correct_option_id=ci, explanation=expl,
             is_anonymous=False, open_period=pt if pt > 0 else None,
-            protect_content=protect_content_for_chat(cid),
+            protect_content=_protect
         )
         msgs = d.get("msg_ids", [])
         msgs.append(pm.message_id)
@@ -726,6 +727,7 @@ async def _finish_poll(bot, cid, state, d):
     elapsed  = int(time.time() - d.get("t0", time.time()))
     uid      = d.get("uid", cid)
     via_link = d.get("via_link", False)
+    _protect = is_protect_content_for_user(uid)
 
     from utils.ram_cache import live_end
     live_end(uid)
@@ -779,13 +781,13 @@ async def _finish_poll(bot, cid, state, d):
             f"• @{ADMIN_USERNAME} ga yozing\n"
             f"• Yoki quyidagi tugmani bosing 👇"
         )
-        await bot.send_message(cid, demo_text, reply_markup=b.as_markup())
-        await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"))
+        await bot.send_message(cid, demo_text, reply_markup=b.as_markup(), protect_content=_protect)
+        await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"), protect_content=_protect)
         return
 
-    await bot.send_message(cid, result_text, reply_markup=result_kb(tid, rid, include_home=False))
+    await bot.send_message(cid, result_text, reply_markup=result_kb(tid, rid, include_home=False), protect_content=_protect)
     # Test tugagach ReplyKeyboard yana doimiy asosiy menyuga qaytadi.
-    await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"))
+    await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"), protect_content=_protect)
 
 
 # ── ReplyKeyboard tugmalari (pastdagi tugmalar) ───────────────

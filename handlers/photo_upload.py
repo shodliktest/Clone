@@ -18,7 +18,7 @@ import logging
 from aiogram import Router
 from aiogram.types import Message
 from aiogram.filters import Command
-from utils.ram_cache import protect_content_for_chat
+from utils.ram_cache import is_protect_content_for_user
 
 log    = logging.getLogger(__name__)
 router = Router()
@@ -49,7 +49,7 @@ async def cmd_upload_photo(message: Message):
         "C) Variant\n"
         "D) Variant</pre>",
         parse_mode="HTML",
-        protect_content=protect_content_for_chat(message.chat.id),
+        protect_content=is_protect_content_for_user(user_id),
     )
 
 

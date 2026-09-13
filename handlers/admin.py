@@ -1927,8 +1927,7 @@ async def fj_check_cb(callback: CallbackQuery):
 async def admin_security(callback: CallbackQuery):
     """Xavfsizlik sozlamalari paneli"""
     from config import ADMIN_IDS
-    from utils.ram_cache import is_admin_exempt_from_protection
-    if callback.from_user.id not in ADMIN_IDS and not is_admin_exempt_from_protection(callback.from_user.id):
+    if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("❌ Ruxsat yo'q!", show_alert=True)
 
     await callback.answer()
@@ -1953,7 +1952,7 @@ async def admin_security(callback: CallbackQuery):
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"<b>Screenshot/Forward himoyasi: {status_icon}</b>\n\n"
         f"{status_text}\n\n"
-        f"<i>⚡ O'zgartirish darhol kuchga kiradi.</i>",
+        f"<i>⚡ O'zgartirish darhol kuchga kiradi. Restart shart emas.</i>",
         parse_mode="HTML",
         reply_markup=security_kb(protect)
     )
@@ -1963,25 +1962,18 @@ async def admin_security(callback: CallbackQuery):
 async def sec_protect_on(callback: CallbackQuery):
     """Screenshot/forward bloklash yoqish"""
     from config import ADMIN_IDS
-    from utils.ram_cache import is_admin_exempt_from_protection
-    if callback.from_user.id not in ADMIN_IDS and not is_admin_exempt_from_protection(callback.from_user.id):
+    if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("❌ Ruxsat yo'q!", show_alert=True)
 
-    from utils.ram_cache import set_security, get_security
+    from utils.ram_cache import set_protect_content, is_protect_content
     from utils import tg_db
-    set_security("protect_content", True)
-    # JORIY bot instance: restart kerak emas.
-    try:
-        callback.bot.default.protect_content = True
-    except Exception as e:
-        log.warning(f"security runtime ON: {e}")
-    # Security alohida namespace sifatida saqlanadi; umumiy settings bilan aralashtirilmaydi.
-    try:
-        ok = await tg_db.save_security(get_security())
-        if not ok:
-            log.error("security ON DB ga saqlanmadi")
-    except Exception as e:
-        log.error(f"security ON DB xato: {e}")
+    set_protect_content(True)
+
+    # Muhim: security alohida namespace sifatida saqlanadi.
+    saved = await tg_db.save_security({"protect_content": True})
+    callback.bot.default.protect_content = is_protect_content()
+    if not saved:
+        log.error("SECURITY_SAVE_FAILED action=ON")
 
     await callback.answer("🔒 Himoya yoqildi!", show_alert=True)
     await admin_security(callback)
@@ -1991,24 +1983,18 @@ async def sec_protect_on(callback: CallbackQuery):
 async def sec_protect_off(callback: CallbackQuery):
     """Screenshot/forward bloklashni o'chirish"""
     from config import ADMIN_IDS
-    from utils.ram_cache import is_admin_exempt_from_protection
-    if callback.from_user.id not in ADMIN_IDS and not is_admin_exempt_from_protection(callback.from_user.id):
+    if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("❌ Ruxsat yo'q!", show_alert=True)
 
-    from utils.ram_cache import set_security, get_security
+    from utils.ram_cache import set_protect_content, is_protect_content
     from utils import tg_db
-    set_security("protect_content", False)
-    # JORIY bot instance: OFF ham darhol ishlaydi.
-    try:
-        callback.bot.default.protect_content = False
-    except Exception as e:
-        log.warning(f"security runtime OFF: {e}")
-    try:
-        ok = await tg_db.save_security(get_security())
-        if not ok:
-            log.error("security OFF DB ga saqlanmadi")
-    except Exception as e:
-        log.error(f"security OFF DB xato: {e}")
+    set_protect_content(False)
+
+    # Muhim: oddiy save_settings() security qiymatini ustidan yozmasin.
+    saved = await tg_db.save_security({"protect_content": False})
+    callback.bot.default.protect_content = is_protect_content()
+    if not saved:
+        log.error("SECURITY_SAVE_FAILED action=OFF")
 
     await callback.answer("🔓 Himoya o'chirildi!", show_alert=True)
     await admin_security(callback)
