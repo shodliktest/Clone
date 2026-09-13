@@ -146,43 +146,53 @@ def set_protect_content(value: bool) -> dict:
     """Global screenshot/forward himoyasi. RAMdagi yagona manba."""
     return set_security("protect_content", bool(value))
 
+def is_admin_exempt_from_protection(uid: int) -> bool:
+    """Private chatdagi adminlarga protect_content ni chetlab o'tishga ruxsat beradi.
 
-def is_protect_content_for_user(uid: int) -> bool:
+    Asosiy ADMIN_IDS har doim exempt. Qo'shimcha role=admin ham exempt,
+    lekin role_expires_at mavjud bo'lsa uning muddati tugaganidan keyin emas.
+    Guruh/channel ID lar bu funksiyaga yuborilmasligi kerak.
     """
-    Berilgan private user uchun protect_content qiymatini qaytaradi.
-
-    Global himoya yoqilgan bo'lsa ham `admin` roli doim erkin qoladi:
-    admin foydalanuvchi screenshot/copy/forward qila oladi.
-    ADMIN_IDS ham doimiy admin hisoblanadi.
-    Muddatli admin roli muddati o'tgan bo'lsa, exemption qo'llanmaydi.
-    """
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return False
     try:
         from config import ADMIN_IDS
         if uid in ADMIN_IDS:
-            return False
+            return True
     except Exception:
         pass
 
-    try:
-        user = get_user(int(uid)) or {}
-        if user.get("role") != "admin":
-            return is_protect_content()
-
-        expires = user.get("role_expires_at")
-        if expires:
-            try:
-                exp_dt = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
-                if exp_dt.tzinfo is None:
-                    exp_dt = exp_dt.replace(tzinfo=UTC)
-                if datetime.now(UTC) >= exp_dt:
-                    return is_protect_content()
-            except (ValueError, TypeError):
-                # Noto'g'ri muddat bo'lsa xavfsiz default: global policy.
-                return is_protect_content()
-
+    user = get_user(uid)
+    if not isinstance(user, dict) or user.get("role") != "admin":
         return False
+
+    expires = user.get("role_expires_at")
+    if not expires:
+        return True
+    try:
+        exp = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=UTC)
+        return datetime.now(UTC) <= exp
     except Exception:
+        # Noto'g'ri expiry bo'lsa xavfsizlik nuqtai nazaridan exempt qilmaymiz.
+        return False
+
+def protect_content_for_chat(chat_id: int) -> bool:
+    """Telegram chat uchun real-time protect_content siyosati.
+
+    Private chatda admin exempt. Guruh/channelda esa bitta xabar barcha
+    a'zolarga bir xil yuborilgani sababli global siyosat qo'llanadi.
+    """
+    try:
+        cid = int(chat_id)
+    except (TypeError, ValueError):
         return is_protect_content()
+    if cid > 0 and is_admin_exempt_from_protection(cid):
+        return False
+    return is_protect_content()
 
 
 # ══ TEST META ══════════════════════════════════════════════════

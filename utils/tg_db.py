@@ -950,27 +950,21 @@ async def _notify_updated_test(meta: dict, tid: str, old_qc: int, new_qc: int):
 # ══════════════════════════════════════════════════════════════
 
 async def save_settings(settings_dict: dict) -> bool:
-    """
-    Oddiy app settings'ni saqlaydi va alohida namespace bo'lgan
-    ``__security__`` ni tasodifan o'chirib yuborishdan himoya qiladi.
-
-    Sabab: eski implementatsiya butun ``data`` obyektini almashtirar edi.
-    Shunda boshqa modul save_settings() chaqirsa, security sozlamasi yo'qolib,
-    bot restartidan keyin default False ga qaytishi mumkin edi.
-    """
+    """Oddiy settingsni saqlaydi va __security__ namespace'ni hech qachon
+    eski RAM qiymati bilan tasodifan ustidan yozmaydi. Security alohida
+    save_security() orqali boshqariladi, shuning uchun settings flush'lari
+    ON/OFF holatini buzmasligi kerak."""
     if not ready():
         return False
     try:
-        current_row = await sb.select_one("app_settings", "id", 1)
-        current = dict((current_row or {}).get("data") or {})
-        new_data = dict(settings_dict or {})
-
-        # Security namespace faqat save_security() tomonidan boshqariladi.
-        # Oddiy settings yozuvi uni olib tashlamasligi kerak.
-        if "__security__" in current and "__security__" not in new_data:
-            new_data["__security__"] = current["__security__"]
-
-        await sb.upsert("app_settings", {"id": 1, "data": new_data}, on_conflict="id")
+        data = dict(settings_dict or {})
+        # Joriy DB security qiymatini saqlab qolamiz. Bu ayniqsa security
+        # toggle'dan keyin boshqa settings o'zgarganida muhim.
+        row = await sb.select_one("app_settings", "id", 1)
+        existing = dict((row or {}).get("data") or {})
+        if "__security__" in existing:
+            data["__security__"] = existing["__security__"]
+        await sb.upsert("app_settings", {"id": 1, "data": data}, on_conflict="id")
         return True
     except Exception as e:
         log.error(f"save_settings: {e}")
