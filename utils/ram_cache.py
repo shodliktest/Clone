@@ -147,6 +147,44 @@ def set_protect_content(value: bool) -> dict:
     return set_security("protect_content", bool(value))
 
 
+def is_protect_content_for_user(uid: int) -> bool:
+    """
+    Berilgan private user uchun protect_content qiymatini qaytaradi.
+
+    Global himoya yoqilgan bo'lsa ham `admin` roli doim erkin qoladi:
+    admin foydalanuvchi screenshot/copy/forward qila oladi.
+    ADMIN_IDS ham doimiy admin hisoblanadi.
+    Muddatli admin roli muddati o'tgan bo'lsa, exemption qo'llanmaydi.
+    """
+    try:
+        from config import ADMIN_IDS
+        if uid in ADMIN_IDS:
+            return False
+    except Exception:
+        pass
+
+    try:
+        user = get_user(int(uid)) or {}
+        if user.get("role") != "admin":
+            return is_protect_content()
+
+        expires = user.get("role_expires_at")
+        if expires:
+            try:
+                exp_dt = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=UTC)
+                if datetime.now(UTC) >= exp_dt:
+                    return is_protect_content()
+            except (ValueError, TypeError):
+                # Noto'g'ri muddat bo'lsa xavfsiz default: global policy.
+                return is_protect_content()
+
+        return False
+    except Exception:
+        return is_protect_content()
+
+
 # ══ TEST META ══════════════════════════════════════════════════
 
 def get_tests_meta():
