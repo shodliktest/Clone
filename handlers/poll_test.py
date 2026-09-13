@@ -1,6 +1,7 @@
 """📊 POLL TEST — private chat, sanash emoji bilan"""
 import time, logging, re, asyncio
 from aiogram import Router, F
+from utils.ram_cache import protect_content_for_chat
 from aiogram.types import CallbackQuery, PollAnswer
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -11,7 +12,6 @@ from utils.ram_cache import get_test_by_id, get_daily, is_test_paused, get_test_
 from utils.states import PollTest
 from utils.scoring import calculate_score, format_result
 from keyboards.keyboards import main_kb, result_kb, poll_pause_kb, poll_control_reply_kb, poll_pause_reply_kb
-from utils.roles import should_protect_content
 
 log    = logging.getLogger(__name__)
 router = Router()
@@ -436,7 +436,6 @@ async def _resolve_photo_id(bot, state, d, photo_id: str) -> str:
 
 async def _send_poll(bot, cid, state):
     d   = await state.get_data()
-    protect = should_protect_content(int(d.get("uid", cid)))
     qs  = d["qs"]
     idx = d["idx"]
     if idx >= len(qs):
@@ -485,7 +484,7 @@ async def _send_poll(bot, cid, state):
                 q["photo"] = resolved      # joriy sessiyada ham keshlanadi
                 await state.update_data(qs=qs)
                 photo_id = resolved
-            await bot.send_photo(cid, photo_id, protect_content=protect)
+            await bot.send_photo(cid, photo_id, protect_content=protect_content_for_chat(cid))
         except Exception as e:
             log.error(f"Poll rasm xato: {e}")
 
@@ -495,7 +494,7 @@ async def _send_poll(bot, cid, state):
     full_text, poll_q = split_long_question(qtxt, hdr)
     if full_text:
         try:
-            await bot.send_message(cid, full_text, protect_content=protect)
+            await bot.send_message(cid, full_text, protect_content=protect_content_for_chat(cid))
         except Exception as e:
             log.error(f"Uzun savol matnini yuborishda xato: {e}")
         # Savol allaqachon alohida yuborildi — poll'ga faqat qisqa
@@ -516,7 +515,7 @@ async def _send_poll(bot, cid, state):
             chat_id=cid, question=question, options=clean_opts,
             type="quiz", correct_option_id=ci, explanation=expl,
             is_anonymous=False, open_period=pt if pt > 0 else None,
-            protect_content=protect
+            protect_content=protect_content_for_chat(cid),
         )
         msgs = d.get("msg_ids", [])
         msgs.append(pm.message_id)
