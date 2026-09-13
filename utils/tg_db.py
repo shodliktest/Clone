@@ -864,7 +864,7 @@ async def get_or_create_bot():
     from config import BOT_TOKEN
     if not BOT_TOKEN:
         return None
-    from aiogram import Bot as _BotClass
+    from utils.secure_bot import SecureBot as _BotClass
     from aiogram.client.default import DefaultBotProperties
     from aiogram.enums import ParseMode
     return _BotClass(
@@ -953,7 +953,13 @@ async def save_settings(settings_dict: dict) -> bool:
     if not ready():
         return False
     try:
-        await sb.upsert("app_settings", {"id": 1, "data": settings_dict}, on_conflict="id")
+        # Generic settings writes must never erase the separate security namespace.
+        row = await sb.select_one("app_settings", "id", 1)
+        current = dict((row or {}).get("data") or {})
+        data = dict(settings_dict or {})
+        if "__security__" in current:
+            data["__security__"] = current["__security__"]
+        await sb.upsert("app_settings", {"id": 1, "data": data}, on_conflict="id")
         return True
     except Exception as e:
         log.error(f"save_settings: {e}")
