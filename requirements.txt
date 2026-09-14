@@ -12,3 +12,5 @@ reportlab>=4.0.0
 supabase>=2.7.0
 docx2txt>=0.8
 mammoth>=1.7.0
+google-genai>=1.38.0
+groq>=0.31.0
