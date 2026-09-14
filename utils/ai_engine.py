@@ -6,6 +6,7 @@ fallback. Rate limiting is provider-wide (organization/project), not key-wide.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import time
@@ -75,8 +76,31 @@ GEMINI_MAX_OUTPUT = int(os.getenv("GEMINI_AI_MAX_OUTPUT", "600"))
 
 _groq_gate = _RateGate(GROQ_MIN_INTERVAL)
 _gemini_gate = _RateGate(GEMINI_MIN_INTERVAL)
+@dataclass
+class _Circuit:
+    cooldown_until: float = 0.0
+    failures: int = 0
+
+    def available(self) -> bool:
+        return time.monotonic() >= self.cooldown_until
+
+    def trip(self, retry_after: float | None = None, base: float = 30.0, cap: float = 300.0) -> float:
+        self.failures += 1
+        delay = retry_after if retry_after is not None else min(cap, base * (2 ** min(self.failures - 1, 4)))
+        delay = max(1.0, min(cap, float(delay)))
+        self.cooldown_until = time.monotonic() + delay
+        return delay
+
+    def success(self) -> None:
+        self.cooldown_until = 0.0
+        self.failures = 0
+
+
 _groq_index = 0
 _gemini_index = 0
+_groq_circuit = _Circuit()
+_gemini_circuit = _Circuit()
+
 
 
 def _json_text(text: str) -> Any:
@@ -112,89 +136,199 @@ def _normalize(items: Any) -> list[dict]:
     return result
 
 
+
+def _status_code(exc: BaseException) -> int | None:
+    for obj in (exc, getattr(exc, "response", None)):
+        if obj is None:
+            continue
+        value = getattr(obj, "status_code", None)
+        if value is None:
+            value = getattr(obj, "code", None)
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _retry_after(exc: BaseException) -> float | None:
+    for obj in (exc, getattr(exc, "response", None)):
+        if obj is None:
+            continue
+        for name in ("retry_after", "retry_after_seconds"):
+            value = getattr(obj, name, None)
+            if value is not None:
+                try:
+                    return max(0.0, float(value))
+                except (TypeError, ValueError):
+                    pass
+        headers = getattr(obj, "headers", None)
+        if headers:
+            try:
+                value = headers.get("retry-after") or headers.get("Retry-After")
+                if value is not None:
+                    return max(0.0, float(value))
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _is_rate_limit(exc: BaseException) -> bool:
+    status = _status_code(exc)
+    if status == 429:
+        return True
+    msg = str(exc).lower()
+    return any(x in msg for x in (
+        "rate limit", "rate_limit", "too many requests", "resource exhausted",
+        "quota exceeded", "quota exhausted", "daily limit", "tokens per minute",
+    ))
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    # aiohttp connection exceptions are imported from their supported module.
+    try:
+        from aiohttp.client_exceptions import ClientConnectionError
+        if isinstance(exc, ClientConnectionError):
+            return True
+    except Exception:
+        pass
+    msg = str(exc).lower()
+    return any(x in msg for x in (
+        "clientconnector", "dns", "name or service not known",
+        "temporary failure in name resolution", "connection reset",
+        "connection refused", "network is unreachable", "timed out",
+        "timeout", "server disconnected",
+    ))
+
+
+async def _close_client(client: Any) -> None:
+    """Best-effort cleanup for official async SDK clients."""
+    if client is None:
+        return
+    candidates = []
+    aio = getattr(client, "aio", None)
+    if aio is not None:
+        candidates += [getattr(aio, "aclose", None), getattr(aio, "close", None)]
+    candidates += [getattr(client, "aclose", None), getattr(client, "close", None)]
+    seen = set()
+    for fn in candidates:
+        if not callable(fn) or id(fn) in seen:
+            continue
+        seen.add(id(fn))
+        try:
+            result = fn()
+            if inspect.isawaitable(result):
+                await result
+            return
+        except Exception:
+            continue
+
+
+async def _call_groq(system_prompt: str, user_prompt: str) -> tuple[list[dict], str]:
+    global _groq_index
+    keys = _keys("GROQ_API_KEY", 20)
+    if not keys:
+        raise AIProviderError("Groq", "GROQ_API_KEY topilmadi", retryable=False)
+    if not _groq_circuit.available():
+        remaining = max(0, _groq_circuit.cooldown_until - time.monotonic())
+        raise AIProviderError("Groq", f"rate-limit cooldown: {remaining:.0f}s", rate_limited=True, retry_after=remaining)
+    try:
+        from groq import AsyncGroq
+    except Exception as exc:
+        raise AIProviderError("Groq", f"SDK yuklanmadi: {exc}", retryable=False) from exc
+    for _ in range(len(keys)):
+        key = keys[_groq_index % len(keys)]
+        _groq_index += 1
+        client = None
+        try:
+            await _groq_gate.wait()
+            client = AsyncGroq(api_key=key)
+            completion = await client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                temperature=0,
+                max_completion_tokens=GROQ_MAX_OUTPUT,
+                include_reasoning=False,
+            )
+            result = _normalize(_json_text(completion.choices[0].message.content or ""))
+            _groq_circuit.success()
+            return result, "Groq"
+        except Exception as exc:
+            msg = str(exc)
+            if _is_rate_limit(exc):
+                delay = _groq_circuit.trip(_retry_after(exc), base=30.0, cap=300.0)
+                raise AIProviderError("Groq", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
+            if _is_network_error(exc):
+                delay = _groq_circuit.trip(base=15.0, cap=120.0)
+                raise AIProviderError("Groq", f"network error; cooldown {delay:.0f}s: {msg[:140]}", retryable=True, retry_after=delay) from exc
+            raise AIProviderError("Groq", f"{_status_code(exc) or ''}: {msg[:180]}", retryable=False) from exc
+        finally:
+            await _close_client(client)
+    raise AIProviderError("Groq", "barcha Groq credential urinishlari muvaffaqiyatsiz", retryable=True)
+
+
+async def _call_gemini(system_prompt: str, user_prompt: str) -> tuple[list[dict], str]:
+    global _gemini_index
+    keys = _keys("GEMINI_API_KEY", 20)
+    if not keys:
+        raise AIProviderError("Gemini", "GEMINI_API_KEY topilmadi", retryable=False)
+    if not _gemini_circuit.available():
+        remaining = max(0, _gemini_circuit.cooldown_until - time.monotonic())
+        raise AIProviderError("Gemini", f"rate-limit cooldown: {remaining:.0f}s", rate_limited=True, retry_after=remaining)
+    try:
+        from google import genai
+        from google.genai import types
+    except Exception as exc:
+        raise AIProviderError("Gemini", f"SDK yuklanmadi: {exc}", retryable=False) from exc
+    for _ in range(len(keys)):
+        key = keys[_gemini_index % len(keys)]
+        _gemini_index += 1
+        client = None
+        try:
+            await _gemini_gate.wait()
+            client = genai.Client(api_key=key)
+            response = await client.aio.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=0,
+                    max_output_tokens=GEMINI_MAX_OUTPUT,
+                    response_mime_type="application/json",
+                ),
+            )
+            result = _normalize(_json_text(response.text or ""))
+            _gemini_circuit.success()
+            return result, "Gemini"
+        except Exception as exc:
+            msg = str(exc)
+            if _is_rate_limit(exc):
+                delay = _gemini_circuit.trip(_retry_after(exc), base=30.0, cap=300.0)
+                raise AIProviderError("Gemini", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
+            if _is_network_error(exc):
+                delay = _gemini_circuit.trip(base=15.0, cap=120.0)
+                raise AIProviderError("Gemini", f"network error; cooldown {delay:.0f}s: {msg[:140]}", retryable=True, retry_after=delay) from exc
+            raise AIProviderError("Gemini", f"{_status_code(exc) or ''}: {msg[:180]}", retryable=False) from exc
+        finally:
+            await _close_client(client)
+    raise AIProviderError("Gemini", "barcha Gemini credential urinishlari muvaffaqiyatsiz", retryable=True)
+
+
 async def solve_text_batch(system_prompt: str, user_prompt: str) -> tuple[list[dict], str]:
-    """Groq -> Gemini fallback. Other legacy providers remain outside this engine."""
-    global _groq_index, _gemini_index
-
-    groq_keys = _keys("GROQ_API_KEY", 20)
-    gemini_keys = _keys("GEMINI_API_KEY", 20)
+    """Groq primary -> Gemini fallback; successful Groq auto-restores primary."""
     errors = []
-
-    # Primary: official Groq SDK. Key rotation is only for credential rotation;
-    # Groq quotas are organization-level, so it is NOT treated as extra quota.
-    if groq_keys:
-        try:
-            from groq import AsyncGroq
-        except Exception as exc:
-            errors.append(f"Groq SDK missing: {exc}")
-        else:
-            for _ in range(len(groq_keys)):
-                key = groq_keys[_groq_index % len(groq_keys)]
-                _groq_index += 1
-                try:
-                    await _groq_gate.wait()
-                    client = AsyncGroq(api_key=key)
-                    completion = await client.chat.completions.create(
-                        model=GROQ_MODEL,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        temperature=0,
-                        max_completion_tokens=GROQ_MAX_OUTPUT,
-                        include_reasoning=False,
-                    )
-                    text = completion.choices[0].message.content or ""
-                    return _normalize(_json_text(text)), "Groq"
-                except Exception as exc:
-                    status = getattr(exc, "status_code", None)
-                    msg = str(exc)
-                    is_rate = status == 429 or "rate limit" in msg.lower() or "quota" in msg.lower()
-                    errors.append(f"Groq {status or ''}: {msg[:180]}")
-                    if not is_rate:
-                        # Bad request/model/schema errors should not burn all keys.
-                        break
-
-    # Dedicated Gemini fallback via the current official google-genai SDK.
-    if gemini_keys:
-        try:
-            from google import genai
-            from google.genai import types
-        except Exception as exc:
-            errors.append(f"Gemini SDK missing: {exc}")
-        else:
-            for _ in range(len(gemini_keys)):
-                key = gemini_keys[_gemini_index % len(gemini_keys)]
-                _gemini_index += 1
-                try:
-                    await _gemini_gate.wait()
-                    client = genai.Client(api_key=key)
-                    config = types.GenerateContentConfig(
-                        system_instruction=system_prompt,
-                        temperature=0,
-                        max_output_tokens=GEMINI_MAX_OUTPUT,
-                        response_mime_type="application/json",
-                    )
-                    response = await client.aio.models.generate_content(
-                        model=GEMINI_MODEL,
-                        contents=user_prompt,
-                        config=config,
-                    )
-                    text = response.text or ""
-                    return _normalize(_json_text(text)), "Gemini"
-                except Exception as exc:
-                    code = getattr(exc, "code", None)
-                    msg = str(exc)
-                    is_rate = code == 429 or "429" in msg or "resource exhausted" in msg.lower() or "quota" in msg.lower()
-                    errors.append(f"Gemini {code or ''}: {msg[:180]}")
-                    if not is_rate:
-                        break
-
+    try:
+        return await _call_groq(system_prompt, user_prompt)
+    except AIProviderError as exc:
+        errors.append(str(exc))
+    try:
+        return await _call_gemini(system_prompt, user_prompt)
+    except AIProviderError as exc:
+        errors.append(str(exc))
     raise AIProviderError(
-        "AI",
-        "; ".join(errors) if errors else "GROQ_API_KEY/GEMINI_API_KEY topilmadi",
-        retryable=True,
-        rate_limited=bool(errors),
+        "AI", "; ".join(errors), retryable=True,
+        rate_limited=any("rate limit" in x.lower() or "cooldown" in x.lower() for x in errors),
     )
 
 
@@ -204,38 +338,41 @@ async def solve_image(image_bytes: bytes, mime_type: str, prompt: str) -> dict:
     keys = _keys("GEMINI_API_KEY", 20)
     if not keys:
         raise AIProviderError("Gemini", "GEMINI_API_KEY topilmadi", retryable=False)
-
-    from google import genai
-    from google.genai import types
-
-    errors = []
+    if not _gemini_circuit.available():
+        remaining = max(0, _gemini_circuit.cooldown_until - time.monotonic())
+        raise AIProviderError("Gemini", f"rate-limit cooldown: {remaining:.0f}s", rate_limited=True, retry_after=remaining)
+    try:
+        from google import genai
+        from google.genai import types
+    except Exception as exc:
+        raise AIProviderError("Gemini", f"SDK yuklanmadi: {exc}", retryable=False) from exc
     for _ in range(len(keys)):
         key = keys[_gemini_index % len(keys)]
         _gemini_index += 1
+        client = None
         try:
             await _gemini_gate.wait()
             client = genai.Client(api_key=key)
             response = await client.aio.models.generate_content(
                 model=GEMINI_MODEL,
-                contents=[
-                    types.Part.from_text(text=prompt),
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                ],
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    max_output_tokens=400,
-                    response_mime_type="application/json",
-                ),
+                contents=[types.Part.from_text(text=prompt), types.Part.from_bytes(data=image_bytes, mime_type=mime_type)],
+                config=types.GenerateContentConfig(temperature=0, max_output_tokens=400, response_mime_type="application/json"),
             )
             data = _json_text(response.text or "")
             if not isinstance(data, dict):
                 raise ValueError("Gemini vision javobi object emas")
+            _gemini_circuit.success()
             return data
         except Exception as exc:
-            code = getattr(exc, "code", None)
             msg = str(exc)
-            errors.append(f"Gemini {code or ''}: {msg[:180]}")
-            is_rate = code == 429 or "429" in msg or "resource exhausted" in msg.lower() or "quota" in msg.lower()
-            if not is_rate:
-                break
-    raise AIProviderError("Gemini", "; ".join(errors), rate_limited=True)
+            if _is_rate_limit(exc):
+                delay = _gemini_circuit.trip(_retry_after(exc), base=30.0, cap=300.0)
+                raise AIProviderError("Gemini", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
+            if _is_network_error(exc):
+                delay = _gemini_circuit.trip(base=15.0, cap=120.0)
+                raise AIProviderError("Gemini", f"network error; cooldown {delay:.0f}s: {msg[:140]}", retryable=True, retry_after=delay) from exc
+            raise AIProviderError("Gemini", f"{_status_code(exc) or ''}: {msg[:180]}", retryable=False) from exc
+        finally:
+            await _close_client(client)
+    raise AIProviderError("Gemini", "barcha Gemini credential urinishlari muvaffaqiyatsiz", retryable=True)
+
