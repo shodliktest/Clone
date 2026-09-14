@@ -179,6 +179,11 @@ def set_role(uid: int, role: str, duration_key: str = "perm") -> dict:
     user = ram.get_user(uid) or {}
     now  = datetime.now(UTC)
 
+    # Admin security exemption is permanent.  Do not allow a timed admin
+    # role to expire and unexpectedly lose the private-chat exemption.
+    if role == "admin":
+        duration_key = "perm"
+
     days = DURATION_OPTIONS.get(duration_key, ("Cheksiz", None))[1]
     expires_at = None
     if days is not None:

@@ -144,11 +144,13 @@ def is_protect_content() -> bool:
     return bool(get_security().get("protect_content", False))
 
 def is_security_admin(uid) -> bool:
-    """Security uchun admin exemption.
+    """Private-chat security exemption.
 
-    ADMIN_IDS doim ruxsatli. Bundan tashqari role=admin bo'lgan foydalanuvchi
-    ham faol role muddati ichida screenshot/copy/forward qila oladi.
-    Bu funksiya faqat private-chatga yuboriladigan xabar siyosatida ishlatiladi.
+    ADMIN_IDS and users whose current stored role is ``admin`` are always
+    exempt from protect_content in private chats.  Expiry is intentionally
+    not evaluated here: an admin role is made permanent by the role engine.
+    Group/channel chats never call this helper because their chat_id is not a
+    positive Telegram user ID.
     """
     try:
         uid_i = int(uid)
@@ -157,28 +159,13 @@ def is_security_admin(uid) -> bool:
 
     try:
         from config import ADMIN_IDS
-        if uid_i in ADMIN_IDS:
+        if uid_i in (ADMIN_IDS or []):
             return True
     except Exception:
         pass
 
     user = get_user(uid_i) or get_user(str(uid_i)) or {}
-    if str(user.get("role", "")).lower() != "admin":
-        return False
-
-    # Muddatli admin roli bo'lsa, muddati tugagach exemption ham tugaydi.
-    expires = user.get("role_expires_at")
-    if not expires:
-        return True
-    try:
-        exp = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
-        if exp.tzinfo is None:
-            exp = exp.replace(tzinfo=UTC)
-        return datetime.now(UTC) <= exp
-    except Exception:
-        # Noto'g'ri expiry sabab adminni bloklab qo'ymaslik uchun role'ni
-        # amaldagi admin deb qabul qilamiz; role tizimining o'zi keyin tuzatadi.
-        return True
+    return str(user.get("role", "")).lower() == "admin"
 
 def is_protect_content_for_user(uid) -> bool:
     """Muayyan private-chat uchun yakuniy protect_content siyosati.
