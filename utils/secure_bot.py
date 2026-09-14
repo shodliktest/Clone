@@ -26,9 +26,15 @@ class SecureBot(Bot):
         if uid <= 0:
             return
         try:
-            from utils.ram_cache import is_security_admin
-            if is_security_admin(uid):
+            # Use the same role engine that the bot uses everywhere else.
+            # This covers ADMIN_IDS and active role=admin users.
+            from utils.roles import get_role
+            if get_role(uid) == "admin":
                 kwargs["protect_content"] = False
+            else:
+                from config import ADMIN_IDS
+                if uid in (ADMIN_IDS or []):
+                    kwargs["protect_content"] = False
         except Exception:
             # Never let the security helper break normal message delivery.
             pass
