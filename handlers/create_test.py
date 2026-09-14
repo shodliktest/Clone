@@ -1410,158 +1410,35 @@ async def uj_back(cb: CallbackQuery, state: FSMContext):
 
 
 # ═══════════════════════════════════════════════════════════
-# AI PROVIDER KONFIGURATSIYA
+# AI PROVIDERLAR
 # ═══════════════════════════════════════════════════════════
-# Secrets ga quyidagilardan BIRINI yoki BARCHASINI yozing:
+# Matnli savollar: Groq -> Gemini fallback.
+# Rasmli savollar: Gemini Vision.
 #
-# Groq (bepul, tez):
-#   GROQ_API_KEY = "gsk_xxx"
-#   GROQ_API_KEY1 = "gsk_yyy"   ← ko'p kalit rotatsiya uchun
+# Secrets:
+#   GROQ_API_KEY = "gsk_..."
+#   GROQ_API_KEY1 = "gsk_..."
+#   GEMINI_API_KEY = "AQ..."
+#   GEMINI_API_KEY1 = "AQ..."
 #
-# OpenAI:
-#   OPENAI_API_KEY = "sk-xxx"
-#
-# Together AI (bepul modellari bor):
-#   TOGETHER_API_KEY = "xxx"
-#
-# OpenRouter (100+ model, ko'plari bepul):
-#   OPENROUTER_API_KEY = "sk-or-xxx"
-#
-# Har qanday OpenAI-compatible API:
-#   CUSTOM_AI_API_KEY = "xxx"
-#   CUSTOM_AI_API_URL = "https://your-api.com/v1/chat/completions"
-#   CUSTOM_AI_MODEL   = "your-model-name"
-#
-# Bir vaqtda bir nechta provider yozilsa — hammasi ishlatiladi,
-# limit tugasa avtomatik keyingisiga o'tadi.
+# Ixtiyoriy environment sozlamalar:
+#   GROQ_AI_MODEL=openai/gpt-oss-20b
+#   GROQ_AI_MIN_INTERVAL=3.0
+#   GROQ_AI_MAX_OUTPUT=900
+#   GEMINI_AI_MODEL=gemini-2.5-flash
+#   GEMINI_AI_MIN_INTERVAL=7.0
+#   GEMINI_AI_MAX_OUTPUT=600
 # ═══════════════════════════════════════════════════════════
-
-# Har provayder uchun batch'lar orasida kutish (soniya) — free-tier RPM ga mos
-_PROVIDER_PAUSE = {
-    "Groq":        6.0,
-    "Gemini":      10.0,
-    "OpenRouter":  6.0,
-    "Together AI": 6.0,
-    "OpenAI":      6.0,
-}
-
-_AI_PROVIDERS = [
-    # 1. Groq — tez, bepul (birinchi)
-    {
-        "name":      "Groq",
-        "url":       "https://api.groq.com/openai/v1/chat/completions",
-        "model":     "llama-3.3-70b-versatile",
-        "key_names": ["GROQ_API_KEY"] + [f"GROQ_API_KEY{i}" for i in range(1, 21)],
-    },
-    # 2. Gemini — ko'p limit, aniq (ikkinchi)
-    {
-        "name":      "Gemini",
-        "url":       "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-        "model":     "gemini-2.0-flash",
-        "key_names": ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY{i}" for i in range(1, 11)],
-    },
-    # 3. Together AI
-    {
-        "name":      "Together AI",
-        "url":       "https://api.together.xyz/v1/chat/completions",
-        "model":     "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-        "key_names": ["TOGETHER_API_KEY"] + [f"TOGETHER_API_KEY{i}" for i in range(1, 11)],
-    },
-    # 4. OpenRouter
-    {
-        "name":      "OpenRouter",
-        "url":       "https://openrouter.ai/api/v1/chat/completions",
-        "model":     "meta-llama/llama-3.3-70b-instruct:free",
-        "key_names": ["OPENROUTER_API_KEY"] + [f"OPENROUTER_API_KEY{i}" for i in range(1, 11)],
-    },
-    # 5. OpenAI
-    {
-        "name":      "OpenAI",
-        "url":       "https://api.openai.com/v1/chat/completions",
-        "model":     "gpt-4o-mini",
-        "key_names": ["OPENAI_API_KEY"] + [f"OPENAI_API_KEY{i}" for i in range(1, 11)],
-    },
-]
-
-
-def _load_ai_clients():
-    """
-    Secrets dan barcha mavjud AI kalitlarini yuklaydi.
-    Qaytaradi: [(name, url, model, key), ...]
-    """
-    clients = []
-    try:
-        import streamlit as st
-        sec = st.secrets
-    except Exception:
-        class _E:
-            def get(self, k, d=""): return os.environ.get(k, d)
-        sec = _E()
-
-    # Custom provider
-    c_url   = sec.get("CUSTOM_AI_API_URL", "")
-    c_model = sec.get("CUSTOM_AI_MODEL", "gpt-3.5-turbo")
-    for name in ["CUSTOM_AI_API_KEY"] + [f"CUSTOM_AI_API_KEY{i}" for i in range(1, 11)]:
-        k = sec.get(name, "")
-        if k and c_url:
-            clients.append({"name": "Custom", "url": c_url, "model": c_model, "key": k})
-
-    # Standart providerlar
-    for p in _AI_PROVIDERS:
-        for name in p["key_names"]:
-            k = sec.get(name, "")
-            if k and len(str(k).strip()) > 10:  # Bo'sh yoki noto'g'ri kalitni o'tkazamiz
-                clients.append({"name": p["name"], "url": p["url"],
-                                "model": p["model"], "key": str(k).strip()})
-
-    # Diagnostika — qaysi providerlar yuklandi
-    if clients:
-        prov_count = {}
-        for c in clients:
-            prov_count[c["name"]] = prov_count.get(c["name"], 0) + 1
-        log.info(f"AI klientlar yuklandi: {prov_count}")
-    else:
-        log.warning("HECH QANDAY AI kalit topilmadi! Secrets ni tekshiring.")
-
-    return clients
-
-
-
-# ═══════════════════════════════════════════════════════════════
-# GEMINI VISION — Rasmli savollar (daqiqada max 15 ta)
-# ═══════════════════════════════════════════════════════════════
-
-def _get_gemini_keys() -> list:
-    keys = []
-    try:
-        import streamlit as st
-        for n in ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY{i}" for i in range(1, 11)]:
-            k = st.secrets.get(n, "")
-            if k: keys.append(k)
-    except Exception:
-        pass
-    if not keys:
-        for n in ["GEMINI_API_KEY"] + [f"GEMINI_API_KEY{i}" for i in range(1, 11)]:
-            k = os.environ.get(n, "")
-            if k: keys.append(k)
-    return keys
-
 
 async def _solve_image_questions(questions: list, docx_path: str, msg, explain_mode: str = "full") -> list:
-    """
-    Rasmli savollarni Gemini Vision bilan yechadi.
-    Qoidalar:
-      - Faqat Gemini API (boshqa API lar yo'q)
-      - Daqiqada max 15 ta * kalit_soni
-      - Har so'rov orasida 6 soniya
-      - 429 kelsa: kutib qayta urinish
-    """
-    import aiohttp, json, base64, zipfile, time
+    """Rasmli savollarni Gemini 2.5 Flash bilan rasm+matn sifatida yechadi.
 
-    gemini_keys = _get_gemini_keys()
-    if not gemini_keys:
-        log.warning("GEMINI_API_KEY topilmadi - rasmli savollar o'tkazib yuborildi")
-        return questions
+    Gemini uchun alohida rate-gate ishlatiladi. Kalitlar credential rotation
+    uchun; Google quota project darajasida bo'lgani sababli kalitlar quota'ni
+    ko'paytiruvchi vosita sifatida hisoblanmaydi.
+    """
+    import zipfile, time, mimetypes
+    from utils.ai_engine import solve_image
 
     img_unmarked = [
         (i, q) for i, q in enumerate(questions)
@@ -1570,188 +1447,91 @@ async def _solve_image_questions(questions: list, docx_path: str, msg, explain_m
     if not img_unmarked:
         return questions
 
-    log.info(f"Gemini Vision: {len(img_unmarked)} savol, {len(gemini_keys)} kalit")
-
-    # DOCX ZIP dan rasmlarni olish
     img_cache = {}
     try:
         with zipfile.ZipFile(docx_path) as z:
             for name in z.namelist():
                 if "word/media/" in name:
                     fname = os.path.basename(name)
-                    img_cache[fname] = base64.b64encode(z.read(name)).decode()
+                    img_cache[fname] = z.read(name)
     except Exception as e:
         log.error(f"Rasm ajratish: {e}")
         return questions
 
-    key_idx = 0
-    req_in_minute = 0
-    minute_start = time.time()
-    max_per_minute = 15 * len(gemini_keys)
-
     _vexp = {
-        "full":  "to'liq o'zbek izoh: nega to'g'ri ekanligini asoslab tushuntiring (2-4 jumla)",
-        "short": "qisqa o'zbek izoh, bir jumla",
-        "none":  "bo'sh qoldiring",
-    }.get(explain_mode, "qisqa o'zbek izoh")
-    PROMPT = (
-        "Siz akademik test ekspertisiz. Rasmli test savolini MAKSIMAL ANIQLIK bilan yeching.\n"
-        "QOIDALAR:\n"
-        "1. AVVAL \"reasoning\" maydonida rasm va har bir variantni tahlil qiling, "
-        "qaysi variant to'g'ri ekanini mantiqiy asoslang. FAQAT shundan keyin "
-        "\"correct_idx\" ni tanlang — u reasoning xulosasi bilan 100% mos bo'lishi shart.\n"
-        "2. Ikkilanmang, lekin asossiz taxmin ham qilmang — faqat rasmda ko'ringan "
-        "aniq dalillarga va mantiqqa tayaning.\n"
-        "3. Gallyutsinatsiya qilmang — rasmda yo'q narsani to'qib chiqarmang.\n"
-        "Faqat JSON qaytaring (boshqa matn yozmang): "
-        "{\"reasoning\": \"tahlil\", \"correct_idx\": N, \"explanation\": \"" + _vexp + "\"}"
-    )
-
-    def _bar(d, t, w=8):
-        f = int(w * d / max(t, 1))
-        return "█" * f + "░" * (w - f)
+        "full": "O'zbek tilida 2-3 jumla: javob nima uchun to'g'ri ekanini tushuntiring.",
+        "short": "O'zbek tilida 1 qisqa jumla.",
+        "none": "Bo'sh satr.",
+    }.get(explain_mode, "O'zbek tilida qisqa izoh.")
 
     solved = 0
     t0 = time.time()
+    total = len(img_unmarked)
+
+    def _bar(done, total, w=10):
+        f = int(w * done / max(total, 1))
+        return "█" * f + "░" * (w - f)
 
     for n, (orig_idx, q) in enumerate(img_unmarked, 1):
-        img_b64 = img_cache.get(q.get("_img_file", ""), "")
-        if not img_b64:
+        image_bytes = img_cache.get(q.get("_img_file", ""))
+        if not image_bytes:
             continue
 
-        # Daqiqada limit nazorat
-        now = time.time()
-        if now - minute_start >= 60:
-            req_in_minute = 0
-            minute_start = now
+        opts = [re.sub(r"^[A-Ha-h]\s*[).]\s*", "", o) for o in q.get("options", [])]
+        prompt = (
+            "Siz akademik test eksperti. Berilgan RASM va savol/variantlar asosida "
+            "faqat dalilga tayangan holda javobni aniqlang. Rasmda yo'q faktni o'ylab "
+            "topmang. Hisob-kitob bo'lsa tekshirib hisoblang. Avval rasmni o'qing, "
+            "so'ng variantlarni solishtiring. Faqat quyidagi JSON objectni qaytaring: "
+            '{"correct_idx":0,"explanation":"..."}. '
+            "correct_idx 0-based bo'lib, variantlar ro'yxatidan tashqarida bo'lmasin. "
+            f"Explanation: {_vexp}\n\n"
+            f"Question: {q.get('question', '')}\n"
+            "Options:\n" + "\n".join(f"{j}. {o}" for j, o in enumerate(opts))
+        )
 
-        if req_in_minute >= max_per_minute:
-            wait = 62 - (now - minute_start)
-            if wait > 0:
-                log.info(f"Gemini limit: {wait:.0f}s kutamiz")
-                if msg:
-                    try:
-                        await msg.edit_text(
-                            f"🖼️ <b>Gemini Vision...</b>\n"
-                            f"[{_bar(n-1, len(img_unmarked))}] {n-1}/{len(img_unmarked)}\n"
-                            f"⏳ Limit: {wait:.0f}s kutilmoqda...",
-                            parse_mode="HTML"
-                        )
-                    except Exception:
-                        pass
-                await asyncio.sleep(wait)
-                req_in_minute = 0
-                minute_start = time.time()
-
-        # Progress
-        elapsed = time.time() - t0
-        eta = int(elapsed / max(n-1,1) * (len(img_unmarked)-n+1)) if n>1 else len(img_unmarked)*7
-        m2, s2 = divmod(eta, 60)
         if msg:
             try:
+                elapsed = time.time() - t0
+                eta = int(elapsed / max(n - 1, 1) * (total - n + 1)) if n > 1 else total * 8
+                m, sec = divmod(eta, 60)
                 await msg.edit_text(
-                    f"🖼️ <b>Gemini Vision rasmlarni tahlil qilmoqda...</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"[{_bar(n-1, len(img_unmarked))}] {n-1}/{len(img_unmarked)} rasm\n"
+                    f"🖼️ <b>Gemini Vision...</b>\n"
+                    f"[{_bar(n-1, total)}] {n-1}/{total}\n"
                     f"📊 {solved} ta yechildi\n"
-                    f"⏱ Qoldi: ~{m2}:{s2:02d}\n"
-                    f"🔑 Gemini kalit {key_idx%len(gemini_keys)+1}/{len(gemini_keys)}",
+                    f"⏱ Qoldi: ~{m}:{sec:02d}",
                     parse_mode="HTML"
                 )
             except Exception:
                 pass
 
-        opts_clean = [re.sub(r"^[A-Ha-h]\s*[).]\s*", "", o) for o in q.get("options", [])]
-        question_text = (
-            f"{PROMPT}\n\n"
-            f"Question: {q.get('question', '')}\n"
-            f"Options:\n" + "\n".join(f"{j}. {o}" for j, o in enumerate(opts_clean))
-        )
-
-        answered = False
-        for attempt in range(len(gemini_keys) * 2):
-            key = gemini_keys[key_idx % len(gemini_keys)]
-            url = (
-                f"https://generativelanguage.googleapis.com/v1beta/"
-                f"models/gemini-2.0-flash:generateContent?key={key}"
-            )
-            payload = {
-                "contents": [{
-                    "parts": [
-                        {"inline_data": {"mime_type": "image/png", "data": img_b64}},
-                        {"text": question_text}
-                    ]
-                }],
-                "generationConfig": {"temperature": 0.0, "maxOutputTokens": 500}
-            }
-
-            try:
-                async with aiohttp.ClientSession() as sess:
-                    async with sess.post(
-                        url, json=payload,
-                        timeout=aiohttp.ClientTimeout(total=30)
-                    ) as resp:
-                        rdata = await resp.json()
-
-                if resp.status == 429:
-                    key_idx += 1
-                    wait_t = 62 if attempt >= len(gemini_keys)-1 else 10
-                    log.warning(f"Gemini 429 ({wait_t}s kutamiz)")
-                    await asyncio.sleep(wait_t)
-                    if attempt >= len(gemini_keys)-1:
-                        req_in_minute = 0
-                        minute_start = time.time()
-                    continue
-
-                if resp.status != 200:
-                    key_idx += 1
-                    await asyncio.sleep(3)
-                    continue
-
-                raw = (
-                    rdata.get("candidates", [{}])[0]
-                    .get("content", {})
-                    .get("parts", [{}])[0]
-                    .get("text", "").strip()
-                )
-                raw = re.sub(r"```json\s*|\s*```", "", raw).strip()
-                result = json.loads(raw)
-                ci = int(result.get("correct_idx", 0))
-                ex = result.get("explanation", "")
-                opts = q.get("options", [])
-                if 0 <= ci < len(opts):
-                    questions[orig_idx]["correct"]    = opts[ci]
-                    questions[orig_idx]["explanation"] = ex if ex else ""
-                    questions[orig_idx]["_ai_solved"]  = True
-                    questions[orig_idx]["_marked"]     = True
-                    solved += 1
-                req_in_minute += 1
-                answered = True
-                break
-
-            except aiohttp.ClientError as e:
-                log.warning(f"Gemini network: {e}")
-                key_idx += 1
-                await asyncio.sleep(3)
-            except Exception as e:
-                log.warning(f"Gemini parse: {e}")
-                answered = True
-                break
-
-        if answered:
-            await asyncio.sleep(6)  # Har so'rov orasida 6 soniya
+        try:
+            mime = mimetypes.guess_type(q.get("_img_file", ""))[0] or "image/jpeg"
+            result = await solve_image(image_bytes, mime, prompt)
+            ci = int(result.get("correct_idx", -1))
+            if 0 <= ci < len(opts):
+                # Preserve original option text exactly as stored in the test.
+                original_opts = q.get("options", [])
+                questions[orig_idx]["correct"] = original_opts[ci]
+                questions[orig_idx]["explanation"] = str(result.get("explanation", "") or "")
+                questions[orig_idx]["_ai_solved"] = True
+                questions[orig_idx]["_marked"] = True
+                solved += 1
+        except Exception as e:
+            log.warning(f"Gemini Vision {orig_idx} xato: {e}")
+            # One failed image must not stop the rest of the test.
+            continue
 
     total_t = int(time.time() - t0)
     m3, s3 = divmod(total_t, 60)
-    log.info(f"Gemini Vision: {solved}/{len(img_unmarked)} yechildi, {m3}:{s3:02d}")
+    log.info(f"Gemini Vision: {solved}/{total}, {m3}:{s3:02d}")
     if msg:
         try:
             await msg.edit_text(
                 f"✅ <b>Gemini Vision tugatdi!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🖼️ {solved}/{len(img_unmarked)} rasm yechildi\n"
-                f"⏱ {m3}:{s3:02d}",
-                parse_mode="HTML"
+                f"🖼️ {solved}/{total} rasm yechildi\n"
+                f"⏱ {m3}:{s3:02d}", parse_mode="HTML"
             )
         except Exception:
             pass
@@ -1759,237 +1539,42 @@ async def _solve_image_questions(questions: list, docx_path: str, msg, explain_m
 
 
 async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
+    """Matnli testlarni Groq bilan, Groq limitida Gemini bilan yechadi.
+
+    - Groq: official ``groq`` AsyncGroq SDK, primary.
+    - Gemini: official ``google-genai`` SDK, dedicated fallback.
+    - Batch 5: input/output token sarfini nazorat qiladi.
+    - Har bir javob indeks va mavjud variant bilan lokal validatsiya qilinadi.
+    - API kalitlarini aylantirish quota'ni ko'paytirmaydi; bu faqat credential
+      rotation. Groq org-level, Gemini project-level limitlarga ega.
     """
-    Universal AI yechish — Groq / OpenAI / Together / OpenRouter / Custom.
-    Limit tugasa avtomatik keyingi kalit yoki providerga o'tadi.
-    """
-    import aiohttp, json, time
+    import json, time
+    from utils.ai_engine import solve_text_batch
 
-    clients = _load_ai_clients()
-    if not clients:
-        raise ValueError(
-            "AI API kaliti topilmadi!\n"
-            "Secrets ga qo'shing: GROQ_API_KEY = \"gsk_xxx\""
-        )
+    unmarked = [(i, q) for i, q in enumerate(questions) if not q.get("_marked")]
+    total_q = len(unmarked)
+    if not total_q:
+        return questions
 
-    names = list(dict.fromkeys(c["name"] for c in clients))
-    log.info(f"AI: {len(clients)} kalit, {names}")
-    cli_idx = 0
+    batch_size = 5
+    total_batches = (total_q + batch_size - 1) // batch_size
+    solved = 0
+    t0 = time.time()
 
-    def _parse_ai_response(data: dict) -> list:
-        """
-        AI javobidan JSON ro'yxatini chiqaradi.
-        Barcha formatlarni qo'llab-quvvatlaydi:
-        - OpenAI/Groq: {"choices":[{"message":{"content":"..."}}]}
-        - Gemini:      {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
-        - Xato:        {"error": {...}}
-        """
-        # Xato tekshirish
-        if isinstance(data, dict):
-            err = data.get("error")
-            if err:
-                if isinstance(err, dict):
-                    msg = err.get("message", str(err))
-                    code = str(err.get("type","")) + str(err.get("code",""))
-                else:
-                    msg = str(err)
-                    code = str(err)
-                raise ValueError(f"API xato: {msg} (code={code})")
-
-        # Matnni topamiz
-        txt = ""
-
-        # 1. OpenAI/Groq/Together/OpenRouter format
-        choices = data.get("choices") if isinstance(data, dict) else None
-        if choices and isinstance(choices, list) and choices:
-            c = choices[0]
-            if isinstance(c, dict):
-                msg = c.get("message") or c.get("delta") or {}
-                if isinstance(msg, dict):
-                    txt = msg.get("content", "") or ""
-                elif isinstance(msg, str):
-                    txt = msg
-
-        # 2. Gemini format
-        if not txt:
-            candidates = data.get("candidates") if isinstance(data, dict) else None
-            if candidates and isinstance(candidates, list) and candidates:
-                c = candidates[0]
-                if isinstance(c, dict):
-                    content = c.get("content", {})
-                    if isinstance(content, dict):
-                        parts = content.get("parts", [])
-                        if parts and isinstance(parts, list):
-                            txt = parts[0].get("text", "") if isinstance(parts[0], dict) else ""
-
-        if not txt:
-            raise ValueError(f"AI javobida matn topilmadi: {str(data)[:100]}")
-
-        # JSON tozalash — markdown, ikki JSON, exstra matn
-        txt = txt.strip()
-        # ```json ... ``` ni olib tashlaymiz
-        txt = re.sub(r"```json\s*", "", txt)
-        txt = re.sub(r"```\s*", "", txt)
-        txt = txt.strip()
-
-        # [ ... ] qismini topamiz (faqat birinchi to'liq JSON array)
-        bracket_start = txt.find("[")
-        bracket_end   = txt.rfind("]")
-        if bracket_start != -1 and bracket_end > bracket_start:
-            txt = txt[bracket_start:bracket_end+1]
-
-        # JSON parse
-        try:
-            result = json.loads(txt)
-        except json.JSONDecodeError:
-            # Exstra data bo'lsa — birinchi to'liq JSON ni olamiz
-            depth = 0
-            in_str = False
-            esc    = False
-            end    = 0
-            for i, ch in enumerate(txt):
-                if esc:
-                    esc = False
-                    continue
-                if ch == "\\":
-                    esc = True
-                    continue
-                if ch == "\"" and not esc:
-                    in_str = not in_str
-                    continue
-                if not in_str:
-                    if ch == "[":
-                        depth += 1
-                    elif ch == "]":
-                        depth -= 1
-                        if depth == 0:
-                            end = i
-                            break
-            if end:
-                result = json.loads(txt[:end+1])
-            else:
-                raise
-
-        if not isinstance(result, list):
-            raise ValueError(f"JSON list emas: {type(result)}")
-        return result
-
-    async def _post(payload):
-        nonlocal cli_idx
-        for attempt in range(len(clients)):
-            cli = clients[cli_idx % len(clients)]
-            p   = dict(payload)
-            p["model"] = cli["model"]
-            try:
-                async with aiohttp.ClientSession() as s:
-                    async with s.post(
-                        cli["url"],
-                        headers={"Authorization": f"Bearer {cli['key']}",
-                                 "Content-Type": "application/json"},
-                        json=p, timeout=aiohttp.ClientTimeout(total=90),
-                    ) as r:
-                        # HTTP status tekshirish
-                        status = r.status
-                        # Retry-After header — server qancha kutishni aytadi
-                        retry_after = r.headers.get("Retry-After", "")
-                        data   = await r.json(content_type=None)
-
-                # Rate limit — HTTP 429 yoki error kodida
-                is_rate = False
-                if status == 429:
-                    is_rate = True
-                    # 429 ning ANIQ sababini log qilamiz (kvota/limit/kalit)
-                    try:
-                        _emsg = ""
-                        if isinstance(data, dict):
-                            _e = data.get("error", {})
-                            _emsg = _e.get("message", str(_e)) if isinstance(_e, dict) else str(_e)
-                        log.warning(f"[{cli['name']}] 429 SABABI: {_emsg[:250]}")
-                    except Exception:
-                        pass
-                elif isinstance(data, dict):
-                    err  = data.get("error", {}) or {}
-                    code = str(err.get("type","")) + str(err.get("code","")) + str(err.get("message",""))
-                    if any(w in code.lower() for w in
-                           ["rate_limit","quota","tokens_per","capacity","too_many","overloaded"]):
-                        is_rate = True
-
-                if is_rate:
-                    cli_idx += 1
-                    tried = attempt + 1
-                    log.warning(
-                        f"[{cli['name']}] {status} limit "
-                        f"({tried}/{len(clients)} sinab ko'rildi)"
-                    )
-                    if tried >= len(clients):
-                        # Server aytgan vaqt bor bo'lsa — shuni ishlatamiz, yo'q bo'lsa 62s
-                        wait_s = 62
-                        try:
-                            if retry_after and retry_after.isdigit():
-                                wait_s = min(int(retry_after) + 2, 120)
-                        except Exception:
-                            pass
-                        log.warning(f"Barcha {len(clients)} kalit limitda. {wait_s}s kutamiz...")
-                        await asyncio.sleep(wait_s)
-                        cli_idx = 0
-                    else:
-                        await asyncio.sleep(3)
-                    continue
-
-                # Javobni shu yerda parse qilamiz — xato bo'lsa keyingi providerga
-                try:
-                    parsed = _parse_ai_response(data)
-                    return parsed
-                except Exception as pe:
-                    log.warning(f"[{cli['name']}] parse xato, keyingisiga: {pe}")
-                    cli_idx += 1
-                    await asyncio.sleep(1)
-                    continue
-
-            except aiohttp.ClientError as e:
-                log.warning(f"[{cli['name']}] network xato: {e}")
-                cli_idx += 1
-            except Exception as e:
-                log.warning(f"[{cli['name']}] kutilmagan xato: {e}")
-                cli_idx += 1
-
-        raise ValueError(f"Barcha {len(clients)} provider ishlamadi! ({names})")
-
-    # Izoh turi bo'yicha ko'rsatma (foydalanuvchiga ko'rinadigan "explanation" uchun)
     _exp_instr = {
-        "full":  "\"explanation\" maydonini O'ZBEK TILIDA, 2-4 jumlada, \"reasoning\" mazmuniga TO'LIQ MOS holda yozing — nega bu javob to'g'ri va qolganlari nega noto'g'ri ekanini asoslang.",
-        "short": "\"explanation\" maydonini O'ZBEK TILIDA bir qisqa jumlada, \"reasoning\" xulosasiga mos yozing.",
-        "none":  "\"explanation\" maydonini bo'sh satr (\"\") qilib qoldiring — lekin \"reasoning\" maydonini baribir to'liq yozing, chunki javobni shu orqali aniqlaysiz.",
-    }.get(explain_mode, "\"explanation\" maydonini O'ZBEK TILIDA qisqa yozing.")
+        "full": "O'zbek tilida 2-3 jumla yozing: nega tanlangan javob to'g'ri.",
+        "short": "O'zbek tilida 1 qisqa jumla yozing.",
+        "none": "Bo'sh satr qaytaring.",
+    }.get(explain_mode, "O'zbek tilida qisqa izoh yozing.")
 
     SYSTEM = (
-        "Siz yuqori malakali, ko'p sohali (IT, matematika, fizika, tarix, til, tibbiyot, "
-        "huquq va boshqa) AKADEMIK TEST EKSPERTISIZ. Vazifangiz — har bir test savolini "
-        "MAKSIMAL ANIQLIK bilan, akademik darajada, xatosiz yechish.\n\n"
-        "QATTIQ QOIDALAR (har biriga so'zsiz amal qiling):\n"
-        "1. Har bir savol uchun AVVAL \"reasoning\" maydonida qisqa, lekin to'liq mantiqiy "
-        "zanjir bilan ISHLANG: berilgan barcha variantlarni birma-bir ko'rib chiqing, har "
-        "birining nega to'g'ri yoki noto'g'ri ekanini aniqlang, FAQAT shundan keyin "
-        "\"correct_idx\" ni tanlang. \"correct_idx\" sizning \"reasoning\"da chiqargan "
-        "xulosangiz bilan 100% MOS bo'lishi SHART — bu ikkisi orasida hech qachon "
-        "ZIDDIYAT bo'lmasligi kerak.\n"
-        "2. IKKILANMANG. Agar savol noaniq yoki ma'lumot etarli bo'lmasa ham, mavjud "
-        "kontekst, umumiy bilim va eng katta ehtimollik asosida ENG MANTIQIY variantni "
-        "tanlang — \"bilmadim\" yoki taxminiy javob bermang, lekin asossiz taxmin ham "
-        "qilmang: faqat aniq bilim va mantiqqa tayanib qaror qiling.\n"
-        "3. GALLYUTSINATSIYA QILMANG: mavjud bo'lmagan faktlarni to'qib chiqarmang. "
-        "Agar biror atama, sana, formula yoki qoidani aniq bilmasangiz, eng yaqin va "
-        "ishonchli bilimingizga asoslanib qaror qiling, lekin uni reasoning'da noaniq "
-        "deb belgilang.\n"
-        "4. Matematik/texnik hisob-kitoblar bo'lsa — reasoning ichida QADAM-BAQADAM "
-        "hisoblang (masalan: \"=(A1+B1+C1)/D1\" kabi formulalar uchun har bir sonni "
-        "qo'yib chiqib, natijani aniq hisoblang), keyin natijani variantlar bilan "
-        "solishtiring.\n"
-        "5. Bir nechta variant to'g'riga o'xshab ko'rinsa — ENG TO'LIQ va ENG ANIQ "
-        "variantni tanlang (qisman to'g'ri yoki umumiy variantlarni emas).\n"
-        "6. \"correct_idx\" — variantlar ro'yxatidagi 0-based index (birinchi variant = 0).\n"
-        "7. Faqat va faqat JSON massiv qaytaring. JSON dan tashqari birorta ham so'z, "
-        "izoh, markdown belgisi (```), preambula yoki postambula yozmang.\n\n"
+        "Siz yuqori aniqlikdagi akademik test yechuvchisiz. "
+        "Faqat berilgan savol va variantlardan foydalaning. Mavjud bo'lmagan fakt, "
+        "variant yoki shartni to'qimang. Matematik/texnik masalani ichingizda "
+        "qadam-baqadam tekshiring. Eng ishonchli javobni tanlang. "
+        "Chiqishda FAQAT JSON array qaytaring. Har element: "
+        '{"idx":N,"correct_idx":N,"explanation":"..."}. '
+        "idx kiruvchi savolning indeksidir; correct_idx 0-based. "
         + _exp_instr
     )
 
@@ -1997,179 +1582,68 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
         f = int(w * done / max(total, 1))
         return "█" * f + "░" * (w - f)
 
-    unmarked      = [(i, q) for i, q in enumerate(questions) if not q.get("_marked")]
-    total_q       = len(unmarked)
-    if not total_q:
-        return questions
-
-    # Kichikroq batch = model har bir savolga ko'proq "e'tibor" beradi.
-    # 40 ta savol bir vaqtda yuborilganda aniqlik pasayadi (reasoning va
-    # tanlangan javob orasida nomuvofiqlik kuzatilgan) — shuning uchun
-    # batch hajmi kamaytirildi.
-    batch_size    = 10
-    total_batches = (total_q + batch_size - 1) // batch_size
-    solved        = 0
-    t0            = time.time()
-    failed_batches = []  # Xato bo'lgan batchlar
-
     for bn, bs in enumerate(range(0, total_q, batch_size), 1):
-        batch  = unmarked[bs:bs+batch_size]
+        batch = unmarked[bs:bs + batch_size]
         q_data = [
-            {"idx": oi, "q": q.get("question",""),
-             "opts": [re.sub(r"^[A-Ha-h]\s*[).]\s*","",o) for o in q.get("options",[])]}
+            {
+                "idx": oi,
+                "q": q.get("question", ""),
+                "opts": [re.sub(r"^[A-Ha-h]\s*[).]\s*", "", o) for o in q.get("options", [])],
+            }
             for oi, q in batch
         ]
-
-        done_q  = (bn-1) * batch_size
-        elapsed = time.time() - t0
-        eta_sec = int(elapsed / max(bn-1,1) * (total_batches-bn+1)) if bn > 1 else total_batches * 8
-        mins, secs = divmod(eta_sec, 60)
-        eta_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
-        cur_provider = clients[cli_idx % len(clients)]["name"]
+        user_prompt = (
+            "Quyidagi savollarni mustaqil va ehtiyotkorlik bilan yeching. "
+            "Har bir idx aynan kiruvchi savol indeksiga teng bo'lsin. "
+            "correct_idx faqat berilgan opts ichidagi 0-based indeks bo'lsin.\n\n"
+            + json.dumps(q_data, ensure_ascii=False, separators=(",", ":"))
+        )
 
         if msg:
             try:
+                elapsed = time.time() - t0
+                eta = int(elapsed / max(bn - 1, 1) * (total_batches - bn + 1)) if bn > 1 else total_batches * 6
+                m, sec = divmod(eta, 60)
                 await msg.edit_text(
                     f"🤖 <b>AI yechmoqda...</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"[{_bar(bn-1, total_batches)}] {bn-1}/{total_batches} batch\n"
-                    f"📊 {done_q}/{total_q} savol\n"
-                    f"⏱ Qoldi: ~{eta_str}\n"
-                    f"🔑 {len(clients)} kalit | {cur_provider}",
+                    f"📊 {min((bn-1)*batch_size,total_q)}/{total_q} savol\n"
+                    f"⏱ Qoldi: ~{m}:{sec:02d}",
                     parse_mode="HTML"
                 )
             except Exception:
                 pass
 
-        USER = (
-            "Quyidagi savollarni AKADEMIK ANIQLIK bilan yeching.\n\n"
-            "Har bir savol uchun MAJBURIY JSON tartibi (\"reasoning\" har doim "
-            "\"correct_idx\"dan OLDIN yozilishi shart — avval fikrlang, keyin tanlang):\n"
-            "[\n"
-            "  {\n"
-            "    \"idx\": N,\n"
-            "    \"reasoning\": \"variantlarni birma-bir tahlil qiling, qaysi to'g'ri "
-            "ekanini mantiqiy asoslang (o'zbek yoki ingliz tilida, qisqa lekin to'liq)\",\n"
-            "    \"correct_idx\": <reasoning xulosasiga 100% mos index>,\n"
-            "    \"explanation\": \"foydalanuvchi uchun izoh\"\n"
-            "  }\n"
-            "]\n\n"
-            "ESLATMA: \"correct_idx\" va \"reasoning\" xulosasi ZIDDIYATLI bo'lishi "
-            "MUTLAQO TAQIQLANADI — agar reasoning'da bir variant to'g'ri deb topilsa, "
-            "correct_idx aynan SHU variant indeksini ko'rsatishi kerak.\n\n"
-            f"Savollar:\n{json.dumps(q_data, ensure_ascii=False)}"
-        )
         try:
-            parsed_items = await _post({
-                "messages":    [{"role":"system","content":SYSTEM},
-                                {"role":"user","content":USER}],
-                "max_tokens":  8000,
-                "temperature": 0.0,
-            })
-            for item in parsed_items:
-                oi = item.get("idx", -1)
-                ci = item.get("correct_idx", 0)
-                ex = item.get("explanation", "")
-                if 0 <= oi < len(questions):
-                    opts = questions[oi].get("options", [])
-                    if 0 <= ci < len(opts):
-                        questions[oi]["correct"]    = opts[ci]
-                        questions[oi]["explanation"] = ex if ex else ""
-                        questions[oi]["_ai_solved"]  = True
-                        solved += 1
+            parsed, provider = await solve_text_batch(SYSTEM, user_prompt)
+            log.info(f"AI batch {bn}/{total_batches}: provider={provider}, results={len(parsed)}")
+            for item in parsed:
+                oi = int(item.get("idx", -1))
+                ci = int(item.get("correct_idx", -1))
+                if not (0 <= oi < len(questions)):
+                    continue
+                opts = questions[oi].get("options", [])
+                if not (0 <= ci < len(opts)):
+                    log.warning(f"AI invalid index: q={oi}, correct_idx={ci}, options={len(opts)}")
+                    continue
+                questions[oi]["correct"] = opts[ci]
+                questions[oi]["explanation"] = str(item.get("explanation", "") or "")
+                questions[oi]["_ai_solved"] = True
+                solved += 1
         except Exception as e:
-            log.error(f"Batch {bn} xato: {e}")
-            failed_batches.append((bn, bs))
-        else:
-            log.info(f"AI batch {bn}/{total_batches}: {solved} ta yechildi")
-
-        # ── So'rovlar orasida pauza (RPM limitiga urilmaslik) ──
-        # Har provayder o'z free-tier RPM limitiga ega:
-        #   Groq:       30 RPM → 2.5s
-        #   Gemini:     15 RPM → 4.5s
-        #   OpenRouter: 20 RPM → 3.5s
-        #   Together:   ~60 RPM → 1.5s
-        #   OpenAI:     ~3 RPM (free) → 5s
-        if bn < total_batches:
-            cur = clients[cli_idx % len(clients)]["name"] if clients else ""
-            pause = _PROVIDER_PAUSE.get(cur, 6.0)
-            await asyncio.sleep(pause)
-
-    # Xato bo'lgan batchlarni qayta urinib ko'ramiz (1 marta)
-    if failed_batches:
-        log.info(f"Xato batchlar ({len(failed_batches)} ta) qayta urinilmoqda...")
-        if msg:
-            try:
-                await msg.edit_text(
-                    f"🔄 <b>Qayta urinilmoqda...</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"⏳ {len(failed_batches)} ta batch qayta yuborilmoqda",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
-        await asyncio.sleep(65)  # Rate limit uchun kutamiz
-        for bn, bs in failed_batches:
-            batch  = unmarked[bs:bs+batch_size]
-            q_data = [
-                {"idx": oi, "q": q.get("question",""),
-                 "opts": [re.sub(r"^[A-Ha-h]\s*[).]\s*","",o)
-                          for o in q.get("options",[])]}
-                for oi, q in batch
-            ]
-            USER = (
-                "Quyidagi savollarni AKADEMIK ANIQLIK bilan yeching.\n\n"
-                "Har bir savol uchun MAJBURIY JSON tartibi (\"reasoning\" har doim "
-                "\"correct_idx\"dan OLDIN yozilishi shart — avval fikrlang, keyin tanlang):\n"
-                "[\n"
-                "  {\n"
-                "    \"idx\": N,\n"
-                "    \"reasoning\": \"variantlarni birma-bir tahlil qiling, qaysi to'g'ri "
-                "ekanini mantiqiy asoslang (o'zbek yoki ingliz tilida, qisqa lekin to'liq)\",\n"
-                "    \"correct_idx\": <reasoning xulosasiga 100% mos index>,\n"
-                "    \"explanation\": \"foydalanuvchi uchun izoh\"\n"
-                "  }\n"
-                "]\n\n"
-                "ESLATMA: \"correct_idx\" va \"reasoning\" xulosasi ZIDDIYATLI bo'lishi "
-                "MUTLAQO TAQIQLANADI — agar reasoning'da bir variant to'g'ri deb topilsa, "
-                "correct_idx aynan SHU variant indeksini ko'rsatishi kerak.\n\n"
-                f"Savollar:\n{json.dumps(q_data, ensure_ascii=False)}"
-            )
-            try:
-                parsed_items = await _post({
-                    "messages": [{"role":"system","content":SYSTEM},
-                                 {"role":"user","content":USER}],
-                    "max_tokens": 8000, "temperature": 0.0,
-                })
-                for item in parsed_items:
-                    oi = item.get("idx", -1)
-                    ci = item.get("correct_idx", 0)
-                    ex = item.get("explanation", "")
-                    if 0 <= oi < len(questions):
-                        opts = questions[oi].get("options", [])
-                        if 0 <= ci < len(opts):
-                            questions[oi]["correct"]    = opts[ci]
-                            questions[oi]["explanation"] = ex if ex else ""
-                            questions[oi]["_ai_solved"]  = True
-                            solved += 1
-                log.info(f"Retry batch {bn}: muvaffaqiyatli")
-            except Exception as e:
-                log.error(f"Retry batch {bn} ham xato: {e}")
-            # Retry'da ham provayderga mos pauza
-            _cur = clients[cli_idx % len(clients)]["name"] if clients else ""
-            await asyncio.sleep(_PROVIDER_PAUSE.get(_cur, 6.0))
+            log.error(f"AI batch {bn}/{total_batches} xato: {e}")
 
     total_t = int(time.time() - t0)
-    m, s = divmod(total_t, 60)
-    log.info(f"AI yakunlandi: {solved}/{total_q} savol yechildi, {m}:{s:02d}")
+    m, sec = divmod(total_t, 60)
+    log.info(f"AI yakunlandi: {solved}/{total_q} savol, {m}:{sec:02d}")
     if msg:
         try:
             await msg.edit_text(
-                f"✅ <b>AI (matn) tugatdi!</b>\n"
+                f"✅ <b>AI tugatdi!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📊 {solved}/{total_q} savol yechildi\n"
-                f"⏱ {m}:{s:02d}",
-                parse_mode="HTML"
+                f"⏱ {m}:{sec:02d}", parse_mode="HTML"
             )
         except Exception:
             pass
