@@ -318,10 +318,13 @@ async def _call_gemini(system_prompt: str, user_prompt: str) -> tuple[list[dict]
 async def solve_text_batch(system_prompt: str, user_prompt: str) -> tuple[list[dict], str]:
     """Groq primary -> Gemini fallback; successful Groq auto-restores primary."""
     errors = []
-    try:
-        return await _call_groq(system_prompt, user_prompt)
-    except AIProviderError as exc:
-        errors.append(str(exc))
+    # Groq is optional. If no Groq key exists, go directly to Gemini without
+    # polluting the error log with a missing-optional-provider message.
+    if _keys("GROQ_API_KEY", 20):
+        try:
+            return await _call_groq(system_prompt, user_prompt)
+        except AIProviderError as exc:
+            errors.append(str(exc))
     try:
         return await _call_gemini(system_prompt, user_prompt)
     except AIProviderError as exc:
