@@ -70,7 +70,7 @@ GROQ_MODEL = os.getenv("GROQ_AI_MODEL", "openai/gpt-oss-20b")
 GROQ_MIN_INTERVAL = float(os.getenv("GROQ_AI_MIN_INTERVAL", "3.0"))
 GROQ_MAX_OUTPUT = int(os.getenv("GROQ_AI_MAX_OUTPUT", "900"))
 
-GEMINI_MODEL = os.getenv("GEMINI_AI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_AI_MODEL", "gemini-3.6-flash")
 GEMINI_MIN_INTERVAL = float(os.getenv("GEMINI_AI_MIN_INTERVAL", "7.0"))
 GEMINI_MAX_OUTPUT = int(os.getenv("GEMINI_AI_MAX_OUTPUT", "600"))
 
