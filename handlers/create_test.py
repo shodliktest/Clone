@@ -29,14 +29,9 @@ def _get_user_subjects(uid):
 
 
 def _validate_parsed_questions(questions: list) -> str | None:
-    """Parse natijasini AI chaqirmasdan tekshiradi.
-
-    None -> parser natijasi bot formatiga yaroqli.
-    String -> foydalanuvchiga ko'rsatiladigan format xatosi.
-    """
+    """Parser natijasini AI chaqirmasdan tekshiradi."""
     if not questions:
         return "Savollar topilmadi — fayl formati bot tanigan formatlardan biriga mos emas."
-
     for n, q in enumerate(questions, 1):
         if not isinstance(q, dict):
             return f"{n}-savol noto'g'ri tuzilgan."
@@ -47,109 +42,29 @@ def _validate_parsed_questions(questions: list) -> str | None:
         if qtype in ("multiple_choice", "multi_select"):
             opts = q.get("options")
             if not isinstance(opts, list) or len(opts) < 2:
-                return (f"{n}-savolda variantlar yetarli emas "
-                        f"(topilgan: {len(opts) if isinstance(opts, list) else 0} ta).")
+                return f"{n}-savolda variantlar yetarli emas (topilgan: {len(opts) if isinstance(opts, list) else 0} ta)."
             clean = [str(x).strip() for x in opts if str(x).strip()]
             if len(clean) < 2 or len({x.casefold() for x in clean}) < 2:
                 return f"{n}-savol variantlari noto'g'ri yoki takrorlangan."
     return None
 
 
-def _format_repair_keyboard():
-    b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="🤖 AI bilan formatni tuzatish", callback_data="format_ai_repair"))
-    b.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_create"))
-    return b.as_markup()
-
-
-def _format_error_text(file_name: str, reason: str) -> str:
-    return (
+async def _show_format_error(status, state, tmp_path: str, file_name: str, reason: str, file_id: str = ""):
+    """Format xatosini ko'rsatadi; AI orqali format tuzatish mavjud emas."""
+    try:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    except Exception:
+        pass
+    await state.set_state(CreateTest.upload_file)
+    await status.edit_text(
         f"❌ <b>«{file_name}» — FORMAT XATO</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚠️ {reason}\n\n"
-        "Oddiy parser hech qanday AI chaqirmasdan faylni tekshirdi, "
-        "lekin bot formatiga mos natija chiqmadi.\n\n"
-        "🤖 <b>AI bilan formatni tuzatish</b> — fayldagi xom matnni "
-        "o'qib, bot formatiga keltiradi. To'g'ri javobni AI bu bosqichda "
-        "belgilamaydi. Keyin alohida javob aniqlash bosqichi ishlaydi.\n\n"
-        "Quyidagidan birini tanlang:"
-    )
-
-
-def _extract_text_for_ai_repair(path: str) -> str:
-    """AI repair tugmasi bosilgandagina xom matnni ajratib beradi."""
-    ext = os.path.splitext(path)[1].lower()
-    if ext in (".txt", ".csv"):
-        for enc in ("utf-8-sig", "utf-8", "cp1251", "latin-1"):
-            try:
-                return open(path, "r", encoding=enc, errors="replace").read()
-            except Exception:
-                pass
-        return ""
-    if ext == ".doc":
-        try:
-            from utils.parser import _convert_doc
-            converted = _convert_doc(path)
-            if converted and converted != path:
-                return _extract_text_for_ai_repair(converted)
-        except Exception as e:
-            log.warning(f"AI repair DOC text extraction: {e}")
-        return ""
-    if ext == ".docx":
-        try:
-            from docx import Document
-            doc = Document(path)
-            parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-            for table in doc.tables:
-                for row in table.rows:
-                    cells = [c.text.strip() for c in row.cells]
-                    if any(cells):
-                        parts.append(" | ".join(cells))
-            return "\n".join(parts)
-        except Exception as e:
-            log.warning(f"AI repair DOCX text extraction: {e}")
-            return ""
-    if ext == ".pdf":
-        try:
-            import pdfplumber
-            with pdfplumber.open(path) as pdf:
-                return "\n".join((page.extract_text() or "") for page in pdf.pages)
-        except Exception as e:
-            log.warning(f"AI repair PDF text extraction: {e}")
-            return ""
-    if ext in (".xlsx", ".xlsm"):
-        try:
-            from openpyxl import load_workbook
-            wb = load_workbook(path, read_only=True, data_only=True)
-            parts = []
-            for ws in wb.worksheets:
-                for row in ws.iter_rows(values_only=True):
-                    vals = [str(v).strip() for v in row if v is not None and str(v).strip()]
-                    if vals:
-                        parts.append(" | ".join(vals))
-            wb.close()
-            return "\n".join(parts)
-        except Exception as e:
-            log.warning(f"AI repair XLSX text extraction: {e}")
-            return ""
-    return ""
-
-
-async def _show_format_error(status, state, tmp_path: str, file_name: str, reason: str, file_id: str = ""):
-    """Format xatosida faylni o'chirmaydi; AI repair uchun path'ni state'da saqlaydi."""
-    await state.update_data(
-        _format_repair_tmp_path=tmp_path,
-        _format_repair_file_name=file_name,
-        _format_repair_file_id=file_id,
-        _format_repair_reason=reason,
-        _file_name=file_name,
-    )
-    await state.set_state(CreateTest.upload_file)
-    await status.edit_text(
-        _format_error_text(file_name, reason),
+        "Faylni bot tanigan formatda qayta yuboring.",
         parse_mode="HTML",
-        reply_markup=_format_repair_keyboard(),
     )
+
 
 log        = logging.getLogger(__name__)
 router     = Router()
@@ -540,21 +455,12 @@ async def finish_text(callback: CallbackQuery, state: FSMContext):
                                          suffix=".txt", encoding="utf-8") as tmp:
             tmp.write(full_text)
             tmp_path = tmp.name
-        # Matn parse qilinadi, lekin bu yerda AI umuman chaqirilmaydi.
-        # Format xato bo'lsa vaqtinchalik TXT AI repair tugmasi uchun saqlanadi.
+        # Oddiy parser ishlaydi. Format xato bo'lsa AI umuman chaqirilmaydi.
         questions = parse_file(tmp_path)
         parse_error = _validate_parsed_questions(questions)
         if parse_error:
-            await state.update_data(
-                _format_repair_tmp_path=tmp_path,
-                _format_repair_file_name="Chat matni.txt",
-                _format_repair_file_id="",
-                _format_repair_reason=parse_error,
-            )
-            return await status.edit_text(
-                _format_error_text("Chat matni.txt", parse_error),
-                parse_mode="HTML",
-                reply_markup=_format_repair_keyboard(),
+            return await _show_format_error(
+                status, state, tmp_path, "Chat matni.txt", parse_error
             )
         os.remove(tmp_path)
 
@@ -964,7 +870,7 @@ async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, 
     va _run_next_queued_file (ko'p fayl navbati) ikkalasi ham shu
     funksiyani ishlatadi — parse mantig'i bitta joyda saqlanadi.
     """
-    # MUHIM: bu funksiya ham faqat parser qiladi; AI faqat tugma callback'ida ishlaydi.
+    # MUHIM: bu funksiya faqat oddiy parser qiladi; AI faqat "AI bilan yechish" tugmasida ishlaydi.
     questions = parse_file(tmp_path)
     parse_error = _validate_parsed_questions(questions)
     if parse_error:
@@ -1351,77 +1257,6 @@ async def apply_serial(cb: CallbackQuery, state: FSMContext):
     await asyncio.sleep(0.8)
     await _ask_poll_time(cb.message, state, len(questions))
 
-
-@router.callback_query(F.data == "format_ai_repair", CreateTest.upload_file)
-async def format_ai_repair(cb: CallbackQuery, state: FSMContext):
-    """Faqat foydalanuvchi tugmani bosganda xom matnni AI orqali bot formatiga keltiradi."""
-    await cb.answer("🤖 AI formatni tuzatmoqda...")
-    d = await state.get_data()
-    tmp_path = d.get("_format_repair_tmp_path")
-    file_name = d.get("_format_repair_file_name", "fayl")
-    file_id = d.get("_format_repair_file_id", "")
-    if not tmp_path or not os.path.exists(tmp_path):
-        return await cb.message.edit_text(
-            "❌ <b>Fayl vaqtinchalik xotirada topilmadi.</b>\n\n"
-            "Iltimos faylni qaytadan yuboring.", parse_mode="HTML"
-        )
-
-    await cb.message.edit_text(
-        f"🤖 <b>«{file_name}» formatini AI tuzatmoqda...</b>\n\n"
-        "⏳ Xom matn ajratilmoqda va bot formatiga keltirilmoqda.\n"
-        "<i>Bu bosqichda to'g'ri javob belgilanmaydi.</i>",
-        parse_mode="HTML",
-    )
-    try:
-        raw_text = _extract_text_for_ai_repair(tmp_path)
-        if len(raw_text.strip()) < 20:
-            raise ValueError("Fayldan yetarli xom matn ajratib bo'lmadi.")
-
-        from utils.ai_engine import repair_questions_from_text
-        repaired, provider = await repair_questions_from_text(raw_text)
-        if not repaired:
-            raise ValueError("AI bot formatida yaroqli savollar qaytara olmadi.")
-
-        parse_error = _validate_parsed_questions(repaired)
-        if parse_error:
-            raise ValueError(f"AI tuzatgan format ham yaroqsiz: {parse_error}")
-
-        await state.update_data(
-            questions=repaired,
-            _file_id=file_id,
-            _file_name=file_name,
-            _tmp_path=tmp_path,
-            _format_repair_tmp_path=None,
-            _format_repair_file_name=None,
-            _format_repair_file_id=None,
-            _format_repair_used=True,
-        )
-        # AI qayta tuzgan savollar uchun rasm oqimini hozircha parserga qoldiramiz.
-        b = InlineKeyboardBuilder()
-        b.button(text="🤖 AI bilan javoblarni aniqlash", callback_data="uj_ai")
-        b.button(text="❌ Bekor qilish", callback_data="cancel_create")
-        b.adjust(1)
-        await cb.message.edit_text(
-            f"✅ <b>Format AI orqali tuzatildi!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🤖 Provider: <b>{provider}</b>\n"
-            f"📋 Topilgan: <b>{len(repaired)}</b> ta savol\n"
-            f"❓ Javobi belgilanmagan: <b>{len(repaired)}</b> ta\n\n"
-            "Endi to'g'ri javoblarni AI bilan aniqlash mumkin.",
-            parse_mode="HTML",
-            reply_markup=b.as_markup(),
-        )
-    except Exception as e:
-        log.error(f"AI format repair xato: {e}", exc_info=True)
-        b = _format_repair_keyboard()
-        await cb.message.edit_text(
-            f"❌ <b>AI bilan formatni tuzatib bo'lmadi.</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<code>{str(e)[:500]}</code>\n\n"
-            "Qayta urinishingiz yoki bekor qilishingiz mumkin.",
-            parse_mode="HTML",
-            reply_markup=b,
-        )
 
 
 @router.callback_query(F.data == "uj_ai", CreateTest.upload_file)
