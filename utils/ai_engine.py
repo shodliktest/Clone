@@ -1,8 +1,8 @@
-"""Production AI engine for Quiztime.
+"""AI engine: Groq primary, Gemini fallback, plus explicit format repair.
 
-Text solving: Groq primary -> Gemini fallback.
-Format repair: Gemini primary -> Groq fallback.
-Both paths use structured JSON plus local validation.
+IMPORTANT: format repair is NEVER called by the parser automatically.  The
+handler calls repair_questions_from_text only after the user presses the
+"AI bilan formatni tuzatish" inline button.
 """
 from __future__ import annotations
 
@@ -42,46 +42,6 @@ class _RateGate:
             self._last = time.monotonic()
 
 
-def _secrets():
-    try:
-        import streamlit as st
-        return st.secrets
-    except Exception:
-        class _Env:
-            def get(self, key, default=""):
-                return os.environ.get(key, default)
-        return _Env()
-
-
-def _keys(prefix: str, maximum: int = 20) -> list[str]:
-    sec = _secrets()
-    names = [prefix] + [f"{prefix}{i}" for i in range(1, maximum + 1)]
-    result = []
-    for name in names:
-        try:
-            value = str(sec.get(name, "") or "").strip()
-        except Exception:
-            value = os.environ.get(name, "").strip()
-        if value and len(value) > 10 and value not in result:
-            result.append(value)
-    return result
-
-
-_groq_env_model = os.getenv("GROQ_AI_MODEL", "").strip()
-GROQ_MODEL = _groq_env_model or "openai/gpt-oss-120b"
-_gemini_env_model = os.getenv("GEMINI_AI_MODEL", "").strip()
-# Never let an old deployment override the required current Gemini model.
-GEMINI_MODEL = "gemini-3.6-flash" if (not _gemini_env_model or re.search(r"gemini-2\.\d", _gemini_env_model.lower())) else _gemini_env_model
-GROQ_MIN_INTERVAL = float(os.getenv("GROQ_AI_MIN_INTERVAL", "4.0"))
-GEMINI_MIN_INTERVAL = float(os.getenv("GEMINI_AI_MIN_INTERVAL", "2.0"))
-GROQ_MAX_OUTPUT = int(os.getenv("GROQ_AI_MAX_OUTPUT", "5000"))
-GEMINI_MAX_OUTPUT = int(os.getenv("GEMINI_AI_MAX_OUTPUT", "5000"))
-REPAIR_CHUNK_CHARS = int(os.getenv("AI_REPAIR_CHUNK_CHARS", "70000"))
-
-_groq_gate = _RateGate(GROQ_MIN_INTERVAL)
-_gemini_gate = _RateGate(GEMINI_MIN_INTERVAL)
-
-
 @dataclass
 class _Circuit:
     cooldown_until: float = 0.0
@@ -102,6 +62,40 @@ class _Circuit:
         self.failures = 0
 
 
+def _secrets():
+    try:
+        import streamlit as st
+        return st.secrets
+    except Exception:
+        class _Env:
+            def get(self, key, default=""):
+                return os.environ.get(key, default)
+        return _Env()
+
+
+def _keys(prefix: str, maximum: int = 20) -> list[str]:
+    sec = _secrets()
+    names = [prefix] + [f"{prefix}{i}" for i in range(1, maximum + 1)]
+    out: list[str] = []
+    for name in names:
+        value = str(sec.get(name, "") or "").strip()
+        if value and len(value) > 10 and value not in out:
+            out.append(value)
+    return out
+
+
+GROQ_MODEL = os.getenv("GROQ_AI_MODEL", "openai/gpt-oss-120b")
+GROQ_MIN_INTERVAL = float(os.getenv("GROQ_AI_MIN_INTERVAL", "3.0"))
+GROQ_MAX_OUTPUT = int(os.getenv("GROQ_AI_MAX_OUTPUT", "5000"))
+
+GEMINI_MODEL = os.getenv("GEMINI_AI_MODEL", "gemini-3.6-flash")
+GEMINI_MIN_INTERVAL = float(os.getenv("GEMINI_AI_MIN_INTERVAL", "3.0"))
+GEMINI_MAX_OUTPUT = int(os.getenv("GEMINI_AI_MAX_OUTPUT", "5000"))
+
+REPAIR_CHUNK_CHARS = int(os.getenv("AI_REPAIR_CHUNK_CHARS", "70000"))
+
+_groq_gate = _RateGate(GROQ_MIN_INTERVAL)
+_gemini_gate = _RateGate(GEMINI_MIN_INTERVAL)
 _groq_index = 0
 _gemini_index = 0
 _groq_circuit = _Circuit()
@@ -142,36 +136,31 @@ REPAIR_SCHEMA = {
 }
 
 
-def _extract_json(text: str) -> Any:
-    """Parse JSON robustly, including fenced/object/array responses."""
-    raw = (text or "").strip()
-    if not raw:
+def _json_text(text: str) -> Any:
+    text = (text or "").strip()
+    if not text:
         raise ValueError("AI bo'sh javob qaytardi")
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
-        raw = re.sub(r"\s*```$", "", raw).strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```$", "", text).strip()
     try:
-        return json.loads(raw)
+        return json.loads(text)
     except json.JSONDecodeError:
-        starts = [p for p in (raw.find("{"), raw.find("[")) if p >= 0]
-        if not starts:
-            raise
-        start = min(starts)
-        end_obj = raw.rfind("}")
-        end_arr = raw.rfind("]")
-        end = max(end_obj, end_arr)
-        if end <= start:
-            raise
-        return json.loads(raw[start:end + 1])
+        # Fallback faqat SDK structured-output bo'lmagan javoblar uchun.
+        for opener, closer in (("{", "}"), ("[", "]")):
+            start = text.find(opener)
+            end = text.rfind(closer)
+            if start >= 0 and end > start:
+                return json.loads(text[start:end + 1])
+        raise
 
 
 def _normalize_results(data: Any) -> list[dict]:
     if isinstance(data, dict):
         data = data.get("results")
     if not isinstance(data, list):
-        raise ValueError("AI javobi results array emas")
-    out = []
-    seen = set()
+        raise ValueError("AI javobida results array yo'q")
+    result = []
     for item in data:
         if not isinstance(item, dict):
             continue
@@ -180,65 +169,58 @@ def _normalize_results(data: Any) -> list[dict]:
             ci = int(item["correct_idx"])
         except Exception:
             continue
-        if idx in seen:
-            continue
-        seen.add(idx)
-        out.append({
+        result.append({
             "idx": idx,
             "correct_idx": ci,
             "explanation": str(item.get("explanation", "") or "").strip(),
         })
-    if not out:
+    if not result:
         raise ValueError("AI javobida yaroqli natija yo'q")
-    return out
+    return result
 
 
-def _clean_option(value: Any) -> str:
-    text = str(value or "").strip()
-    text = re.sub(r"^[A-Ha-h]\s*[).:]\s*", "", text)
-    text = re.sub(r"^(?:\*|\+|#|===|==)\s*", "", text)
-    return re.sub(r"\s+", " ", text).strip()
+def _strip_option_label(value: str) -> str:
+    value = re.sub(r"^\s*(?:[A-Ha-h]|\d{1,2})\s*[\).:\-]\s*", "", value)
+    return value.strip()
 
 
 def _normalize_repair(data: Any) -> list[dict]:
     if isinstance(data, dict):
         data = data.get("questions")
     if not isinstance(data, list):
-        raise ValueError("AI repair javobi questions array emas")
+        raise ValueError("AI repair javobida questions array yo'q")
     out = []
-    seen = set()
+    seen: set[str] = set()
     for item in data:
         if not isinstance(item, dict):
             continue
-        q = re.sub(r"\s+", " ", str(item.get("question", "") or "")).strip()
-        opts_raw = item.get("options")
-        if not q or not isinstance(opts_raw, list):
+        q = str(item.get("question", "") or "").strip()
+        raw_opts = item.get("options")
+        if len(q) < 2 or not isinstance(raw_opts, list):
             continue
-        opts = []
-        for value in opts_raw:
-            opt = _clean_option(value)
-            if opt and opt.lower() not in {x.lower() for x in opts}:
-                opts.append(opt)
+        opts: list[str] = []
+        for raw in raw_opts:
+            value = _strip_option_label(str(raw or ""))
+            if value and value not in opts:
+                opts.append(value)
+        # Repair is MCQ-only. Preserve the number of recoverable choices
+        # (the bot parser accepts 2+ options); never invent a missing choice.
         if len(opts) < 2 or len(opts) > 8:
             continue
-        key = re.sub(r"\W+", " ", q.lower()).strip()
+        key = re.sub(r"\s+", " ", q).casefold()
         if key in seen:
             continue
         seen.add(key)
-        labelled = [f"{chr(65+i)}) {v}" for i, v in enumerate(opts)]
         out.append({
             "type": "multiple_choice",
             "question": q,
-            "options": labelled,
-            "correct": "",             # format repair NEVER assigns answer
-            "explanation": "",
-            "accepted_answers": [],
-            "points": 1,
+            "options": opts,
+            "correct": "",
             "_marked": False,
             "_ai_repaired": True,
         })
     if not out:
-        raise ValueError("AI repair yaroqli savol topmadi")
+        raise ValueError("AI repair yaroqli variantli savol qaytarmadi")
     return out
 
 
@@ -246,8 +228,8 @@ def _status_code(exc: BaseException) -> int | None:
     for obj in (exc, getattr(exc, "response", None)):
         if obj is None:
             continue
-        for name in ("status_code", "code"):
-            value = getattr(obj, name, None)
+        for attr in ("status_code", "code"):
+            value = getattr(obj, attr, None)
             try:
                 if value is not None:
                     return int(value)
@@ -260,8 +242,8 @@ def _retry_after(exc: BaseException) -> float | None:
     for obj in (exc, getattr(exc, "response", None)):
         if obj is None:
             continue
-        for name in ("retry_after", "retry_after_seconds"):
-            value = getattr(obj, name, None)
+        for attr in ("retry_after", "retry_after_seconds"):
+            value = getattr(obj, attr, None)
             try:
                 if value is not None:
                     return max(0.0, float(value))
@@ -279,7 +261,8 @@ def _retry_after(exc: BaseException) -> float | None:
 
 
 def _is_rate_limit(exc: BaseException) -> bool:
-    if _status_code(exc) == 429:
+    status = _status_code(exc)
+    if status == 429:
         return True
     msg = str(exc).lower()
     return any(x in msg for x in (
@@ -323,10 +306,10 @@ async def _close_client(client: Any) -> None:
                 await result
             return
         except Exception:
-            continue
+            pass
 
 
-async def _call_groq(system_prompt: str, user_prompt: str, *, repair: bool = False) -> tuple[list[dict], str]:
+async def _call_groq(system_prompt: str, user_prompt: str, schema: dict) -> tuple[Any, str]:
     global _groq_index
     keys = _keys("GROQ_API_KEY", 20)
     if not keys:
@@ -339,51 +322,43 @@ async def _call_groq(system_prompt: str, user_prompt: str, *, repair: bool = Fal
     except Exception as exc:
         raise AIProviderError("Groq", f"SDK yuklanmadi: {exc}", retryable=False) from exc
 
-    schema = REPAIR_SCHEMA if repair else RESULT_SCHEMA
-    name = "quiz_format_repair" if repair else "quiz_solution"
-    for _ in range(len(keys)):
-        key = keys[_groq_index % len(keys)]
-        _groq_index += 1
-        client = None
-        try:
-            await _groq_gate.wait()
-            client = AsyncGroq(api_key=key)
-            completion = await client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0,
-                max_completion_tokens=GROQ_MAX_OUTPUT,
-                reasoning_effort="high",
-                include_reasoning=False,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {"name": name, "schema": schema, "strict": True},
-                },
-            )
-            raw = completion.choices[0].message.content or ""
-            data = _extract_json(raw)
-            result = _normalize_repair(data) if repair else _normalize_results(data)
-            _groq_circuit.success()
-            return result, "Groq"
-        except Exception as exc:
-            msg = str(exc)
-            if _is_rate_limit(exc):
-                delay = _groq_circuit.trip(_retry_after(exc), base=30, cap=300)
-                raise AIProviderError("Groq", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
-            if _is_network_error(exc):
-                delay = _groq_circuit.trip(base=15, cap=120)
-                raise AIProviderError("Groq", f"network error; cooldown {delay:.0f}s: {msg[:160]}", retryable=True, retry_after=delay) from exc
-            # Do not pretend another API key fixes a schema/model/input error.
-            raise AIProviderError("Groq", f"{_status_code(exc) or ''}: {msg[:220]}", retryable=False) from exc
-        finally:
-            await _close_client(client)
-    raise AIProviderError("Groq", "Groq credential urinishlari muvaffaqiyatsiz", retryable=True)
+    key = keys[_groq_index % len(keys)]
+    _groq_index += 1
+    client = None
+    try:
+        await _groq_gate.wait()
+        client = AsyncGroq(api_key=key)
+        completion = await client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0,
+            max_completion_tokens=GROQ_MAX_OUTPUT,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "quiz_response", "strict": True, "schema": schema},
+            },
+        )
+        content = completion.choices[0].message.content or ""
+        data = _json_text(content)
+        _groq_circuit.success()
+        return data, "Groq"
+    except Exception as exc:
+        msg = str(exc)
+        if _is_rate_limit(exc):
+            delay = _groq_circuit.trip(_retry_after(exc), base=30, cap=300)
+            raise AIProviderError("Groq", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
+        if _is_network_error(exc):
+            delay = _groq_circuit.trip(base=15, cap=120)
+            raise AIProviderError("Groq", f"network error; cooldown {delay:.0f}s: {msg[:180]}", retry_after=delay) from exc
+        raise AIProviderError("Groq", f"{_status_code(exc) or ''}: {msg[:240]}", retryable=False) from exc
+    finally:
+        await _close_client(client)
 
 
-async def _call_gemini(system_prompt: str, user_prompt: str, *, repair: bool = False) -> tuple[list[dict], str]:
+async def _call_gemini(system_prompt: str, user_prompt: str, schema: dict) -> tuple[Any, str]:
     global _gemini_index
     keys = _keys("GEMINI_API_KEY", 20)
     if not keys:
@@ -397,149 +372,137 @@ async def _call_gemini(system_prompt: str, user_prompt: str, *, repair: bool = F
     except Exception as exc:
         raise AIProviderError("Gemini", f"SDK yuklanmadi: {exc}", retryable=False) from exc
 
-    schema = REPAIR_SCHEMA if repair else RESULT_SCHEMA
-    for _ in range(len(keys)):
-        key = keys[_gemini_index % len(keys)]
-        _gemini_index += 1
-        client = None
-        try:
-            await _gemini_gate.wait()
-            client = genai.Client(api_key=key)
-            response = await client.aio.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0,
-                    max_output_tokens=GEMINI_MAX_OUTPUT,
-                    response_mime_type="application/json",
-                    response_json_schema=schema,
-                ),
-            )
-            data = _extract_json(response.text or "")
-            result = _normalize_repair(data) if repair else _normalize_results(data)
-            _gemini_circuit.success()
-            return result, "Gemini"
-        except Exception as exc:
-            msg = str(exc)
-            if _is_rate_limit(exc):
-                delay = _gemini_circuit.trip(_retry_after(exc), base=30, cap=300)
-                raise AIProviderError("Gemini", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
-            if _is_network_error(exc):
-                delay = _gemini_circuit.trip(base=15, cap=120)
-                raise AIProviderError("Gemini", f"network error; cooldown {delay:.0f}s: {msg[:160]}", retryable=True, retry_after=delay) from exc
-            raise AIProviderError("Gemini", f"{_status_code(exc) or ''}: {msg[:220]}", retryable=False) from exc
-        finally:
-            await _close_client(client)
-    raise AIProviderError("Gemini", "Gemini credential urinishlari muvaffaqiyatsiz", retryable=True)
+    key = keys[_gemini_index % len(keys)]
+    _gemini_index += 1
+    client = None
+    try:
+        await _gemini_gate.wait()
+        client = genai.Client(api_key=key)
+        response = await client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0,
+                max_output_tokens=GEMINI_MAX_OUTPUT,
+                response_mime_type="application/json",
+                response_json_schema=schema,
+            ),
+        )
+        data = _json_text(response.text or "")
+        _gemini_circuit.success()
+        return data, "Gemini"
+    except Exception as exc:
+        msg = str(exc)
+        if _is_rate_limit(exc):
+            delay = _gemini_circuit.trip(_retry_after(exc), base=30, cap=300)
+            raise AIProviderError("Gemini", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
+        if _is_network_error(exc):
+            delay = _gemini_circuit.trip(base=15, cap=120)
+            raise AIProviderError("Gemini", f"network error; cooldown {delay:.0f}s: {msg[:180]}", retry_after=delay) from exc
+        raise AIProviderError("Gemini", f"{_status_code(exc) or ''}: {msg[:240]}", retryable=False) from exc
+    finally:
+        await _close_client(client)
 
 
 async def solve_text_batch(system_prompt: str, user_prompt: str) -> tuple[list[dict], str]:
-    """Groq primary; Gemini is used automatically when Groq fails."""
+    """Groq primary -> Gemini fallback for answer solving."""
     errors = []
     if _keys("GROQ_API_KEY", 20):
         try:
-            return await _call_groq(system_prompt, user_prompt, repair=False)
+            data, provider = await _call_groq(system_prompt, user_prompt, RESULT_SCHEMA)
+            return _normalize_results(data), provider
         except AIProviderError as exc:
             errors.append(str(exc))
     try:
-        return await _call_gemini(system_prompt, user_prompt, repair=False)
+        data, provider = await _call_gemini(system_prompt, user_prompt, RESULT_SCHEMA)
+        return _normalize_results(data), provider
     except AIProviderError as exc:
         errors.append(str(exc))
     raise AIProviderError("AI", "; ".join(errors), retryable=True,
-                          rate_limited=any("rate limit" in e.lower() or "cooldown" in e.lower() for e in errors))
+                          rate_limited=any("rate limit" in x.lower() or "cooldown" in x.lower() for x in errors))
 
 
 def _chunk_text(text: str, max_chars: int = REPAIR_CHUNK_CHARS) -> list[str]:
-    text = (text or "").replace("\r\n", "\n").strip()
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     if len(text) <= max_chars:
-        return [text] if text else []
+        return [text]
     chunks = []
     start = 0
-    n = len(text)
-    overlap = 1200
-    while start < n:
-        end = min(n, start + max_chars)
-        if end < n:
-            cut = text.rfind("\n\n", start + max_chars // 2, end)
+    while start < len(text):
+        end = min(len(text), start + max_chars)
+        if end < len(text):
+            cut = text.rfind("\n\n", start, end)
+            if cut < start + max_chars // 2:
+                cut = text.rfind("\n", start, end)
             if cut > start:
                 end = cut
-        part = text[start:end].strip()
-        if part:
-            chunks.append(part)
-        if end >= n:
-            break
-        start = max(0, end - overlap)
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        start = end
     return chunks
 
 
-async def _repair_chunk(chunk: str) -> tuple[list[dict], str]:
-    system = (
-        "Siz test faylini FORMAT REPAIR qiluvchi AI'siz. "
-        "Vazifa: faqat berilgan xom matndan savol va mavjud variantlarni ajrating. "
-        "To'g'ri javobni aniqlamang va belgilamang. Variant o'ylab topmang. "
-        "Savol matnidagi qatorlarni kerak bo'lsa birlashtiring. "
-        "Variantlar 2 dan 8 tagacha bo'lishi mumkin. Har savolda mavjud variantlarni to'liq saqlang. "
-        "Chiqishda faqat JSON schema bo'yicha questions qaytaring."
-    )
-    user = (
-        "XOM TEST MATNI. Uni botning multiple_choice formatiga normallashtiring. "
-        "Agar matnning bir qismi savol emasligi aniq bo'lsa, uni tashlang. "
-        "JAVOBNI topmang.\n\n" + chunk
-    )
-    errors = []
-    if _keys("GEMINI_API_KEY", 20):
-        try:
-            return await _call_gemini(system, user, repair=True)
-        except AIProviderError as exc:
-            errors.append(str(exc))
-    if _keys("GROQ_API_KEY", 20):
-        try:
-            return await _call_groq(system, user, repair=True)
-        except AIProviderError as exc:
-            errors.append(str(exc))
-    raise AIProviderError("AI", "; ".join(errors) or "format repair uchun API key yo'q", retryable=True)
+_REPAIR_SYSTEM = (
+    "Siz test faylini FORMAT REPAIR qiluvchi tizimsiz. "
+    "Sizning vazifangiz faqat xom matndan savol va uning variantlarini ajratish. "
+    "TO'G'RI JAVOBNI ANIQLAMANG VA BELGILAMANG. "
+    "Matnda nechta haqiqiy variant bo'lsa, o'sha variantlarni saqlang (kamida 2 ta). "
+    "Yetishmayotgan variantni o'ylab topmang. "
+    "Variant matnlarini original mazmunni saqlagan holda tozalang. "
+    "Savol yoki variantni o'ylab topmang; matnda aniq tiklab bo'lmasa, o'sha savolni tashlang. "
+    "Natija faqat berilgan JSON schema bo'yicha bo'lsin."
+)
 
 
 async def repair_questions_from_text(text: str) -> tuple[list[dict], str]:
-    """Repair malformed/unsupported raw test text without assigning answers."""
+    """Explicitly invoked format repair; never used by parse_file()."""
     chunks = _chunk_text(text)
     if not chunks:
-        raise AIProviderError("AI", "repair uchun matn bo'sh", retryable=False)
-    all_questions = []
-    providers = []
-    errors = []
-    for number, chunk in enumerate(chunks, 1):
-        last = None
-        for attempt in range(1, 4):
-            try:
-                repaired, provider = await _repair_chunk(chunk)
-                all_questions.extend(repaired)
-                providers.append(provider)
-                last = None
-                break
-            except AIProviderError as exc:
-                last = exc
-                await asyncio.sleep(min(2 * attempt, 5))
-        if last:
-            errors.append(f"chunk {number}: {last}")
+        raise AIProviderError("AI", "Xom matn bo'sh")
 
-    # Global dedupe after overlapping chunks.
-    unique = []
-    seen = set()
+    all_questions: list[dict] = []
+    providers: list[str] = []
+    errors: list[str] = []
+    for n, chunk in enumerate(chunks, 1):
+        user_prompt = (
+            f"Bu {n}/{len(chunks)} qism. Xom test matnini botning MCQ formatiga keltiring. "
+            "Hech qaysi variantni to'g'ri deb belgilamang. Savol + matnda mavjud haqiqiy variantlarni qaytaring.\n\n"
+            + chunk
+        )
+        try:
+            # Gemini is preferred for repair because it is the dedicated fallback
+            # provider in this flow; Groq is used only if Gemini fails.
+            data, provider = await _call_gemini(_REPAIR_SYSTEM, user_prompt, REPAIR_SCHEMA)
+            repaired = _normalize_repair(data)
+        except AIProviderError as gem_exc:
+            errors.append(str(gem_exc))
+            try:
+                data, provider = await _call_groq(_REPAIR_SYSTEM, user_prompt, REPAIR_SCHEMA)
+                repaired = _normalize_repair(data)
+            except AIProviderError as groq_exc:
+                errors.append(str(groq_exc))
+                raise AIProviderError("AI", f"chunk {n}: {gem_exc}; {groq_exc}", retryable=True) from groq_exc
+        all_questions.extend(repaired)
+        providers.append(provider)
+
+    # De-duplicate questions after chunking.
+    unique: list[dict] = []
+    seen: set[str] = set()
     for q in all_questions:
-        key = re.sub(r"\W+", " ", q.get("question", "").lower()).strip()
-        if key and key not in seen:
+        key = re.sub(r"\s+", " ", q["question"]).casefold()
+        if key not in seen:
             seen.add(key)
             unique.append(q)
     if not unique:
-        raise AIProviderError("AI", "; ".join(errors) or "format repair savol topmadi", retryable=True)
-    provider = "Gemini" if providers and all(p == "Gemini" for p in providers) else "AI"
-    return unique, provider
+        raise AIProviderError("AI", "; ".join(errors) or "AI repair natija bermadi", retryable=True)
+    provider_label = providers[0] if len(set(providers)) == 1 else "Gemini/Groq"
+    return unique, provider_label
 
 
 async def solve_image(image_bytes: bytes, mime_type: str, prompt: str) -> dict:
-    """Gemini Vision helper retained for existing image-question flow."""
+    """Existing Gemini vision path retained for compatibility."""
     global _gemini_index
     keys = _keys("GEMINI_API_KEY", 20)
     if not keys:
@@ -552,36 +515,37 @@ async def solve_image(image_bytes: bytes, mime_type: str, prompt: str) -> dict:
         from google.genai import types
     except Exception as exc:
         raise AIProviderError("Gemini", f"SDK yuklanmadi: {exc}", retryable=False) from exc
-    for _ in range(len(keys)):
-        key = keys[_gemini_index % len(keys)]
-        _gemini_index += 1
-        client = None
-        try:
-            await _gemini_gate.wait()
-            client = genai.Client(api_key=key)
-            response = await client.aio.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=[types.Part.from_text(text=prompt), types.Part.from_bytes(data=image_bytes, mime_type=mime_type)],
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    max_output_tokens=700,
-                    response_mime_type="application/json",
-                ),
-            )
-            data = _extract_json(response.text or "")
-            if not isinstance(data, dict):
-                raise ValueError("Gemini Vision javobi object emas")
-            _gemini_circuit.success()
-            return data
-        except Exception as exc:
-            msg = str(exc)
-            if _is_rate_limit(exc):
-                delay = _gemini_circuit.trip(_retry_after(exc), base=30, cap=300)
-                raise AIProviderError("Gemini", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
-            if _is_network_error(exc):
-                delay = _gemini_circuit.trip(base=15, cap=120)
-                raise AIProviderError("Gemini", f"network error; cooldown {delay:.0f}s: {msg[:160]}", retryable=True, retry_after=delay) from exc
-            raise AIProviderError("Gemini", f"{_status_code(exc) or ''}: {msg[:220]}", retryable=False) from exc
-        finally:
-            await _close_client(client)
-    raise AIProviderError("Gemini", "Gemini credential urinishlari muvaffaqiyatsiz", retryable=True)
+    key = keys[_gemini_index % len(keys)]
+    _gemini_index += 1
+    client = None
+    try:
+        await _gemini_gate.wait()
+        client = genai.Client(api_key=key)
+        response = await client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                types.Part.from_text(text=prompt),
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0,
+                max_output_tokens=800,
+                response_mime_type="application/json",
+            ),
+        )
+        data = _json_text(response.text or "")
+        if not isinstance(data, dict):
+            raise ValueError("Gemini vision javobi object emas")
+        _gemini_circuit.success()
+        return data
+    except Exception as exc:
+        msg = str(exc)
+        if _is_rate_limit(exc):
+            delay = _gemini_circuit.trip(_retry_after(exc), base=30, cap=300)
+            raise AIProviderError("Gemini", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
+        if _is_network_error(exc):
+            delay = _gemini_circuit.trip(base=15, cap=120)
+            raise AIProviderError("Gemini", f"network error; cooldown {delay:.0f}s: {msg[:180]}", retry_after=delay) from exc
+        raise AIProviderError("Gemini", f"{_status_code(exc) or ''}: {msg[:240]}", retryable=False) from exc
+    finally:
+        await _close_client(client)
