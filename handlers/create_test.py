@@ -27,6 +27,58 @@ def _get_user_subjects(uid):
     from utils.ram_cache import get_user_custom_subjects
     return get_user_custom_subjects(uid)
 
+
+def _validate_parsed_questions(questions: list) -> str | None:
+    """Parse natijasini AI chaqirmasdan tekshiradi.
+
+    None -> parser natijasi bot formatiga yaroqli.
+    String -> foydalanuvchiga ko'rsatiladigan format xatosi.
+    """
+    if not questions:
+        return "Savollar topilmadi — fayl formati bot tanigan formatlardan biriga mos emas."
+
+    for n, q in enumerate(questions, 1):
+        if not isinstance(q, dict):
+            return f"{n}-savol noto'g'ri tuzilgan."
+        question = str(q.get("question", "") or "").strip()
+        if len(question) < 2:
+            return f"{n}-savolda savol matni topilmadi."
+        qtype = str(q.get("type", "multiple_choice") or "multiple_choice")
+        if qtype in ("multiple_choice", "multi_select"):
+            opts = q.get("options")
+            if not isinstance(opts, list) or len(opts) < 2:
+                return (f"{n}-savolda variantlar yetarli emas "
+                        f"(topilgan: {len(opts) if isinstance(opts, list) else 0} ta).")
+            clean = [str(x).strip() for x in opts if str(x).strip()]
+            if len(clean) < 2 or len({x.casefold() for x in clean}) < 2:
+                return f"{n}-savol variantlari noto'g'ri yoki takrorlangan."
+    return None
+
+
+def _format_error_keyboard():
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_create"))
+    return b.as_markup()
+
+def _format_error_text(file_name: str, reason: str) -> str:
+    return (
+        f"❌ <b>«{file_name}» — FORMAT XATO</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ {reason}\n\n"
+        "Oddiy parser faylni AI chaqirmasdan tekshirdi, "
+        "lekin bot formatiga mos natija chiqmadi.\n\n"
+        "Iltimos, faylni bot qo'llab-quvvatlaydigan formatda qayta yuboring."
+    )
+
+async def _show_format_error(status, state, tmp_path: str, file_name: str, reason: str, file_id: str = ""):
+    """Parser xatosini ko'rsatadi. Formatni AI orqali tiklash yo'q."""
+    await state.set_state(CreateTest.upload_file)
+    await status.edit_text(
+        _format_error_text(file_name, reason),
+        parse_mode="HTML",
+        reply_markup=_format_error_keyboard(),
+    )
+
 log        = logging.getLogger(__name__)
 router     = Router()
 SAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "samples")
@@ -416,15 +468,18 @@ async def finish_text(callback: CallbackQuery, state: FSMContext):
                                          suffix=".txt", encoding="utf-8") as tmp:
             tmp.write(full_text)
             tmp_path = tmp.name
+        # Parser birinchi bosqichda ishlaydi; bu yerda AI umuman chaqirilmaydi.
         questions = parse_file(tmp_path)
-        os.remove(tmp_path)
-
-        if not questions:
+        parse_error = _validate_parsed_questions(questions)
+        if parse_error:
+            try: os.remove(tmp_path)
+            except Exception: pass
             return await status.edit_text(
-                "❌ <b>Savollar topilmadi!</b>\n\n"
-                "To'g'ri javob oldiga <b>===</b> qo'ying:\n"
-                "<code>===A) To'g'ri javob</code>"
+                _format_error_text("Chat matni.txt", parse_error),
+                parse_mode="HTML",
+                reply_markup=_format_error_keyboard(),
             )
+        os.remove(tmp_path)
 
         await state.update_data(
             questions=questions,
@@ -741,30 +796,24 @@ async def upload_file(message: Message, state: FSMContext):
             _source_file_size=doc.file_size or 0,
         )
 
+        # MUHIM: parse bosqichida AI umuman chaqirilmaydi.
         questions = parse_file(tmp_path)
-        # Rasmli savollar uchun tmp_path ni state da saqlaymiz
+        parse_error = _validate_parsed_questions(questions)
+        if parse_error:
+            await _del(message.bot, message.chat.id, message.message_id)
+            return await _show_format_error(
+                status, state, tmp_path, doc.file_name, parse_error, doc.file_id
+            )
+
+        # Faqat parser muvaffaqiyatli bo'lsa temp faylni keyin tozalaymiz.
         has_img_qs = any(q.get("_has_image") for q in questions)
         if has_img_qs:
-            await state.update_data(
-                _tmp_path=tmp_path,
-                _file_name=doc.file_name,  # Fayl nomi — test nomiga taklif
-            )
+            await state.update_data(_tmp_path=tmp_path, _file_name=doc.file_name)
         else:
             await state.update_data(_file_name=doc.file_name)
             try: os.remove(tmp_path)
             except Exception: pass
         await _del(message.bot, message.chat.id, message.message_id)
-
-        if not questions:
-            return await status.edit_text(
-                "❌ <b>Savollar topilmadi!</b>\n\n"
-                "Quyidagi formatlar qo\'llab-quvvatlanadi:\n"
-                "• <b>Standart:</b> <code>===A) To\'g\'ri javob</code>\n"
-                "• <b>==== + #:</b> Savol → ==== → #To\'g\'ri → ====\n"
-                "• <b>Jadval:</b> Savol | To\'g\'ri | Muqobil...\n"
-                "• <b>PDF:</b> ? savol → =Javob\n\n"
-                "Namunani ko\'rish uchun turni qaytadan tanlang."
-            )
 
         total    = len(questions)
         unmarked = sum(1 for q in questions if not q.get("_marked"))
@@ -838,7 +887,12 @@ async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, 
     va _run_next_queued_file (ko'p fayl navbati) ikkalasi ham shu
     funksiyani ishlatadi — parse mantig'i bitta joyda saqlanadi.
     """
+    # MUHIM: bu funksiya ham faqat parser qiladi; AI faqat tugma callback'ida ishlaydi.
     questions = parse_file(tmp_path)
+    parse_error = _validate_parsed_questions(questions)
+    if parse_error:
+        return await _show_format_error(status, state, tmp_path, file_name, parse_error, file_id)
+
     has_img_qs = any(q.get("_has_image") for q in questions)
     if has_img_qs:
         await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
@@ -846,17 +900,6 @@ async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, 
         await state.update_data(_file_name=file_name)
         try: os.remove(tmp_path)
         except Exception: pass
-
-    if not questions:
-        return await status.edit_text(
-            f"❌ <b>«{file_name}» faylida savollar topilmadi!</b>\n\n"
-            "Quyidagi formatlar qo\'llab-quvvatlanadi:\n"
-            "• <b>Standart:</b> <code>===A) To\'g\'ri javob</code>\n"
-            "• <b>==== + #:</b> Savol → ==== → #To\'g\'ri → ====\n"
-            "• <b>Jadval:</b> Savol | To\'g\'ri | Muqobil...\n"
-            "• <b>PDF:</b> ? savol → =Javob",
-            parse_mode="HTML",
-        )
 
     total    = len(questions)
     unmarked = sum(1 for q in questions if not q.get("_marked"))
@@ -1049,7 +1092,12 @@ async def fp_force_reparse(callback: CallbackQuery, state: FSMContext):
             _source_file_size=file_size,
         )
 
+        # Qayta parse ham AI'siz. Format xato bo'lsa foydalanuvchi faylni qayta yuboradi.
         questions = parse_file(tmp_path)
+        parse_error = _validate_parsed_questions(questions)
+        if parse_error:
+            return await _show_format_error(status, state, tmp_path, file_name, parse_error)
+
         has_img_qs = any(q.get("_has_image") for q in questions)
         if has_img_qs:
             await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
@@ -1057,13 +1105,6 @@ async def fp_force_reparse(callback: CallbackQuery, state: FSMContext):
             await state.update_data(_file_name=file_name)
             try: os.remove(tmp_path)
             except Exception: pass
-
-        if not questions:
-            return await status.edit_text(
-                "❌ <b>Savollar topilmadi!</b>\n\n"
-                "Namunani ko\'rish uchun turni qaytadan tanlang.",
-                parse_mode="HTML"
-            )
 
         total    = len(questions)
         unmarked = sum(1 for q in questions if not q.get("_marked"))
@@ -1415,23 +1456,15 @@ async def uj_back(cb: CallbackQuery, state: FSMContext):
 # Matnli savollar: Groq -> Gemini fallback.
 # Rasmli savollar: Gemini Vision.
 #
-# Secrets:
-#   GROQ_API_KEY = "gsk_..."
-#   GROQ_API_KEY1 = "gsk_..."
-#   GEMINI_API_KEY = "AQ..."
-#   GEMINI_API_KEY1 = "AQ..."
-#
-# Ixtiyoriy environment sozlamalar:
-#   GROQ_AI_MODEL=openai/gpt-oss-20b
-#   GROQ_AI_MIN_INTERVAL=3.0
-#   GROQ_AI_MAX_OUTPUT=900
-#   GEMINI_AI_MODEL=gemini-2.5-flash
-#   GEMINI_AI_MIN_INTERVAL=7.0
-#   GEMINI_AI_MAX_OUTPUT=600
+# Secrets: 10 ta Groq + 10 ta Gemini credential qo'shish mumkin.
+#   GROQ_API_KEY, GROQ_API_KEY1 ... GROQ_API_KEY10
+#   GEMINI_API_KEY, GEMINI_API_KEY1 ... GEMINI_API_KEY10
+# Credential rotation quota'ni oshirmaydi; engine mavjud credentiallar
+# orasida failover/cooldown boshqaruvini bajaradi.
 # ═══════════════════════════════════════════════════════════
 
 async def _solve_image_questions(questions: list, docx_path: str, msg, explain_mode: str = "full") -> list:
-    """Rasmli savollarni Gemini 2.5 Flash bilan rasm+matn sifatida yechadi.
+    """Rasmli savollarni Gemini bilan rasm+matn sifatida yechadi.
 
     Gemini uchun alohida rate-gate ishlatiladi. Kalitlar credential rotation
     uchun; Google quota project darajasida bo'lgani sababli kalitlar quota'ni
