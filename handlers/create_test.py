@@ -27,51 +27,6 @@ def _get_user_subjects(uid):
     from utils.ram_cache import get_user_custom_subjects
     return get_user_custom_subjects(uid)
 
-
-def _validate_parsed_questions(questions: list) -> str | None:
-    """Parser natijasini AI chaqirmasdan tekshiradi."""
-    if not questions:
-        return "Savollar topilmadi — fayl formati bot tanigan formatlardan biriga mos emas."
-    for n, q in enumerate(questions, 1):
-        if not isinstance(q, dict):
-            return f"{n}-savol noto'g'ri tuzilgan."
-        question = str(q.get("question", "") or "").strip()
-        if len(question) < 2:
-            return f"{n}-savolda savol matni topilmadi."
-        qtype = str(q.get("type", "multiple_choice") or "multiple_choice")
-        if qtype in ("multiple_choice", "multi_select"):
-            opts = q.get("options")
-            if not isinstance(opts, list) or len(opts) < 2:
-                return f"{n}-savolda kamida 2 ta variant bo'lishi kerak."
-            clean = [str(x).strip() for x in opts if str(x).strip()]
-            if len(clean) < 2 or len({x.casefold() for x in clean}) < 2:
-                return f"{n}-savol variantlari noto'g'ri yoki takrorlangan."
-    return None
-
-
-def _format_error_markup():
-    b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_create"))
-    return b.as_markup()
-
-
-async def _show_format_error(status, state, tmp_path: str | None, file_name: str, reason: str, file_id: str = ""):
-    """Format xatosida AI repair yo'q: faqat xabar va qayta yuborish."""
-    if tmp_path and os.path.exists(tmp_path):
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-    await state.update_data(questions=[], _tmp_path=None, _file_id=file_id or "")
-    text = (
-        f"❌ <b>«{file_name}» — FORMAT XATO</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚠️ {reason}\n\n"
-        "Parser faylni AI chaqirmasdan tekshirdi, lekin bot formatiga mos savol topilmadi.\n\n"
-        "Iltimos, namuna bo'yicha faylni qayta yuboring."
-    )
-    await status.edit_text(text, parse_mode="HTML", reply_markup=_format_error_markup())
-
 log        = logging.getLogger(__name__)
 router     = Router()
 SAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "samples")
@@ -462,9 +417,6 @@ async def finish_text(callback: CallbackQuery, state: FSMContext):
             tmp.write(full_text)
             tmp_path = tmp.name
         questions = parse_file(tmp_path)
-        parse_error = _validate_parsed_questions(questions)
-        if parse_error:
-            return await _show_format_error(status, state, tmp_path, "matn", parse_error)
         os.remove(tmp_path)
 
         if not questions:
@@ -790,10 +742,6 @@ async def upload_file(message: Message, state: FSMContext):
         )
 
         questions = parse_file(tmp_path)
-        parse_error = _validate_parsed_questions(questions)
-        if parse_error:
-            await _del(message.bot, message.chat.id, message.message_id)
-            return await _show_format_error(status, state, tmp_path, doc.file_name, parse_error, doc.file_id)
         # Rasmli savollar uchun tmp_path ni state da saqlaymiz
         has_img_qs = any(q.get("_has_image") for q in questions)
         if has_img_qs:
@@ -891,9 +839,6 @@ async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, 
     funksiyani ishlatadi — parse mantig'i bitta joyda saqlanadi.
     """
     questions = parse_file(tmp_path)
-    parse_error = _validate_parsed_questions(questions)
-    if parse_error:
-        return await _show_format_error(status, state, tmp_path, file_name, parse_error, file_id)
     has_img_qs = any(q.get("_has_image") for q in questions)
     if has_img_qs:
         await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
@@ -1105,9 +1050,6 @@ async def fp_force_reparse(callback: CallbackQuery, state: FSMContext):
         )
 
         questions = parse_file(tmp_path)
-        parse_error = _validate_parsed_questions(questions)
-        if parse_error:
-            return await _show_format_error(status, state, tmp_path, file_name, parse_error)
         has_img_qs = any(q.get("_has_image") for q in questions)
         if has_img_qs:
             await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
@@ -1361,6 +1303,7 @@ async def do_ai_solve(cb: CallbackQuery, state: FSMContext):
             if path and os.path.exists(path):
                 questions = await _solve_image_questions(questions, path, cb.message, explain_mode)
 
+        await state.update_data(questions=questions)
         await state.update_data(questions=questions)
         solved     = sum(1 for q in questions if q.get("_ai_solved"))
         img_solved = sum(1 for q in questions if q.get("_ai_solved") and q.get("_has_image"))
@@ -1629,8 +1572,8 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
         "Faqat berilgan savol va variantlardan foydalaning. Mavjud bo'lmagan fakt, "
         "variant yoki shartni to'qimang. Matematik/texnik masalani ichingizda "
         "qadam-baqadam tekshiring. Eng ishonchli javobni tanlang. "
-        "Chiqishda FAQAT JSON object qaytaring: {\"results\":[...]}. "
-        "Har element: {\"idx\":N,\"correct_idx\":N,\"explanation\":\"...\"}. "
+        "Chiqishda FAQAT JSON array qaytaring. Har element: "
+        '{"idx":N,"correct_idx":N,"explanation":"..."}. '
         "idx kiruvchi savolning indeksidir; correct_idx 0-based. "
         + _exp_instr
     )
@@ -1686,10 +1629,8 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
                     continue
                 questions[oi]["correct"] = opts[ci]
                 questions[oi]["explanation"] = str(item.get("explanation", "") or "")
-                if not questions[oi].get("_ai_solved"):
-                    questions[oi]["_ai_solved"] = True
-                    questions[oi]["_marked"] = True
-                    solved += 1
+                questions[oi]["_ai_solved"] = True
+                solved += 1
         except Exception as e:
             log.error(f"AI batch {bn}/{total_batches} xato: {e}")
 
@@ -1735,6 +1676,7 @@ async def method_poll(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CreateTest.waiting_polls)
 
 
+@router.callback_query(F.data == "method_regular_poll", CreateTest.choose_method)
 @router.callback_query(F.data == "method_regular_poll", CreateTest.choose_method)
 async def method_regular_poll(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
