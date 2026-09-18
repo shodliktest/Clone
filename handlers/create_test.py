@@ -29,6 +29,144 @@ def _get_user_subjects(uid):
 
 log        = logging.getLogger(__name__)
 router     = Router()
+
+
+def _normalize_qkey(text: str) -> str:
+    text = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    return re.sub(r"\W+", " ", text).strip()
+
+
+def _extract_text_for_ai_repair(path: str) -> str:
+    """Extract raw text without interpreting answers; used only for AI format repair."""
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".txt":
+            for enc in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
+                try:
+                    with open(path, encoding=enc) as f:
+                        return f.read()
+                except UnicodeDecodeError:
+                    continue
+            return ""
+
+        if ext == ".doc":
+            from utils.parser import _convert_doc
+            converted = _convert_doc(path)
+            if converted and converted != path and os.path.exists(converted):
+                return _extract_text_for_ai_repair(converted)
+            return ""
+
+        if ext == ".docx":
+            from docx import Document
+            doc = Document(path)
+            parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+            for table in doc.tables:
+                for row in table.rows:
+                    vals = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if vals:
+                        parts.append(" | ".join(vals))
+            return "\n".join(parts)
+
+        if ext == ".pdf":
+            import pdfplumber
+            pages = []
+            with pdfplumber.open(path) as pdf:
+                for page in pdf.pages:
+                    txt = page.extract_text()
+                    if txt:
+                        pages.append(txt)
+            return "\n\n".join(pages)
+
+        if ext in (".xlsx", ".xlsm", ".xls"):
+            import openpyxl
+            if ext == ".xls":
+                return ""
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            parts = []
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    vals = [str(v).strip() for v in row if v is not None and str(v).strip()]
+                    if vals:
+                        parts.append(" | ".join(vals))
+            return "\n".join(parts)
+    except Exception as e:
+        log.warning(f"AI repair uchun xom matn ajratishda xato: {e}")
+    return ""
+
+
+def _parser_result_needs_ai_repair(questions: list) -> bool:
+    """True when parser produced no questions or definitely broken MCQ records."""
+    if not questions:
+        return True
+    bad = 0
+    mcq = 0
+    for q in questions:
+        if q.get("type") in ("multiple_choice", "multi_select"):
+            mcq += 1
+            opts = q.get("options")
+            if not isinstance(opts, list) or len(opts) < 2:
+                bad += 1
+    # A single broken record is enough: AI should get a chance to recover it.
+    return bad > 0 or (mcq > 0 and bad / max(mcq, 1) >= 0.20)
+
+
+async def _parse_with_ai_repair(path: str, *, log_prefix: str = "") -> list:
+    """Normal parser first; AI is used only when the parser output is empty/broken.
+
+    AI format repair never assigns the correct answer. Existing parsed records
+    with a known answer are preserved; repaired records replace broken ones.
+    """
+    questions = parse_file(path)
+    if not _parser_result_needs_ai_repair(questions):
+        return questions
+
+    raw_text = _extract_text_for_ai_repair(path)
+    if len(raw_text.strip()) < 20:
+        return questions
+
+    try:
+        from utils.ai_engine import repair_questions_from_text
+        repaired, provider = await repair_questions_from_text(raw_text)
+    except Exception as e:
+        log.error(f"{log_prefix}AI format repair xato: {e}")
+        return questions
+
+    if not repaired:
+        return questions
+
+    # Keep parser metadata (especially image/photo fields) where the question matches.
+    old_by_key = {}
+    for q in questions:
+        key = _normalize_qkey(q.get("question", ""))
+        if key:
+            old_by_key[key] = q
+
+    merged = []
+    used_old = set()
+    for rq in repaired:
+        key = _normalize_qkey(rq.get("question", ""))
+        old = old_by_key.get(key)
+        if old is not None and len(old.get("options", [])) >= 2:
+            merged.append(old)
+            used_old.add(id(old))
+        elif old is not None:
+            # Broken parsed record: use repaired options, but retain non-answer metadata.
+            replacement = dict(rq)
+            for meta_key in ("photo", "_has_image", "_img_bytes", "_img_ext"):
+                if meta_key in old:
+                    replacement[meta_key] = old[meta_key]
+            merged.append(replacement)
+            used_old.add(id(old))
+        else:
+            merged.append(rq)
+
+    # If the normal parser found valid questions that AI did not reproduce, preserve them.
+    for old in questions:
+        if id(old) not in used_old and len(old.get("options", [])) >= 2:
+            merged.append(old)
+
+    log.info(f"{log_prefix}AI format repair: parser={len(questions)}, repaired={len(repaired)}, final={len(merged)}, provider={provider}")
+    return merged
 SAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "samples")
 POLL_TIMES  = [10, 12, 20, 30, 50, 120]
 
@@ -416,7 +554,7 @@ async def finish_text(callback: CallbackQuery, state: FSMContext):
                                          suffix=".txt", encoding="utf-8") as tmp:
             tmp.write(full_text)
             tmp_path = tmp.name
-        questions = parse_file(tmp_path)
+        questions = await _parse_with_ai_repair(tmp_path)
         os.remove(tmp_path)
 
         if not questions:
@@ -741,7 +879,7 @@ async def upload_file(message: Message, state: FSMContext):
             _source_file_size=doc.file_size or 0,
         )
 
-        questions = parse_file(tmp_path)
+        questions = await _parse_with_ai_repair(tmp_path)
         # Rasmli savollar uchun tmp_path ni state da saqlaymiz
         has_img_qs = any(q.get("_has_image") for q in questions)
         if has_img_qs:
@@ -838,7 +976,7 @@ async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, 
     va _run_next_queued_file (ko'p fayl navbati) ikkalasi ham shu
     funksiyani ishlatadi — parse mantig'i bitta joyda saqlanadi.
     """
-    questions = parse_file(tmp_path)
+    questions = await _parse_with_ai_repair(tmp_path)
     has_img_qs = any(q.get("_has_image") for q in questions)
     if has_img_qs:
         await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
@@ -1049,7 +1187,7 @@ async def fp_force_reparse(callback: CallbackQuery, state: FSMContext):
             _source_file_size=file_size,
         )
 
-        questions = parse_file(tmp_path)
+        questions = await _parse_with_ai_repair(tmp_path)
         has_img_qs = any(q.get("_has_image") for q in questions)
         if has_img_qs:
             await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
@@ -1422,10 +1560,10 @@ async def uj_back(cb: CallbackQuery, state: FSMContext):
 #   GEMINI_API_KEY1 = "AQ..."
 #
 # Ixtiyoriy environment sozlamalar:
-#   GROQ_AI_MODEL=openai/gpt-oss-20b
+#   GROQ_AI_MODEL=openai/gpt-oss-120b
 #   GROQ_AI_MIN_INTERVAL=3.0
 #   GROQ_AI_MAX_OUTPUT=900
-#   GEMINI_AI_MODEL=gemini-2.5-flash
+#   GEMINI_AI_MODEL=gemini-3.6-flash
 #   GEMINI_AI_MIN_INTERVAL=7.0
 #   GEMINI_AI_MAX_OUTPUT=600
 # ═══════════════════════════════════════════════════════════
@@ -1539,19 +1677,41 @@ async def _solve_image_questions(questions: list, docx_path: str, msg, explain_m
 
 
 async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
-    """Matnli testlarni Groq bilan, Groq limitida Gemini bilan yechadi.
+    """Solve text MCQs with strict structured output and completeness checks.
 
-    - Groq: official ``groq`` AsyncGroq SDK, primary.
-    - Gemini: official ``google-genai`` SDK, dedicated fallback.
-    - Batch 5: input/output token sarfini nazorat qiladi.
-    - Har bir javob indeks va mavjud variant bilan lokal validatsiya qilinadi.
-    - API kalitlarini aylantirish quota'ni ko'paytirmaydi; bu faqat credential
-      rotation. Groq org-level, Gemini project-level limitlarga ega.
+    Groq is primary and Gemini is automatic fallback. A batch is accepted only
+    when every requested index is returned and every returned correct_idx is
+    valid for that question's actual option list.
     """
     import json, time
     from utils.ai_engine import solve_text_batch
 
-    unmarked = [(i, q) for i, q in enumerate(questions) if not q.get("_marked")]
+    # Repair the common legacy case where several A)/B)/C)/D) options were
+    # accidentally stored as one string in the database.
+    for q in questions:
+        opts = q.get("options", [])
+        if isinstance(opts, str):
+            opts = [x.strip() for x in re.split(r"\s+(?=[A-Ha-h]\s*[).:])", opts) if x.strip()]
+        if isinstance(opts, list) and len(opts) == 1 and isinstance(opts[0], str):
+            parts = re.split(r"\s+(?=[A-Ha-h]\s*[).:])", opts[0].strip())
+            if len(parts) >= 2:
+                opts = [x.strip() for x in parts if x.strip()]
+        q["options"] = opts if isinstance(opts, list) else []
+
+    unmarked = []
+    skipped_invalid = 0
+    for i, q in enumerate(questions):
+        if q.get("_marked"):
+            continue
+        opts = q.get("options") or []
+        if q.get("type", "multiple_choice") not in ("multiple_choice", "multi_select"):
+            continue
+        if len(opts) < 2:
+            skipped_invalid += 1
+            log.warning(f"AI skip: q={i}, options={len(opts)} — variantlar yetarli emas")
+            continue
+        unmarked.append((i, q))
+
     total_q = len(unmarked)
     if not total_q:
         return questions
@@ -1569,81 +1729,132 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
 
     SYSTEM = (
         "Siz yuqori aniqlikdagi akademik test yechuvchisiz. "
-        "Faqat berilgan savol va variantlardan foydalaning. Mavjud bo'lmagan fakt, "
-        "variant yoki shartni to'qimang. Matematik/texnik masalani ichingizda "
-        "qadam-baqadam tekshiring. Eng ishonchli javobni tanlang. "
-        "Chiqishda FAQAT JSON array qaytaring. Har element: "
-        '{"idx":N,"correct_idx":N,"explanation":"..."}. '
-        "idx kiruvchi savolning indeksidir; correct_idx 0-based. "
-        + _exp_instr
+        "Faqat berilgan savol va variantlardan foydalaning. "
+        "Mavjud bo'lmagan variant yoki shartni to'qimang. "
+        "Har bir kiruvchi savol uchun aynan bitta natija qaytaring. "
+        "idx kiruvchi savol indeksiga aynan teng bo'lsin. "
+        "correct_idx faqat o'sha savolning 0-based opts indeksidir. "
+        "Chiqishda faqat JSON schema bo'yicha results qaytaring. " + _exp_instr
     )
 
     def _bar(done, total, w=10):
         f = int(w * done / max(total, 1))
         return "█" * f + "░" * (w - f)
 
+    async def _progress(done_batches: int):
+        if not msg:
+            return
+        try:
+            elapsed = time.time() - t0
+            eta = int(elapsed / max(done_batches, 1) * max(total_batches - done_batches, 0)) if done_batches else total_batches * 6
+            m, sec = divmod(eta, 60)
+            await msg.edit_text(
+                f"🤖 <b>AI yechmoqda...</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"[{_bar(done_batches, total_batches)}] {done_batches}/{total_batches} batch\n"
+                f"📊 {solved}/{total_q} savol\n"
+                f"⏱ Qoldi: ~{m}:{sec:02d}",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
     for bn, bs in enumerate(range(0, total_q, batch_size), 1):
         batch = unmarked[bs:bs + batch_size]
+        expected = {oi for oi, _ in batch}
         q_data = [
             {
                 "idx": oi,
                 "q": q.get("question", ""),
-                "opts": [re.sub(r"^[A-Ha-h]\s*[).]\s*", "", o) for o in q.get("options", [])],
+                "opts": [re.sub(r"^[A-Ha-h]\s*[).:]\s*", "", str(o)).strip() for o in q.get("options", [])],
             }
             for oi, q in batch
         ]
         user_prompt = (
             "Quyidagi savollarni mustaqil va ehtiyotkorlik bilan yeching. "
-            "Har bir idx aynan kiruvchi savol indeksiga teng bo'lsin. "
-            "correct_idx faqat berilgan opts ichidagi 0-based indeks bo'lsin.\n\n"
+            "BARCHA idx lar uchun natija qaytaring. Hech birini tashlab ketmang.\n\n"
             + json.dumps(q_data, ensure_ascii=False, separators=(",", ":"))
         )
 
-        if msg:
+        accepted = False
+        last_error = None
+        for attempt in range(1, 4):
+            await _progress(bn - 1)
             try:
-                elapsed = time.time() - t0
-                eta = int(elapsed / max(bn - 1, 1) * (total_batches - bn + 1)) if bn > 1 else total_batches * 6
-                m, sec = divmod(eta, 60)
-                await msg.edit_text(
-                    f"🤖 <b>AI yechmoqda...</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"[{_bar(bn-1, total_batches)}] {bn-1}/{total_batches} batch\n"
-                    f"📊 {min((bn-1)*batch_size,total_q)}/{total_q} savol\n"
-                    f"⏱ Qoldi: ~{m}:{sec:02d}",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
+                parsed, provider = await solve_text_batch(SYSTEM, user_prompt)
+                by_idx = {int(x.get("idx", -1)): x for x in parsed}
+                returned = set(by_idx)
+                if returned != expected:
+                    missing = sorted(expected - returned)
+                    extra = sorted(returned - expected)
+                    raise ValueError(f"batch natijasi to'liq emas; missing={missing}, extra={extra}")
 
-        try:
-            parsed, provider = await solve_text_batch(SYSTEM, user_prompt)
-            log.info(f"AI batch {bn}/{total_batches}: provider={provider}, results={len(parsed)}")
-            for item in parsed:
-                oi = int(item.get("idx", -1))
-                ci = int(item.get("correct_idx", -1))
-                if not (0 <= oi < len(questions)):
+                validated = []
+                for oi, q in batch:
+                    item = by_idx[oi]
+                    ci = int(item.get("correct_idx", -1))
+                    opts = q.get("options", [])
+                    if not 0 <= ci < len(opts):
+                        raise ValueError(f"q={oi}: correct_idx={ci}, options={len(opts)}")
+                    validated.append((oi, ci, str(item.get("explanation", "") or "")))
+
+                for oi, ci, explanation in validated:
+                    opts = questions[oi].get("options", [])
+                    questions[oi]["correct"] = opts[ci]
+                    questions[oi]["explanation"] = explanation
+                    questions[oi]["_ai_solved"] = True
+                    solved += 1
+                log.info(f"AI batch {bn}/{total_batches}: provider={provider}, results={len(parsed)}, attempt={attempt}")
+                accepted = True
+                break
+            except Exception as e:
+                last_error = e
+                log.warning(f"AI batch {bn}/{total_batches} attempt {attempt}/3 xato: {e}")
+                if attempt < 3:
+                    await asyncio.sleep(min(2 * attempt, 5))
+
+        if not accepted:
+            log.error(f"AI batch {bn}/{total_batches} yakuniy xato: {last_error}")
+
+            # Last-resort per-question calls. This costs more, but prevents one
+            # malformed response from discarding an otherwise valid batch.
+            for oi, q in batch:
+                if q.get("_ai_solved"):
                     continue
-                opts = questions[oi].get("options", [])
-                if not (0 <= ci < len(opts)):
-                    log.warning(f"AI invalid index: q={oi}, correct_idx={ci}, options={len(opts)}")
-                    continue
-                questions[oi]["correct"] = opts[ci]
-                questions[oi]["explanation"] = str(item.get("explanation", "") or "")
-                questions[oi]["_ai_solved"] = True
-                solved += 1
-        except Exception as e:
-            log.error(f"AI batch {bn}/{total_batches} xato: {e}")
+                one_data = [{
+                    "idx": oi,
+                    "q": q.get("question", ""),
+                    "opts": [re.sub(r"^[A-Ha-h]\s*[).:]\s*", "", str(o)).strip() for o in q.get("options", [])],
+                }]
+                one_prompt = "Bitta savolni yeching. Aynan shu idx uchun bitta natija qaytaring.\n\n" + json.dumps(one_data, ensure_ascii=False, separators=(",", ":"))
+                try:
+                    parsed, provider = await solve_text_batch(SYSTEM, one_prompt)
+                    item = next((x for x in parsed if int(x.get("idx", -1)) == oi), None)
+                    if item is None:
+                        raise ValueError("individual natija qaytmadi")
+                    ci = int(item.get("correct_idx", -1))
+                    opts = q.get("options", [])
+                    if not 0 <= ci < len(opts):
+                        raise ValueError(f"q={oi}: correct_idx={ci}, options={len(opts)}")
+                    q["correct"] = opts[ci]
+                    q["explanation"] = str(item.get("explanation", "") or "")
+                    q["_ai_solved"] = True
+                    solved += 1
+                    log.info(f"AI individual q={oi}: provider={provider}")
+                except Exception as e:
+                    log.error(f"AI individual q={oi} xato: {e}")
 
     total_t = int(time.time() - t0)
     m, sec = divmod(total_t, 60)
-    log.info(f"AI yakunlandi: {solved}/{total_q} savol, {m}:{sec:02d}")
+    log.info(f"AI yakunlandi: {solved}/{total_q} savol, invalid={skipped_invalid}, {m}:{sec:02d}")
     if msg:
         try:
             await msg.edit_text(
                 f"✅ <b>AI tugatdi!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📊 {solved}/{total_q} savol yechildi\n"
-                f"⏱ {m}:{sec:02d}", parse_mode="HTML"
+                + (f"⚠️ {skipped_invalid} ta savolda variantlar yetarli emas\n" if skipped_invalid else "")
+                + f"⏱ {m}:{sec:02d}", parse_mode="HTML"
             )
         except Exception:
             pass
@@ -2533,7 +2744,7 @@ async def reupload_file(message: Message, state: FSMContext):
             tmp_path = tmp.name
         await message.bot.download_file(file.file_path, tmp_path)
 
-        questions = parse_file(tmp_path)
+        questions = await _parse_with_ai_repair(tmp_path)
 
         # Rasmlarni TG kanalga yuklaymiz
         img_count = sum(1 for q in questions if q.get("_img_bytes"))
