@@ -1567,7 +1567,7 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
     valid for that question's actual option list.
     """
     import json, time
-    from utils.ai_engine import solve_text_batch
+    from utils.ai_engine import get_api_stats, solve_text_batch
 
     # Normalize the common legacy case where several A)/B)/C)/D) options were
     # accidentally stored as one string in the database.
@@ -1729,6 +1729,31 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
 
     total_t = int(time.time() - t0)
     m, sec = divmod(total_t, 60)
+
+    # API credential usage: never print the actual secret, only safe key numbers.
+    try:
+        api_stats = get_api_stats()
+        for provider, rows in api_stats.items():
+            configured = len(rows)
+            used = sum(1 for row in rows if row["requests"] > 0)
+            total_requests = sum(row["requests"] for row in rows)
+            total_successes = sum(row["successes"] for row in rows)
+            log.info(
+                f"AI API STATISTIKA | {provider}: configured={configured}, "
+                f"used_keys={used}, requests={total_requests}, successes={total_successes}"
+            )
+            for row in rows:
+                if row["requests"] > 0 or row["disabled"]:
+                    log.info(
+                        f"AI API KEY | {provider} #{row['key']}: "
+                        f"requests={row['requests']}, success={row['successes']}, "
+                        f"429={row['rate_limits']}, 401={row['unauthorized']}, "
+                        f"network={row['network_errors']}, other={row['other_errors']}, "
+                        f"disabled={row['disabled']}"
+                    )
+    except Exception as stats_exc:
+        log.warning(f"AI API statistikasini chiqarishda xato: {stats_exc}")
+
     log.info(f"AI yakunlandi: {solved}/{total_q} savol, invalid={skipped_invalid}, {m}:{sec:02d}")
     if msg:
         try:
