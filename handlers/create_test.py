@@ -31,142 +31,6 @@ log        = logging.getLogger(__name__)
 router     = Router()
 
 
-def _normalize_qkey(text: str) -> str:
-    text = re.sub(r"\s+", " ", str(text or "")).strip().lower()
-    return re.sub(r"\W+", " ", text).strip()
-
-
-def _extract_text_for_ai_repair(path: str) -> str:
-    """Extract raw text without interpreting answers; used only for AI format repair."""
-    ext = os.path.splitext(path)[1].lower()
-    try:
-        if ext == ".txt":
-            for enc in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
-                try:
-                    with open(path, encoding=enc) as f:
-                        return f.read()
-                except UnicodeDecodeError:
-                    continue
-            return ""
-
-        if ext == ".doc":
-            from utils.parser import _convert_doc
-            converted = _convert_doc(path)
-            if converted and converted != path and os.path.exists(converted):
-                return _extract_text_for_ai_repair(converted)
-            return ""
-
-        if ext == ".docx":
-            from docx import Document
-            doc = Document(path)
-            parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-            for table in doc.tables:
-                for row in table.rows:
-                    vals = [c.text.strip() for c in row.cells if c.text.strip()]
-                    if vals:
-                        parts.append(" | ".join(vals))
-            return "\n".join(parts)
-
-        if ext == ".pdf":
-            import pdfplumber
-            pages = []
-            with pdfplumber.open(path) as pdf:
-                for page in pdf.pages:
-                    txt = page.extract_text()
-                    if txt:
-                        pages.append(txt)
-            return "\n\n".join(pages)
-
-        if ext in (".xlsx", ".xlsm", ".xls"):
-            import openpyxl
-            if ext == ".xls":
-                return ""
-            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-            parts = []
-            for ws in wb.worksheets:
-                for row in ws.iter_rows(values_only=True):
-                    vals = [str(v).strip() for v in row if v is not None and str(v).strip()]
-                    if vals:
-                        parts.append(" | ".join(vals))
-            return "\n".join(parts)
-    except Exception as e:
-        log.warning(f"AI repair uchun xom matn ajratishda xato: {e}")
-    return ""
-
-
-def _parser_result_needs_ai_repair(questions: list) -> bool:
-    """True when parser produced no questions or definitely broken MCQ records."""
-    if not questions:
-        return True
-    bad = 0
-    mcq = 0
-    for q in questions:
-        if q.get("type") in ("multiple_choice", "multi_select"):
-            mcq += 1
-            opts = q.get("options")
-            if not isinstance(opts, list) or len(opts) < 2:
-                bad += 1
-    # A single broken record is enough: AI should get a chance to recover it.
-    return bad > 0 or (mcq > 0 and bad / max(mcq, 1) >= 0.20)
-
-
-async def _parse_with_ai_repair(path: str, *, log_prefix: str = "") -> list:
-    """Normal parser first; AI is used only when the parser output is empty/broken.
-
-    AI format repair never assigns the correct answer. Existing parsed records
-    with a known answer are preserved; repaired records replace broken ones.
-    """
-    questions = parse_file(path)
-    if not _parser_result_needs_ai_repair(questions):
-        return questions
-
-    raw_text = _extract_text_for_ai_repair(path)
-    if len(raw_text.strip()) < 20:
-        return questions
-
-    try:
-        from utils.ai_engine import repair_questions_from_text
-        repaired, provider = await repair_questions_from_text(raw_text)
-    except Exception as e:
-        log.error(f"{log_prefix}AI format repair xato: {e}")
-        return questions
-
-    if not repaired:
-        return questions
-
-    # Keep parser metadata (especially image/photo fields) where the question matches.
-    old_by_key = {}
-    for q in questions:
-        key = _normalize_qkey(q.get("question", ""))
-        if key:
-            old_by_key[key] = q
-
-    merged = []
-    used_old = set()
-    for rq in repaired:
-        key = _normalize_qkey(rq.get("question", ""))
-        old = old_by_key.get(key)
-        if old is not None and len(old.get("options", [])) >= 2:
-            merged.append(old)
-            used_old.add(id(old))
-        elif old is not None:
-            # Broken parsed record: use repaired options, but retain non-answer metadata.
-            replacement = dict(rq)
-            for meta_key in ("photo", "_has_image", "_img_bytes", "_img_ext"):
-                if meta_key in old:
-                    replacement[meta_key] = old[meta_key]
-            merged.append(replacement)
-            used_old.add(id(old))
-        else:
-            merged.append(rq)
-
-    # If the normal parser found valid questions that AI did not reproduce, preserve them.
-    for old in questions:
-        if id(old) not in used_old and len(old.get("options", [])) >= 2:
-            merged.append(old)
-
-    log.info(f"{log_prefix}AI format repair: parser={len(questions)}, repaired={len(repaired)}, final={len(merged)}, provider={provider}")
-    return merged
 SAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "samples")
 POLL_TIMES  = [10, 12, 20, 30, 50, 120]
 
@@ -554,7 +418,7 @@ async def finish_text(callback: CallbackQuery, state: FSMContext):
                                          suffix=".txt", encoding="utf-8") as tmp:
             tmp.write(full_text)
             tmp_path = tmp.name
-        questions = await _parse_with_ai_repair(tmp_path)
+        questions = parse_file(tmp_path)
         os.remove(tmp_path)
 
         if not questions:
@@ -613,7 +477,7 @@ async def method_file(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CreateTest.upload_files_multi)
 
 
-@router.callback_query(F.data.startswith("sample_"), CreateTest.upload_files_multi)
+@router.callback_query(F.data.startswith("sample_"))
 async def send_sample(callback: CallbackQuery):
     await callback.answer()
     key = callback.data[7:]
@@ -813,6 +677,33 @@ async def multi_files_done(callback: CallbackQuery, state: FSMContext):
     await _run_next_queued_file(callback.message, state, first)
 
 
+def _format_error_keyboard():
+    """Format xatosida mavjud namunalarni bitta-bittadan ko'rsatish.
+    Har bir callback qisqa bo'lgani uchun Telegram callback-data limitiga ham tushmaydi.
+    """
+    b = InlineKeyboardBuilder()
+    for key, (_, type_name, _) in SAMPLE_TYPES.items():
+        b.row(InlineKeyboardButton(text=f"📄 {type_name} namunasi", callback_data=f"sample_{key}"))
+    b.row(InlineKeyboardButton(text="❌ Bekor", callback_data="cancel_create"))
+    return b.as_markup()
+
+
+def _format_error_text(file_name: str = "") -> str:
+    title = f"«{file_name}» faylida " if file_name else ""
+    return (
+        f"❌ <b>FORMAT XATO</b>\n\n"
+        f"{title}savollar parser tomonidan topilmadi.\n\n"
+        "<b>Qo'llab-quvvatlanadigan namunalar:</b>\n"
+        "🔘 MCQ — <code>===A) To'g'ri javob</code>\n"
+        "✅ Ha/Yo'q — <code>TYPE: true_false</code> + <code>Javob: Ha</code>\n"
+        "✍️ Bo'sh joy — <code>TYPE: fill_blank</code> + <code>Javob: ...</code>\n"
+        "💬 Erkin javob — <code>TYPE: text_input</code> + <code>Javob: ...</code>\n"
+        "📦 Aralash — yuqoridagi turlarni bitta faylda ishlatish\n\n"
+        "👇 Kerakli format namunasini bosing va faylni aynan shu tuzilishda yuboring.\n"
+        "🤖 <i>Format tekshiruvi uchun AI ishlatilmaydi — fayl to'g'ridan-to'g'ri parser orqali o'qiladi.</i>"
+    )
+
+
 @router.message(F.document, CreateTest.upload_file)
 async def upload_file(message: Message, state: FSMContext):
     doc = message.document
@@ -879,7 +770,7 @@ async def upload_file(message: Message, state: FSMContext):
             _source_file_size=doc.file_size or 0,
         )
 
-        questions = await _parse_with_ai_repair(tmp_path)
+        questions = parse_file(tmp_path)
         # Rasmli savollar uchun tmp_path ni state da saqlaymiz
         has_img_qs = any(q.get("_has_image") for q in questions)
         if has_img_qs:
@@ -895,13 +786,9 @@ async def upload_file(message: Message, state: FSMContext):
 
         if not questions:
             return await status.edit_text(
-                "❌ <b>Savollar topilmadi!</b>\n\n"
-                "Quyidagi formatlar qo\'llab-quvvatlanadi:\n"
-                "• <b>Standart:</b> <code>===A) To\'g\'ri javob</code>\n"
-                "• <b>==== + #:</b> Savol → ==== → #To\'g\'ri → ====\n"
-                "• <b>Jadval:</b> Savol | To\'g\'ri | Muqobil...\n"
-                "• <b>PDF:</b> ? savol → =Javob\n\n"
-                "Namunani ko\'rish uchun turni qaytadan tanlang."
+                _format_error_text(doc.file_name),
+                parse_mode="HTML",
+                reply_markup=_format_error_keyboard()
             )
 
         total    = len(questions)
@@ -976,7 +863,7 @@ async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, 
     va _run_next_queued_file (ko'p fayl navbati) ikkalasi ham shu
     funksiyani ishlatadi — parse mantig'i bitta joyda saqlanadi.
     """
-    questions = await _parse_with_ai_repair(tmp_path)
+    questions = parse_file(tmp_path)
     has_img_qs = any(q.get("_has_image") for q in questions)
     if has_img_qs:
         await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
@@ -987,13 +874,9 @@ async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, 
 
     if not questions:
         return await status.edit_text(
-            f"❌ <b>«{file_name}» faylida savollar topilmadi!</b>\n\n"
-            "Quyidagi formatlar qo\'llab-quvvatlanadi:\n"
-            "• <b>Standart:</b> <code>===A) To\'g\'ri javob</code>\n"
-            "• <b>==== + #:</b> Savol → ==== → #To\'g\'ri → ====\n"
-            "• <b>Jadval:</b> Savol | To\'g\'ri | Muqobil...\n"
-            "• <b>PDF:</b> ? savol → =Javob",
+            _format_error_text(file_name),
             parse_mode="HTML",
+            reply_markup=_format_error_keyboard()
         )
 
     total    = len(questions)
@@ -1187,7 +1070,7 @@ async def fp_force_reparse(callback: CallbackQuery, state: FSMContext):
             _source_file_size=file_size,
         )
 
-        questions = await _parse_with_ai_repair(tmp_path)
+        questions = parse_file(tmp_path)
         has_img_qs = any(q.get("_has_image") for q in questions)
         if has_img_qs:
             await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
@@ -1686,7 +1569,7 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
     import json, time
     from utils.ai_engine import solve_text_batch
 
-    # Repair the common legacy case where several A)/B)/C)/D) options were
+    # Normalize the common legacy case where several A)/B)/C)/D) options were
     # accidentally stored as one string in the database.
     for q in questions:
         opts = q.get("options", [])
@@ -2744,7 +2627,7 @@ async def reupload_file(message: Message, state: FSMContext):
             tmp_path = tmp.name
         await message.bot.download_file(file.file_path, tmp_path)
 
-        questions = await _parse_with_ai_repair(tmp_path)
+        questions = parse_file(tmp_path)
 
         # Rasmlarni TG kanalga yuklaymiz
         img_count = sum(1 for q in questions if q.get("_img_bytes"))
