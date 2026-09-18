@@ -106,6 +106,73 @@ _groq_circuit = _Circuit()
 _gemini_circuit = _Circuit()
 
 
+@dataclass
+class _KeyState:
+    requests: int = 0
+    successes: int = 0
+    failures: int = 0
+    rate_limits: int = 0
+    unauthorized: int = 0
+    network_errors: int = 0
+    other_errors: int = 0
+    cooldown_until: float = 0.0
+    disabled: bool = False
+    last_status: int | None = None
+
+    def available(self) -> bool:
+        return (not self.disabled) and time.monotonic() >= self.cooldown_until
+
+    def cooldown(self, seconds: float) -> None:
+        self.cooldown_until = max(self.cooldown_until, time.monotonic() + max(1.0, float(seconds)))
+
+
+_groq_key_states: dict[int, _KeyState] = {}
+_gemini_key_states: dict[int, _KeyState] = {}
+
+
+def _key_state(states: dict[int, _KeyState], index: int) -> _KeyState:
+    return states.setdefault(index, _KeyState())
+
+
+def _select_key(keys: list[str], states: dict[int, _KeyState], start_index: int) -> tuple[int, str] | None:
+    for offset in range(len(keys)):
+        idx = (start_index + offset) % len(keys)
+        if _key_state(states, idx).available():
+            return idx, keys[idx]
+    return None
+
+
+def _provider_stats(states: dict[int, _KeyState], keys: list[str]) -> list[dict]:
+    out = []
+    for idx, _key in enumerate(keys):
+        st = _key_state(states, idx)
+        remaining = max(0.0, st.cooldown_until - time.monotonic())
+        out.append({
+            "key": idx + 1,
+            "requests": st.requests,
+            "successes": st.successes,
+            "failures": st.failures,
+            "rate_limits": st.rate_limits,
+            "unauthorized": st.unauthorized,
+            "network_errors": st.network_errors,
+            "other_errors": st.other_errors,
+            "disabled": st.disabled,
+            "cooldown_seconds": round(remaining, 1),
+            "last_status": st.last_status,
+        })
+    return out
+
+
+def get_api_stats() -> dict:
+    """Return safe per-credential usage statistics; secrets are never exposed."""
+    groq_keys = _keys("GROQ_API_KEY", 20)
+    gemini_keys = _keys("GEMINI_API_KEY", 20)
+    return {
+        "Groq": _provider_stats(_groq_key_states, groq_keys),
+        "Gemini": _provider_stats(_gemini_key_states, gemini_keys),
+    }
+
+
 RESULT_ITEM_SCHEMA = {
     "type": "object",
     "properties": {
@@ -270,19 +337,24 @@ async def _call_groq(system_prompt: str, user_prompt: str) -> tuple[list[dict], 
     keys = _keys("GROQ_API_KEY", 20)
     if not keys:
         raise AIProviderError("Groq", "GROQ_API_KEY topilmadi", retryable=False)
-    if not _groq_circuit.available():
-        remaining = max(0, _groq_circuit.cooldown_until - time.monotonic())
-        raise AIProviderError("Groq", f"rate-limit cooldown: {remaining:.0f}s", rate_limited=True, retry_after=remaining)
     try:
         from groq import AsyncGroq
     except Exception as exc:
         raise AIProviderError("Groq", f"SDK yuklanmadi: {exc}", retryable=False) from exc
 
-    schema = RESULT_SCHEMA
-    name = "quiz_solution"
-    for _ in range(len(keys)):
-        key = keys[_groq_index % len(keys)]
-        _groq_index += 1
+    attempts = 0
+    errors = []
+    while attempts < len(keys):
+        selected = _select_key(keys, _groq_key_states, _groq_index)
+        if selected is None:
+            waits = [st.cooldown_until - time.monotonic() for st in _groq_key_states.values() if not st.disabled and st.cooldown_until > time.monotonic()]
+            remaining = max(0.0, min(waits)) if waits else 30.0
+            raise AIProviderError("Groq", f"barcha credentiallar cooldown/disabled; eng yaqin cooldown {remaining:.0f}s", rate_limited=True, retry_after=remaining)
+        idx, key = selected
+        _groq_index = (idx + 1) % len(keys)
+        st = _key_state(_groq_key_states, idx)
+        st.requests += 1
+        attempts += 1
         client = None
         try:
             await _groq_gate.wait()
@@ -299,27 +371,41 @@ async def _call_groq(system_prompt: str, user_prompt: str) -> tuple[list[dict], 
                 include_reasoning=False,
                 response_format={
                     "type": "json_schema",
-                    "json_schema": {"name": name, "schema": schema, "strict": True},
+                    "json_schema": {"name": "quiz_solution", "schema": RESULT_SCHEMA, "strict": True},
                 },
             )
             raw = completion.choices[0].message.content or ""
-            data = _extract_json(raw)
-            result = _normalize_results(data)
+            result = _normalize_results(_extract_json(raw))
+            st.successes += 1
+            st.last_status = 200
+            st.cooldown_until = 0.0
+            st.failures = 0
             _groq_circuit.success()
             return result, "Groq"
         except Exception as exc:
+            status = _status_code(exc)
+            st.last_status = status
             msg = str(exc)
+            if status == 401 or "invalid api key" in msg.lower() or "invalid_api_key" in msg.lower():
+                st.unauthorized += 1; st.failures += 1; st.disabled = True
+                errors.append(f"Key #{idx + 1}: 401 invalid key")
+                continue
             if _is_rate_limit(exc):
-                delay = _groq_circuit.trip(_retry_after(exc), base=30, cap=300)
-                raise AIProviderError("Groq", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
+                delay = _retry_after(exc) or min(300.0, 30.0 * (2 ** min(st.failures, 4)))
+                st.rate_limits += 1; st.failures += 1; st.cooldown(delay)
+                errors.append(f"Key #{idx + 1}: 429/rate-limit ({delay:.0f}s)")
+                continue
             if _is_network_error(exc):
-                delay = _groq_circuit.trip(base=15, cap=120)
-                raise AIProviderError("Groq", f"network error; cooldown {delay:.0f}s: {msg[:160]}", retryable=True, retry_after=delay) from exc
-            # Do not pretend another API key fixes a schema/model/input error.
-            raise AIProviderError("Groq", f"{_status_code(exc) or ''}: {msg[:220]}", retryable=False) from exc
+                delay = min(120.0, 15.0 * (2 ** min(st.failures, 3)))
+                st.network_errors += 1; st.failures += 1; st.cooldown(delay)
+                errors.append(f"Key #{idx + 1}: network ({delay:.0f}s)")
+                continue
+            st.other_errors += 1; st.failures += 1
+            errors.append(f"Key #{idx + 1}: {status or ''} {msg[:180]}")
+            raise AIProviderError("Groq", "; ".join(errors), retryable=False) from exc
         finally:
             await _close_client(client)
-    raise AIProviderError("Groq", "Groq credential urinishlari muvaffaqiyatsiz", retryable=True)
+    raise AIProviderError("Groq", "; ".join(errors) or "Groq credential urinishlari muvaffaqiyatsiz", retryable=True, rate_limited=True)
 
 
 async def _call_gemini(system_prompt: str, user_prompt: str) -> tuple[list[dict], str]:
@@ -327,50 +413,60 @@ async def _call_gemini(system_prompt: str, user_prompt: str) -> tuple[list[dict]
     keys = _keys("GEMINI_API_KEY", 20)
     if not keys:
         raise AIProviderError("Gemini", "GEMINI_API_KEY topilmadi", retryable=False)
-    if not _gemini_circuit.available():
-        remaining = max(0, _gemini_circuit.cooldown_until - time.monotonic())
-        raise AIProviderError("Gemini", f"rate-limit cooldown: {remaining:.0f}s", rate_limited=True, retry_after=remaining)
     try:
         from google import genai
         from google.genai import types
     except Exception as exc:
         raise AIProviderError("Gemini", f"SDK yuklanmadi: {exc}", retryable=False) from exc
 
-    schema = RESULT_SCHEMA
-    for _ in range(len(keys)):
-        key = keys[_gemini_index % len(keys)]
-        _gemini_index += 1
+    attempts = 0
+    errors = []
+    while attempts < len(keys):
+        selected = _select_key(keys, _gemini_key_states, _gemini_index)
+        if selected is None:
+            waits = [st.cooldown_until - time.monotonic() for st in _gemini_key_states.values() if not st.disabled and st.cooldown_until > time.monotonic()]
+            remaining = max(0.0, min(waits)) if waits else 30.0
+            raise AIProviderError("Gemini", f"barcha credentiallar cooldown/disabled; eng yaqin cooldown {remaining:.0f}s", rate_limited=True, retry_after=remaining)
+        idx, key = selected
+        _gemini_index = (idx + 1) % len(keys)
+        st = _key_state(_gemini_key_states, idx)
+        st.requests += 1
+        attempts += 1
         client = None
         try:
             await _gemini_gate.wait()
             client = genai.Client(api_key=key)
             response = await client.aio.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=user_prompt,
+                model=GEMINI_MODEL, contents=user_prompt,
                 config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0,
+                    system_instruction=system_prompt, temperature=0,
                     max_output_tokens=GEMINI_MAX_OUTPUT,
-                    response_mime_type="application/json",
-                    response_json_schema=schema,
+                    response_mime_type="application/json", response_json_schema=RESULT_SCHEMA,
                 ),
             )
-            data = _extract_json(response.text or "")
-            result = _normalize_results(data)
+            result = _normalize_results(_extract_json(response.text or ""))
+            st.successes += 1; st.last_status = 200; st.cooldown_until = 0.0; st.failures = 0
             _gemini_circuit.success()
             return result, "Gemini"
         except Exception as exc:
-            msg = str(exc)
+            status = _status_code(exc); st.last_status = status; msg = str(exc)
+            if status == 401 or "api key not valid" in msg.lower() or "api_key_invalid" in msg.lower():
+                st.unauthorized += 1; st.failures += 1; st.disabled = True
+                errors.append(f"Key #{idx + 1}: invalid key"); continue
             if _is_rate_limit(exc):
-                delay = _gemini_circuit.trip(_retry_after(exc), base=30, cap=300)
-                raise AIProviderError("Gemini", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
+                delay = _retry_after(exc) or min(300.0, 30.0 * (2 ** min(st.failures, 4)))
+                st.rate_limits += 1; st.failures += 1; st.cooldown(delay)
+                errors.append(f"Key #{idx + 1}: rate-limit ({delay:.0f}s)"); continue
             if _is_network_error(exc):
-                delay = _gemini_circuit.trip(base=15, cap=120)
-                raise AIProviderError("Gemini", f"network error; cooldown {delay:.0f}s: {msg[:160]}", retryable=True, retry_after=delay) from exc
-            raise AIProviderError("Gemini", f"{_status_code(exc) or ''}: {msg[:220]}", retryable=False) from exc
+                delay = min(120.0, 15.0 * (2 ** min(st.failures, 3)))
+                st.network_errors += 1; st.failures += 1; st.cooldown(delay)
+                errors.append(f"Key #{idx + 1}: network ({delay:.0f}s)"); continue
+            st.other_errors += 1; st.failures += 1
+            errors.append(f"Key #{idx + 1}: {status or ''} {msg[:180]}")
+            raise AIProviderError("Gemini", "; ".join(errors), retryable=False) from exc
         finally:
             await _close_client(client)
-    raise AIProviderError("Gemini", "Gemini credential urinishlari muvaffaqiyatsiz", retryable=True)
+    raise AIProviderError("Gemini", "; ".join(errors) or "Gemini credential urinishlari muvaffaqiyatsiz", retryable=True, rate_limited=True)
 
 
 async def solve_text_batch(system_prompt: str, user_prompt: str) -> tuple[list[dict], str]:
@@ -390,49 +486,48 @@ async def solve_text_batch(system_prompt: str, user_prompt: str) -> tuple[list[d
 
 
 async def solve_image(image_bytes: bytes, mime_type: str, prompt: str) -> dict:
-    """Gemini Vision helper retained for existing image-question flow."""
+    """Gemini Vision helper with per-key rotation/statistics."""
     global _gemini_index
     keys = _keys("GEMINI_API_KEY", 20)
     if not keys:
         raise AIProviderError("Gemini", "GEMINI_API_KEY topilmadi", retryable=False)
-    if not _gemini_circuit.available():
-        remaining = max(0, _gemini_circuit.cooldown_until - time.monotonic())
-        raise AIProviderError("Gemini", f"rate-limit cooldown: {remaining:.0f}s", rate_limited=True, retry_after=remaining)
     try:
         from google import genai
         from google.genai import types
     except Exception as exc:
         raise AIProviderError("Gemini", f"SDK yuklanmadi: {exc}", retryable=False) from exc
-    for _ in range(len(keys)):
-        key = keys[_gemini_index % len(keys)]
-        _gemini_index += 1
+    attempts = 0; errors = []
+    while attempts < len(keys):
+        selected = _select_key(keys, _gemini_key_states, _gemini_index)
+        if selected is None:
+            raise AIProviderError("Gemini", "barcha credentiallar cooldown/disabled", rate_limited=True, retry_after=30)
+        idx, key = selected; _gemini_index = (idx + 1) % len(keys)
+        st = _key_state(_gemini_key_states, idx); st.requests += 1; attempts += 1
         client = None
         try:
-            await _gemini_gate.wait()
-            client = genai.Client(api_key=key)
+            await _gemini_gate.wait(); client = genai.Client(api_key=key)
             response = await client.aio.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=[types.Part.from_text(text=prompt), types.Part.from_bytes(data=image_bytes, mime_type=mime_type)],
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    max_output_tokens=700,
-                    response_mime_type="application/json",
-                ),
+                config=types.GenerateContentConfig(temperature=0, max_output_tokens=700, response_mime_type="application/json"),
             )
             data = _extract_json(response.text or "")
-            if not isinstance(data, dict):
-                raise ValueError("Gemini Vision javobi object emas")
-            _gemini_circuit.success()
+            if not isinstance(data, dict): raise ValueError("Gemini Vision javobi object emas")
+            st.successes += 1; st.last_status = 200; st.cooldown_until = 0.0; st.failures = 0
             return data
         except Exception as exc:
-            msg = str(exc)
+            status = _status_code(exc); st.last_status = status; msg = str(exc)
+            if status == 401 or "api key not valid" in msg.lower() or "api_key_invalid" in msg.lower():
+                st.unauthorized += 1; st.failures += 1; st.disabled = True; errors.append(f"Key #{idx + 1}: invalid key"); continue
             if _is_rate_limit(exc):
-                delay = _gemini_circuit.trip(_retry_after(exc), base=30, cap=300)
-                raise AIProviderError("Gemini", f"rate limit; cooldown {delay:.0f}s", rate_limited=True, retry_after=delay) from exc
+                delay = _retry_after(exc) or min(300.0, 30.0 * (2 ** min(st.failures, 4)))
+                st.rate_limits += 1; st.failures += 1; st.cooldown(delay); errors.append(f"Key #{idx + 1}: rate-limit ({delay:.0f}s)"); continue
             if _is_network_error(exc):
-                delay = _gemini_circuit.trip(base=15, cap=120)
-                raise AIProviderError("Gemini", f"network error; cooldown {delay:.0f}s: {msg[:160]}", retryable=True, retry_after=delay) from exc
-            raise AIProviderError("Gemini", f"{_status_code(exc) or ''}: {msg[:220]}", retryable=False) from exc
+                delay = min(120.0, 15.0 * (2 ** min(st.failures, 3)))
+                st.network_errors += 1; st.failures += 1; st.cooldown(delay); errors.append(f"Key #{idx + 1}: network ({delay:.0f}s)"); continue
+            st.other_errors += 1; st.failures += 1
+            raise AIProviderError("Gemini", f"Key #{idx + 1}: {status or ''} {msg[:220]}", retryable=False) from exc
         finally:
             await _close_client(client)
-    raise AIProviderError("Gemini", "Gemini credential urinishlari muvaffaqiyatsiz", retryable=True)
+    raise AIProviderError("Gemini", "; ".join(errors) or "Gemini credential urinishlari muvaffaqiyatsiz", retryable=True, rate_limited=True)
+
