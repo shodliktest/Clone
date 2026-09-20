@@ -1006,7 +1006,7 @@ def _clean_table_block(block: str) -> str:
 def _parse_eq_hash(lines: list) -> list:
     """
     Asosiy logika (hujjatdan):
-      ++++ → savollar chegarasi
+      +++ / ++++ → savollar chegarasi
       ==== → savol/javob chegarasi
       #    → to'g'ri javob belgisi
     """
@@ -1016,7 +1016,8 @@ def _parse_eq_hash(lines: list) -> list:
     content = "\n".join(lines)
 
     # 1-QADAM: ++++ bo'yicha bloklarga ajratish
-    blocks = re.split(r'\+{4,}', content)
+    # 3+ plus belgisi savollar chegarasi sifatida qo'llab-quvvatlanadi: +++, ++++, ...
+    blocks = re.split(r'\+{3,}', content)
     blocks = [b.strip() for b in blocks if b.strip()]
 
     for block in blocks:
@@ -1163,7 +1164,7 @@ def _parse_pdf(path: str) -> list:
 # Barcha taniqli variant belgilari (variant boshlanishi)
 _VAR_STARTS = (
     '=', '+', '*', '#', '•', '►', '→', '✓', '✔', '√',
-    '■', '●', '▶', '◆', '★', '☑', '–', '—',
+    '■', '●', '▶', '◆', '★', '☑', '-', '–', '—',
 )
 
 
