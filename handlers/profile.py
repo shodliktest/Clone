@@ -506,6 +506,99 @@ async def edit_title_input(message: Message, state: FSMContext):
     )
 
 
+@router.callback_query(F.data.startswith("edit_visibility_"))
+async def edit_visibility_cb(callback: CallbackQuery):
+    """Test yaratuvchisi yoki admin uchun test ko'rinishini o'zgartirish."""
+    await callback.answer()
+    tid = callback.data[len("edit_visibility_"):]
+    uid = callback.from_user.id
+    meta = get_test_meta_any(tid)
+    if not meta:
+        return await callback.answer("❌ Test topilmadi.", show_alert=True)
+
+    from config import ADMIN_IDS
+    if uid != meta.get("creator_id") and uid not in ADMIN_IDS:
+        return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
+
+    current = meta.get("visibility", "private")
+    labels = {
+        "public": "🌍 Ommaviy",
+        "link": "🔗 Ssilka orqali",
+        "private": "🔒 Shaxsiy",
+    }
+    b = InlineKeyboardBuilder()
+    for key in ("public", "link", "private"):
+        mark = "✅ " if key == current else ""
+        b.row(InlineKeyboardButton(
+            text=f"{mark}{labels[key]}",
+            callback_data=f"set_visibility_{tid}_{key}"
+        ))
+    b.row(InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"mytest_settings_{tid}"))
+
+    await callback.message.edit_text(
+        "🔄 <b>TEST TURINI O'ZGARTIRISH</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📝 Test: <b>{meta.get('title', tid)}</b>\n"
+        f"Hozirgi tur: <b>{labels.get(current, current)}</b>\n\n"
+        "Qaysi turda bo'lishini tanlang:",
+        reply_markup=b.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("set_visibility_"))
+async def set_visibility_cb(callback: CallbackQuery):
+    """Tanlangan test turini RAM va Supabase meta'siga saqlaydi."""
+    raw = callback.data[len("set_visibility_"):]
+    try:
+        tid, new_visibility = raw.rsplit("_", 1)
+    except ValueError:
+        return await callback.answer("❌ Noto'g'ri test turi.", show_alert=True)
+
+    uid = callback.from_user.id
+    meta = get_test_meta_any(tid)
+    if not meta:
+        return await callback.answer("❌ Test topilmadi.", show_alert=True)
+
+    from config import ADMIN_IDS
+    if uid != meta.get("creator_id") and uid not in ADMIN_IDS:
+        return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
+
+    if new_visibility not in ("public", "link", "private"):
+        return await callback.answer("❌ Noto'g'ri test turi.", show_alert=True)
+
+    # Yaratishdagi mavjud siyosat saqlanadi: ommaviy test faqat Teacher/Admin.
+    if new_visibility == "public":
+        from utils.roles import can_create_public_test
+        if not can_create_public_test(uid, ADMIN_IDS):
+            return await callback.answer(
+                "🔒 Ommaviy test faqat Teacher va Admin uchun.",
+                show_alert=True
+            )
+
+    labels = {
+        "public": "🌍 Ommaviy",
+        "link": "🔗 Ssilka orqali",
+        "private": "🔒 Shaxsiy",
+    }
+
+    # Avval RAMdagi aktiv meta yangilanadi — joriy bot jarayonida darhol kuchga kiradi.
+    from utils.ram_cache import update_test_meta
+    update_test_meta(tid, {"visibility": new_visibility})
+
+    # Mavjud Supabase saqlash qatlamidan foydalanamiz; boshqa test maydonlariga tegilmaydi.
+    try:
+        from utils import tg_db
+        await tg_db.update_test_meta_tg(tid, {"visibility": new_visibility})
+    except Exception as e:
+        log.error(f"set_visibility TG save xato: {e}")
+
+    await callback.answer("✅ Test turi o'zgartirildi!")
+    meta = get_test_meta_any(tid) or {**meta, "visibility": new_visibility}
+    await _show_test_settings(
+        callback.message, meta, tid, edit=True, viewer_uid=uid
+    )
+
+
 @router.callback_query(F.data.startswith("edit_att_"))
 async def edit_att_cb(callback: CallbackQuery):
     await callback.answer()
