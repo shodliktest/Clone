@@ -134,7 +134,7 @@ def _make_result(test: dict, bot_username: str, demo=False) -> InlineQueryResult
         demo_q = min(DEMO_MAX, max(DEMO_MIN, qc // 3))
         msg_text = (
             f"🔍 <b>[DEMO] {title}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📁 Fan: <b>{cat}</b>\n"
             f"📊 Qiyinlik: {diff}\n"
             f"📋 Jami savollar: <b>{qc} ta</b>\n"
@@ -160,7 +160,7 @@ def _make_result(test: dict, bot_username: str, demo=False) -> InlineQueryResult
     else:
         msg_text = (
             f"📝 <b>{title}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📁 Fan: <b>{cat}</b>\n"
             f"📊 Qiyinlik: {diff}\n"
             f"📋 Savollar: <b>{qc} ta</b>\n"
