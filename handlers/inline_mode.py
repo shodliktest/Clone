@@ -182,6 +182,8 @@ def _make_result(test: dict, bot_username: str, demo=False) -> InlineQueryResult
         b.row(
             InlineKeyboardButton(text="👥 Guruhda Poll Test",
                 url=f"https://t.me/{bot_username}?startgroup=gpoll_{tid}"),
+            InlineKeyboardButton(text="👥 Guruhda Inline",
+                url=f"https://t.me/{bot_username}?startgroup=ginline_{tid}"),
         )
         b.row(
             InlineKeyboardButton(
