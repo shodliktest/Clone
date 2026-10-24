@@ -79,10 +79,31 @@ async def route_poll_answer(poll_answer: PollAnswer, state: FSMContext, bot=None
 
 
 # ── Poll testni boshlashning yagona yo'li ─────────────────────
+_poll_starting: set = set()   # test boshlanish jarayonidagi userlar (qo'sh bosishdan himoya)
+
+
 async def start_poll_session(bot, state: FSMContext, uid: int, chat_id: int,
                              tid: str, via_link: bool = False,
                              is_demo: bool = False, message=None,
                              callback: CallbackQuery = None):
+    """Bir vaqtda faqat bitta test boshlanishini ta'minlaydi."""
+    if uid in _poll_starting:
+        if callback:
+            try: await callback.answer("⏳ Test allaqachon boshlanmoqda...")
+            except Exception: pass
+        return
+    _poll_starting.add(uid)
+    try:
+        return await _start_poll_session_impl(
+            bot, state, uid, chat_id, tid, via_link, is_demo, message, callback)
+    finally:
+        _poll_starting.discard(uid)
+
+
+async def _start_poll_session_impl(bot, state: FSMContext, uid: int, chat_id: int,
+                                   tid: str, via_link: bool = False,
+                                   is_demo: bool = False, message=None,
+                                   callback: CallbackQuery = None):
     """Oddiy tugma ham, /start=poll_ deep-link ham aynan shu oqimdan o'tadi."""
     tid = str(tid or "").strip()
     if not tid:
@@ -194,13 +215,18 @@ async def start_poll_session(bot, state: FSMContext, uid: int, chat_id: int,
                 text="⏹ Joriy testni to'xtatib, yangisini boshlash",
                 callback_data=f"force_start_poll_{tid}{'_link' if via_link else ''}"
             ))
+        if can_stop:
+            _finish_cb = ("cancel_poll"
+                          if cur in (PollTest.active.state, PollTest.paused.state)
+                          else "cancel_test")
+            b.row(InlineKeyboardButton(text="✅ Joriy testni yakunlash", callback_data=_finish_cb))
         b.row(InlineKeyboardButton(text="▶️ Joriy testni davom ettirish", callback_data="noop"))
         try:
             await bot.send_message(
                 chat_id,
                 f"⚠️ <b>Siz hozir test yechyapsiz!</b>\n\n"
                 f"📝 <b>{active_name}</b>\n📊 Savol: {active_idx}/{active_total}\n\n"
-                f"{'Yangi test boshlash uchun avval joriy testni to\'xtating.' if can_stop else 'Faqat siz boshlagan test to\'xtatilishi mumkin.'}",
+                f"{'Yangi test boshlash uchun avval joriy testni to\'xtating yoki yakunlang.' if can_stop else 'Faqat siz boshlagan test to\'xtatilishi mumkin.'}",
                 reply_markup=b.as_markup()
             )
         except Exception:

@@ -74,6 +74,101 @@ _group_sessions: Dict[int, dict] = {}
 # Inline sessiyasi: {chat_id: {...}}
 _inline_sessions: Dict[int, dict] = {}
 
+# ─── Bitta guruhda bir vaqtda faqat BITTA faol test ━━━━━━━━━━━━━━
+# _starting — test boshlanish jarayonidagi chatlar (ikki kishi bir vaqtda
+# bosganda ikkala test ham ochilib ketmasligi uchun, race-condition himoyasi)
+_starting: set = set()
+_busy_warn_ts: Dict[int, float] = {}   # ogohlantirish spami oldini olish
+
+STOP_HINT = (
+    "⏹ To'xtatish uchun guruhda <code>/quiz_stop</code> deb yozing "
+    "(faqat testni boshlagan odam yoki guruh admini)."
+)
+
+
+def _active_session(chat_id: int):
+    """('poll'|'inline', session) yoki (None, None)"""
+    if chat_id in _group_sessions:
+        return "poll", _group_sessions[chat_id]
+    if chat_id in _inline_sessions:
+        return "inline", _inline_sessions[chat_id]
+    return None, None
+
+
+def _is_busy(chat_id: int) -> bool:
+    return (chat_id in _group_sessions
+            or chat_id in _inline_sessions
+            or chat_id in _starting)
+
+
+async def _warn_busy(bot, chat_id: int, callback: CallbackQuery = None):
+    """Guruhda faol test bor — yangisini boshlab bo'lmaydi. Variantlar ko'rsatiladi."""
+    import time, html
+    if callback is not None:
+        try:
+            await callback.answer(
+                "⚠️ Guruhda test ketmoqda! Avval uni to'xtating yoki tugashini kuting.",
+                show_alert=True)
+        except Exception:
+            pass
+
+    now = time.time()
+    if now - _busy_warn_ts.get(chat_id, 0) < 10:
+        return                      # guruhni spam qilmaymiz
+    _busy_warn_ts[chat_id] = now
+
+    kind, session = _active_session(chat_id)
+    markup = None
+    if session is None:
+        text = "⏳ <b>Test hozirgina boshlanmoqda...</b>\nBir necha soniya kuting."
+    else:
+        title = html.escape(str((session.get("test") or {}).get("title", "Test")))
+        host  = session.get("host_id")
+        mode  = "Poll" if kind == "poll" else "Inline"
+        total = len(session.get("questions", []))
+        text = (
+            f"⚠️ <b>Guruhda allaqachon faol test ketmoqda!</b>\n\n"
+            f"📝 <b>{title}</b> ({mode}, {total} ta savol)\n"
+            f"👤 Boshlovchi: <a href=\"tg://user?id={host}\">profil</a>\n\n"
+            f"Yangi test boshlash uchun avval:\n"
+            f"• ⏹ joriy testni to'xtating, yoki\n"
+            f"• ⏳ uning yakunlanishini kuting.\n\n"
+            f"{STOP_HINT}"
+        )
+        b = InlineKeyboardBuilder()
+        stop_cb = f"gstop_{host}" if kind == "poll" else f"gi_stop_{host}"
+        b.row(InlineKeyboardButton(text="⏹ Testni to'xtatish", callback_data=stop_cb))
+        b.row(InlineKeyboardButton(text="⏳ Yakunlanishini kutaman", callback_data="gwait"))
+        markup = b.as_markup()
+    try:
+        await bot.send_message(chat_id, text, reply_markup=markup,
+                               protect_content=is_protect_content())
+    except Exception as e:
+        log.warning("busy ogohlantirish yuborilmadi: %s", e)
+
+
+async def _guarded_callback_start(callback: CallbackQuery, impl):
+    """Guruh tugmasi orqali test boshlashda: band bo'lsa ogohlantiradi, bo'lmasa joyni band qiladi."""
+    msg = callback.message
+    if msg is not None and msg.chat.type in ("group", "supergroup"):
+        chat_id = msg.chat.id
+        if _is_busy(chat_id):
+            return await _warn_busy(callback.bot, chat_id, callback)
+        _starting.add(chat_id)       # tekshiruv va band qilish orasida await yo'q
+        try:
+            return await impl(callback)
+        finally:
+            _starting.discard(chat_id)
+    return await impl(callback)
+
+
+@router.callback_query(F.data == "gwait")
+async def group_wait(callback: CallbackQuery):
+    await callback.answer(
+        "⏳ Yaxshi, test tugashini kuting.\n"
+        "Shoshilinch bo'lsa — boshlovchi yoki admin /quiz_stop yozadi.",
+        show_alert=True)
+
 
 # ══════════════════════════════════════════════════════════════
 # POLL ANSWER ROUTING (poll_router.py dan chaqiriladi)
@@ -131,6 +226,10 @@ async def _load_test(bot, chat_id: int, tid: str) -> Optional[dict]:
 
 @router.callback_query(F.data.startswith("group_start_"))
 async def group_start_poll(callback: CallbackQuery):
+    await _guarded_callback_start(callback, _group_start_poll_impl)
+
+
+async def _group_start_poll_impl(callback: CallbackQuery):
     await callback.answer()
     tid = callback.data[12:]
     uid = callback.from_user.id
@@ -212,7 +311,7 @@ async def group_start_poll(callback: CallbackQuery):
     await callback.bot.send_message(
         chat_id,
         f"🚀 <b>TEST BOSHLANDI!</b> | {len(qs)} savol | ⏱{poll_time}s{skip_txt}\n"
-        f"📢 Hamma qatnashing!",
+        f"📢 Hamma qatnashing!\n{STOP_HINT}",
         reply_markup=b.as_markup()
     ,
         protect_content=is_protect_content())
@@ -352,6 +451,10 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
 
 @router.callback_query(F.data.startswith("group_inline_"))
 async def group_start_inline(callback: CallbackQuery):
+    await _guarded_callback_start(callback, _group_start_inline_impl)
+
+
+async def _group_start_inline_impl(callback: CallbackQuery):
     await callback.answer()
     tid = callback.data[13:]
     uid = callback.from_user.id
@@ -439,7 +542,7 @@ async def group_start_inline(callback: CallbackQuery):
         chat_id,
         f"🚀 <b>INLINE TEST BOSHLANDI!</b>\n"
         f"📝 {test.get('title')} | {len(qs)} savol | ⏱{poll_time}s\n"
-        f"📢 Tugmalar orqali javob bering!",
+        f"📢 Tugmalar orqali javob bering!\n{STOP_HINT}",
         reply_markup=b.as_markup()
     ,
         protect_content=is_protect_content())
@@ -774,6 +877,9 @@ async def group_inline_stop(callback: CallbackQuery):
     host_id = int(callback.data[8:])
     chat_id = callback.message.chat.id
     uid     = callback.from_user.id
+    _s = _inline_sessions.get(chat_id)
+    if _s and _s.get("host_id") is not None:
+        host_id = _s["host_id"]      # haqiqiy boshlovchi (eski tugma aldamasin)
 
     if uid != host_id:
         try:
@@ -808,6 +914,9 @@ async def group_stop(callback: CallbackQuery):
     host_id = int(callback.data[6:])
     chat_id = callback.message.chat.id
     uid     = callback.from_user.id
+    _s = _group_sessions.get(chat_id)
+    if _s and _s.get("host_id") is not None:
+        host_id = _s["host_id"]      # haqiqiy boshlovchi (eski tugma aldamasin)
     if uid != host_id:
         try:
             member = await callback.bot.get_chat_member(chat_id, uid)
@@ -1254,7 +1363,18 @@ async def _group_test_access(tid: str, uid: int, test: dict | None = None) -> bo
 
 
 async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
-    """Guruhda test boshlash — asosiy logika. start.py va cmd_quiz_start ishlatadi."""
+    """Guruhda test boshlash. start.py, cmd_quiz_start va scheduler ishlatadi.
+    Guruhda faqat BITTA faol test bo'lishi mumkin."""
+    if _is_busy(chat_id):
+        return await _warn_busy(bot, chat_id)
+    _starting.add(chat_id)           # tekshiruv va band qilish orasida await yo'q
+    try:
+        return await _start_group_test_impl(bot, chat_id, uid, tid, mode)
+    finally:
+        _starting.discard(chat_id)
+
+
+async def _start_group_test_impl(bot, chat_id: int, uid: int, tid: str, mode: str):
     if is_test_paused(tid):
         return await bot.send_message(chat_id, "⚠️ Bu test vaqtincha to\'xtatilgan!", protect_content=is_protect_content())
 
@@ -1324,7 +1444,7 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
             f"📋 {len(qs)} ta savol | ⏱ {poll_time}s/savol\n"
             f"🎯 O'tish: {ps}% | 👥 {sc} marta yechilgan\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📢 <b>Hamma qatnashing! Tugmalar orqali javob bering!</b>",
+            f"📢 <b>Hamma qatnashing! Tugmalar orqali javob bering!</b>\n{STOP_HINT}",
             parse_mode="HTML", reply_markup=b.as_markup(),
             protect_content=is_protect_content())
         task = asyncio.create_task(
@@ -1378,7 +1498,7 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
             f"📋 {len(qs)} ta savol | ⏱ {poll_time}s/savol\n"
             f"🎯 O'tish: {ps}% | 👥 {sc} marta yechilgan\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📢 <b>Hamma qatnashing!</b>{skip_txt}",
+            f"📢 <b>Hamma qatnashing!</b>{skip_txt}\n{STOP_HINT}",
             parse_mode="HTML", reply_markup=b.as_markup(),
             protect_content=is_protect_content())
         task = asyncio.create_task(

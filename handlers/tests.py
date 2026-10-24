@@ -507,6 +507,7 @@ async def start_inline_test(callback: CallbackQuery, state: FSMContext):
             InlineKeyboardButton(text="▶️ Davom etish",  callback_data="resume_inline"),
             InlineKeyboardButton(text="🔄 Yangi test",   callback_data=f"force_start_{tid}"),
         )
+        b.row(InlineKeyboardButton(text="✅ Joriy testni yakunlash", callback_data="cancel_test"))
         try:
             await callback.message.answer(
                 f"⚠️ <b>Faol test mavjud!</b>\n\n"
