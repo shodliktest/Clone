@@ -1740,6 +1740,15 @@ def _fj_text():
         f"Kanallar soni: <b>{len(chs)}</b>",
         "",
     ]
+    try:
+        from utils.force_join import persist_status, channel_errors
+        for _cid, _ce in channel_errors().items():
+            lines.append(f"⚠️ <code>{_cid}</code>: tekshirib bo'lmadi — bot ADMIN emasmi? ({_ce[:60]})")
+        _ok, _err = persist_status()
+        if not _ok:
+            lines.insert(4, f"⚠️ <b>Supabase'ga SAQLANMADI!</b> <code>{str(_err)[:80]}</code>")
+    except Exception:
+        pass
     if chs:
         lines.append("📋 <b>Ro'yxat:</b>")
         for i, ch in enumerate(chs, 1):
@@ -1785,12 +1794,19 @@ async def admin_force_join(callback: CallbackQuery, state: FSMContext):
 async def fj_toggle(callback: CallbackQuery):
     await callback.answer()
     if not is_admin(callback.from_user.id): return
-    from utils.force_join import is_force_enabled, set_force_enabled
+    from utils.force_join import is_force_enabled, set_enabled_async
     new_val = not is_force_enabled()
-    set_force_enabled(new_val)
-    st = "✅ Yoqildi" if new_val else "❌ O'chirildi"
-    await callback.answer(f"Majburiy obuna: {st}", show_alert=True)
-    await callback.message.edit_text(_fj_text(), reply_markup=_fj_kb())
+    ok, err = await set_enabled_async(new_val)          # bazaga yozilib, tekshirilguncha kutadi
+    if ok:
+        st = "✅ Yoqildi" if new_val else "❌ O'chirildi"
+        await callback.answer(f"Majburiy obuna: {st}\n💾 Bazaga saqlandi", show_alert=True)
+    else:
+        await callback.answer(f"❌ BAZAGA SAQLANMADI — o'zgarish bekor qilindi!\n{str(err)[:150]}",
+                              show_alert=True)
+    try:
+        await callback.message.edit_text(_fj_text(), reply_markup=_fj_kb())
+    except TelegramBadRequest:
+        pass
 
 
 @router.callback_query(F.data == "fj_add")
@@ -1821,7 +1837,7 @@ async def fj_add_input(message: Message, state: FSMContext):
     if message.forward_from_chat:
         raw = str(message.forward_from_chat.id)
 
-    from utils.force_join import add_channel
+    from utils.force_join import add_channel_async
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="◀️ Orqaga", callback_data="admin_force_join"))
 
@@ -1842,18 +1858,33 @@ async def fj_add_input(message: Message, state: FSMContext):
         except Exception:
             pass
 
-        added = add_channel(ch_id, ch_title, invite, ch_type)
+        status, serr = await add_channel_async(ch_id, ch_title, invite, ch_type)
         icon  = "📢" if ch_type == "channel" else "👥"
 
-        if added:
+        # Bot shu kanalda a'zolikni tekshira olishini darhol sinaymiz
+        _warn = ""
+        try:
+            _me = await message.bot.me()
+            await message.bot.get_chat_member(ch_id, _me.id)
+            await message.bot.get_chat_member(ch_id, message.from_user.id)
+        except Exception as _ce:
+            _warn = (f"\n\n⚠️ <b>Diqqat:</b> bot bu kanalda a'zolikni tekshira olmayapti "
+                     f"({str(_ce)[:80]}). Botni kanalga <b>ADMIN</b> qiling, aks holda "
+                     f"obuna tekshiruvi ishlamaydi.")
+
+        if status == "added":
             await message.answer(
-                f"✅ Qo'shildi!\n{icon} <b>{ch_title}</b>\n"
+                f"✅ Qo'shildi va bazaga saqlandi!\n{icon} <b>{ch_title}</b>\n"
                 f"ID: <code>{ch_id}</code>\n"
-                f"Havola: {invite or 'Yo\'q (public)'}",
+                f"Havola: {invite or 'Yo\'q (public)'}" + _warn,
                 reply_markup=b.as_markup()
             )
-        else:
+        elif status == "exists":
             await message.answer("⚠️ Bu kanal allaqachon ro'yxatda!", reply_markup=b.as_markup())
+        else:
+            await message.answer(
+                f"❌ Bazaga SAQLANMADI, kanal qo'shilmadi.\n<code>{str(serr)[:200]}</code>\n"
+                f"Keyinroq qayta urinib ko'ring.", reply_markup=b.as_markup())
     except Exception as e:
         await message.answer(
             f"❌ Xato: {e}\n\n"
@@ -1865,40 +1896,55 @@ async def fj_add_input(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("fj_del_"))
 async def fj_delete(callback: CallbackQuery):
-    await callback.answer()
-    if not is_admin(callback.from_user.id): return
-    from utils.force_join import remove_channel, get_force_channels
+    if not is_admin(callback.from_user.id):
+        return await callback.answer()
+    from utils.force_join import remove_channel_async, get_force_channels
     try:
         ch_id = int(callback.data.replace("fj_del_", ""))
-        # Kanal nomini topish
         chs   = get_force_channels()
         title = next((c["title"] for c in chs if c["id"] == ch_id), str(ch_id))
-        ok    = remove_channel(ch_id)
-        if ok:
-            await callback.answer(f"🗑 O'chirildi: {title}", show_alert=True)
-        else:
+        status, serr = await remove_channel_async(ch_id)
+        if status == "removed":
+            await callback.answer(f"🗑 O'chirildi: {title}\n💾 Bazaga saqlandi", show_alert=True)
+        elif status == "missing":
             await callback.answer("⚠️ Topilmadi", show_alert=True)
+        else:
+            await callback.answer(f"❌ BAZAGA SAQLANMADI — o'chirilmadi!\n{str(serr)[:150]}", show_alert=True)
     except Exception as e:
         await callback.answer(f"❌ {e}", show_alert=True)
-    await callback.message.edit_text(_fj_text(), reply_markup=_fj_kb())
+    try:
+        await callback.message.edit_text(_fj_text(), reply_markup=_fj_kb())
+    except TelegramBadRequest:
+        pass
 
 
 @router.callback_query(F.data == "fj_check")
 async def fj_check_cb(callback: CallbackQuery):
     """Foydalanuvchi 'A'zo bo'ldim' tugmasini bosdi"""
-    from utils.force_join import check_user_joined, send_join_request
+    from utils.force_join import check_user_joined, send_join_request, pop_pending_start
     uid        = callback.from_user.id
-    not_joined = await check_user_joined(callback.bot, uid)
+    not_joined = await check_user_joined(callback.bot, uid, use_cache=False)
     if not not_joined:
         await callback.answer("✅ Rahmat! Davom etishingiz mumkin.", show_alert=True)
         try:
             await callback.message.delete()
         except Exception:
             pass
-        # /start ni qayta ishlatish — to'g'ridan xabar yuboramiz
+        # Obunadan oldin bosilgan test havolasi bo'lsa — shu testga qaytarib yuboramiz
+        _b = InlineKeyboardBuilder()
+        _pend = pop_pending_start(uid)
+        if _pend:
+            try:
+                _un = (await callback.bot.me()).username
+                _b.row(InlineKeyboardButton(text="🚀 Testni davom ettirish",
+                                            url=f"https://t.me/{_un}?start={_pend}"))
+            except Exception:
+                pass
         await callback.message.answer(
             "✅ Tekshirildi! Endi botdan foydalanishingiz mumkin.\n"
-            "/start ni bosing yoki quyidagi tugmani bosing:"
+            + ("Oldingi testingizga qaytish uchun tugmani bosing:" if _pend else
+               "/start ni bosing yoki quyidagi tugmani bosing:"),
+            reply_markup=_b.as_markup() if _pend else None
         )
         # Bot menyusini ko'rsatish
         try:

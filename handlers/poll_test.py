@@ -51,6 +51,16 @@ async def route_poll_answer(poll_answer: PollAnswer, state: FSMContext, bot=None
     cur_st = await state.get_state()
     if cur_st not in (PollTest.active.state, PollTest.paused.state):
         return
+    # Majburiy obunadan chiqib ketgan bo'lsa — javob qabul qilinmaydi
+    try:
+        from utils.force_join import user_allowed
+        from handlers.group import _deny_not_joined
+        _b = bot or poll_answer.bot
+        if _b is not None and not await user_allowed(_b, poll_answer.user.id):
+            await _deny_not_joined(_b, poll_answer.user.id, notify_group=False)
+            return
+    except Exception:
+        pass
     d    = await state.get_data()
     pmap = d.get("poll_map", {})
     pid  = poll_answer.poll_id
@@ -370,6 +380,14 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
         "via_link": via_link,
         "is_demo": is_demo,
     })
+
+    # Ishtirokchini darhol bazaga yozamiz — yakunlamasa ham "Kim yechgan" da ko'rinsin
+    if not is_demo and not test.get("is_retry"):
+        try:
+            from utils.db import register_participant_now
+            await register_participant_now(uid, tid, test)
+        except Exception as _re:
+            log.warning("poll register_participant: %s", _re)
 
     # Live monitor uchun (ilgari faqat inline rejim ro'yxatga olinardi)
     from utils.ram_cache import live_start

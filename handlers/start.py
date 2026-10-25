@@ -270,12 +270,12 @@ async def cmd_start(message: Message, state: FSMContext):
             chat = message.chat
             if chat.type in ("group", "supergroup"):
                 from handlers.group import _start_group_test
-                await _start_group_test(message.bot, chat.id, uid, tid, "inline")
+                await _start_group_test(message.bot, chat.id, uid, tid, "poll")   # inline olib tashlangan
             else:
                 test = get_test_by_id(tid) or await _gtf(tid)
                 if test:
                     await message.answer(welcome, reply_markup=main_kb(uid, chat_type))
-                    await _send_test_card(message, test, tid, viewer_uid=uid)
+                    await _send_test_card(message, test, tid, viewer_uid=uid, poll_only=True)
             return
 
         tid  = param.upper()

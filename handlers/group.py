@@ -1,11 +1,12 @@
-"""👥 GURUH REJIMI — Quiz Poll + Inline (tugmalar + countdown)
+"""👥 GURUH REJIMI — faqat Quiz Poll (Telegram native poll)
 ================================================================
 POLL USULI:   group_start_<tid>  → Telegram native poll
-INLINE USULI: group_inline_<tid> → Inline tugmalar + countdown timer
 
-Qaysi usul:
-  - "📊 Quiz Poll"        → start_poll_ (private) yoki group_start_ (guruh)
-  - "👥 Guruhda (Inline)" → group_inline_<tid>
+Guruhda INLINE (tugmali) rejim olib tashlangan. Eski xabarlardagi inline tugma/havolalar
+(group_inline_, ginline_, "inline" rejimi) xatosiz ishlashi uchun Poll rejimiga yo'naltiriladi.
+
+  - "📊 Quiz Poll"          → start_poll_ (private) yoki group_start_ (guruh)
+  - "👥 Guruhda Poll Test"  → startgroup=gpoll_<tid>
 
 Natijalar:
   - Poll usuli: PollAnswer orqali kim qaysi variantni bosganini bilamiz
@@ -147,6 +148,36 @@ async def _warn_busy(bot, chat_id: int, callback: CallbackQuery = None):
         log.warning("busy ogohlantirish yuborilmadi: %s", e)
 
 
+_join_dm_ts: Dict[int, float] = {}
+
+
+POPUP_TEXT = ("🔒 Avval majburiy obunaga a'zo bo'ling!\n"
+              "Botga o'tib /start bosing — havolalar yuboriladi.")
+
+
+async def _deny_not_joined(bot, uid: int, chat_id: int = None, callback: CallbackQuery = None,
+                           name: str = "", notify_group: bool = False):
+    """Faqat SHAXSIY chat poll testi ishlatadi: obunasiz foydalanuvchiga shaxsiy xabar
+    (10 daqiqada bir marta). Guruhda majburiy obuna tekshirilmaydi."""
+    import time
+    from utils.force_join import check_user_joined, send_join_request
+    if callback is not None:
+        try:
+            await callback.answer(POPUP_TEXT, show_alert=True)
+        except Exception:
+            pass
+    now = time.time()
+    if now - _join_dm_ts.get(uid, 0) < 600:
+        return
+    _join_dm_ts[uid] = now
+    try:
+        not_joined = await check_user_joined(bot, uid, use_cache=False)
+        if not_joined:
+            await send_join_request(uid, not_joined, bot)
+    except Exception as e:
+        log.debug("join DM yuborilmadi uid=%s: %s", uid, e)
+
+
 async def _guarded_callback_start(callback: CallbackQuery, impl):
     """Guruh tugmasi orqali test boshlashda: band bo'lsa ogohlantiradi, bo'lmasa joyni band qiladi."""
     msg = callback.message
@@ -231,7 +262,7 @@ async def group_start_poll(callback: CallbackQuery):
 
 async def _group_start_poll_impl(callback: CallbackQuery):
     await callback.answer()
-    tid = callback.data[12:]
+    tid = callback.data.split("_", 2)[2]      # group_start_<tid> va eski group_inline_<tid> uchun
     uid = callback.from_user.id
 
     # Inline message dan kelganda callback.message = None
@@ -401,7 +432,7 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
         expl = sanitize_explanation(expl)
 
         try:
-            pm = await bot.send_poll(
+            _poll_kwargs = dict(
                 chat_id=chat_id,
                 question=question,
                 options=clean_opts,
@@ -413,6 +444,7 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
                 allows_multiple_answers=False,
                 protect_content=is_protect_content(),
             )
+            pm = await bot.send_poll(**_poll_kwargs)
             if chat_id in _group_sessions:
                 _group_sessions[chat_id]["poll_map"][pm.poll.id] = i
             wait = (poll_time + 2) if poll_time > 0 else 10
@@ -451,7 +483,8 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
 
 @router.callback_query(F.data.startswith("group_inline_"))
 async def group_start_inline(callback: CallbackQuery):
-    await _guarded_callback_start(callback, _group_start_inline_impl)
+    # Inline rejim olib tashlangan — eski tugma bosilsa Poll rejimi ishga tushadi
+    await _guarded_callback_start(callback, _group_start_poll_impl)
 
 
 async def _group_start_inline_impl(callback: CallbackQuery):
@@ -1014,16 +1047,10 @@ async def _show_group_leaderboard(
 
     # ── Qayta boshlash + Ulashish tugmalari ──
     btn_kb = InlineKeyboardBuilder()
-    if mode == "poll":
-        btn_kb.row(InlineKeyboardButton(
-            text="🔄 Qayta boshlash (Poll)",
-            url=f"https://t.me/{bot_uname}?startgroup=gpoll_{tid}"
-        ))
-    else:
-        btn_kb.row(InlineKeyboardButton(
-            text="🔄 Qayta boshlash (Inline)",
-            url=f"https://t.me/{bot_uname}?startgroup=ginline_{tid}"
-        ))
+    btn_kb.row(InlineKeyboardButton(
+        text="🔄 Qayta boshlash (Poll)",
+        url=f"https://t.me/{bot_uname}?startgroup=gpoll_{tid}"
+    ))
     btn_kb.row(InlineKeyboardButton(
         text="📤 Ulashish",
         switch_inline_query=f"test_{tid}"
@@ -1223,7 +1250,7 @@ async def _send_text_leaderboard(
         f"🎉 Barcha ishtirokchilarga rahmat!"
     )
 
-    mode_suffix = "inline" if mode == "inline" else "poll"
+    mode_suffix = "poll"
     b = InlineKeyboardBuilder()
     b.row(
         InlineKeyboardButton(
@@ -1331,7 +1358,7 @@ async def cmd_quiz_start_poll(message: Message):
 
 @router.message(Command("quiz_start_inline"))
 async def cmd_quiz_start_inline(message: Message):
-    """Guruhda: /quiz_start_inline KOD — inline usuli"""
+    """Eski buyruq: inline rejim olib tashlangan — Poll rejimi ishga tushadi."""
     args = message.text.split()
     if len(args) < 2:
         return await message.answer("❌ Foydalanish: <code>/quiz_start_inline KOD</code>")
@@ -1364,7 +1391,9 @@ async def _group_test_access(tid: str, uid: int, test: dict | None = None) -> bo
 
 async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
     """Guruhda test boshlash. start.py, cmd_quiz_start va scheduler ishlatadi.
-    Guruhda faqat BITTA faol test bo'lishi mumkin."""
+    Guruhda faqat BITTA faol test bo'lishi mumkin. Majburiy obuna guruhda TEKSHIRILMAYDI.
+    Guruhda faqat Poll rejimi bor: eski "inline" so'rovlari Poll ga aylantiriladi."""
+    mode = "poll"
     if _is_busy(chat_id):
         return await _warn_busy(bot, chat_id)
     _starting.add(chat_id)           # tekshiruv va band qilish orasida await yo'q
@@ -1512,8 +1541,7 @@ async def cmd_quiz_start(message: Message):
     """
     Guruhda: /quiz_start <test_kodi>
     Misol:   /quiz_start 3D46D269
-    Misol:   /quiz_start 3D46D269 poll   (poll usuli)
-    Misol:   /quiz_start 3D46D269 inline (inline usuli)
+    (Guruhda faqat Poll rejimi bor — "inline" yozilsa ham Poll ishga tushadi.)
     """
     chat    = message.chat
     chat_id = chat.id
@@ -1530,8 +1558,7 @@ async def cmd_quiz_start(message: Message):
         return await message.answer(
             "❌ <b>Foydalanish:</b>\n"
             "<code>/quiz_start &lt;test_kodi&gt;</code>\n"
-            "<code>/quiz_start &lt;test_kodi&gt; poll</code>\n"
-            "<code>/quiz_start &lt;test_kodi&gt; inline</code>\n\n"
+            "\n"
             "Misol: <code>/quiz_start 3D46D269</code>"
         )
 
@@ -1645,11 +1672,9 @@ async def on_bot_added(event: ChatMemberUpdated):
                 await event.bot.send_message(
                     chat.id,
                     f"👋 <b>Quiz Bot</b> guruhga qo'shildi! 🎉\n\n"
-                    f"📊 <b>Poll usuli:</b> Telegram native poll savollar\n"
-                    f"👥 <b>Inline usuli:</b> Tugmalar + countdown timer\n\n"
+                    f"📊 <b>Poll usuli:</b> Telegram native poll savollar\n\n"
                     f"Botga yuborilgan testda:\n"
-                    f"  • <b>\"📊 Quiz Poll\"</b> — poll usuli\n"
-                    f"  • <b>\"👥 Guruhda (Inline)\"</b> — inline usuli\n\n"
+                    f"  • <b>\"👥 Guruhda Poll Test\"</b> — guruhda poll bilan boshlash\n\n"
                     f"<i>💡 Poll uchun botga admin huquqi kerak.</i>",
                     reply_markup=b.as_markup(),
                     protect_content=is_protect_content()

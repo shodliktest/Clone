@@ -96,6 +96,7 @@ async def _save_partial_result(uid: int, tid: str, answers: list,
     pct      = round(correct / answered * 100) if answered else 0
     result   = {
         "pct":          pct,
+        "percentage":   pct,
         "correct":      correct,
         "total":        total,
         "answered":     answered,
@@ -571,7 +572,8 @@ async def start_inline_test(callback: CallbackQuery, state: FSMContext):
     except Exception: pass
 
     # START bosgan odamni 0-natija bilan saqlaymiz
-    _register_participant(uid, tid, test)
+    from utils.db import register_participant_now
+    await register_participant_now(uid, tid, test)
 
     # Live monitor uchun
     from utils.ram_cache import live_start
@@ -625,7 +627,8 @@ async def force_start_cb(callback: CallbackQuery, state: FSMContext):
         return
 
     cid = callback.message.chat.id if callback.message else uid
-    _register_participant(uid, tid, test)
+    from utils.db import register_participant_now
+    await register_participant_now(uid, tid, test)
 
     await state.set_state(TestSolving.answering)
     await state.update_data(
