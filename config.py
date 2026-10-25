@@ -34,6 +34,23 @@ GITHUB_PAGES_URL: str = _s("GITHUB_PAGES_URL", "https://shodliktest.github.io/Te
 # Test Baza Guruhi — har yangi test shu guruhga e'lon qilinadi
 BAZA_GROUP_ID: int = int(_s("BAZA_GROUP_ID", "0"))
 
+# ── Xato javoblar kanali (User_false_id) ─────────────────────────
+# Bot har bir foydalanuvchining har bir testi bo'yicha XATO savollarini shu kanalga
+# JSON fayl qilib tashlaydi; qaysi xabar qaysi userga tegishli ekani Supabase'dagi
+# `user_wrong_answers` jadvalida turadi. Bot kanalda ADMIN bo'lishi shart.
+def _int_secret(*keys, default=0):
+    for k in keys:
+        try:
+            v = str(_s(k, "") or "").strip()
+            if v:
+                return int(v)
+        except Exception:
+            continue
+    return default
+
+USER_FALSE_ID: int = _int_secret("USER_FALSE_ID", "User_false_id", "USER_FALSE_CHANNEL_ID")
+WRONG_KEEP_PER_USER: int = _int_secret("WRONG_KEEP_PER_USER", default=20)   # har user uchun nechta test xatosi saqlanadi
+
 PASSING_SCORE = 60
 MAX_FILE_MB   = 20
 

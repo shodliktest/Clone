@@ -2,7 +2,7 @@
 import os
 import tempfile
 from aiogram import BaseMiddleware
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineQuery
 from aiogram.exceptions import TelegramBadRequest
 from utils import ram_cache as ram
 from handlers import webauth
@@ -38,7 +38,7 @@ class ForceJoinMiddleware(BaseMiddleware):
     FAQAT private chatda ishlaydi.
     Guruh/kanal chatlarida UMUMAN ishlamaydi.
     """
-    SKIP_CALLBACKS = {"fj_check", "main_menu", "noop"}
+    SKIP_CALLBACKS = {"fj_check", "noop"}
     SKIP_COMMANDS  = {"/start"}
 
     async def __call__(self, handler, event, data):
@@ -58,9 +58,17 @@ class ForceJoinMiddleware(BaseMiddleware):
                 if isinstance(event, Message):
                     chat_type = event.chat.type if event.chat else "private"
                     uid       = event.from_user.id if event.from_user else None
-                    # /start o'zi tekshiradi
-                    if event.text and event.text.startswith("/start"):
-                        skip_check = True
+                    # /start ham TEKSHIRILADI (avval o'tkazib yuborilardi va
+                    # deep-link orqali test boshlash mumkin bo'lib qolgan edi).
+                    # Obunadan keyin qaytarish uchun parametr eslab qolinadi.
+                    if event.text and event.text.startswith("/start") and uid:
+                        _parts = event.text.split(maxsplit=1)
+                        if len(_parts) > 1 and _parts[1].strip() != "fj":
+                            from utils.force_join import remember_start
+                            remember_start(uid, _parts[1].strip())
+                elif isinstance(event, InlineQuery):
+                    chat_type = "private"
+                    uid       = event.from_user.id if event.from_user else None
                 elif isinstance(event, CallbackQuery):
                     chat_type = (event.message.chat.type
                                  if event.message and event.message.chat
@@ -74,11 +82,29 @@ class ForceJoinMiddleware(BaseMiddleware):
                     skip_check = True
                 elif uid and uid in ADMIN_IDS:
                     skip_check = True
+                    from utils.force_join import publish_status
+                    publish_status(uid, True)        # adminlar web'da ham to'xtatilmasin
 
                 # Private chatda tekshirish
                 if not skip_check and uid:
                     not_joined = await check_user_joined(event.bot, uid)
-                    if not_joined:
+                    if not_joined and isinstance(event, InlineQuery):
+                        # Inline qidiruv: natija o'rniga "obuna bo'ling" tugmasi
+                        try:
+                            try:
+                                from aiogram.types import InlineQueryResultsButton
+                                _btn = InlineQueryResultsButton(
+                                    text="🔒 Avval majburiy obunaga a'zo bo'ling",
+                                    start_parameter="fj")
+                                await event.answer([], button=_btn, cache_time=1, is_personal=True)
+                            except ImportError:
+                                await event.answer([], switch_pm_text="🔒 Avval majburiy obunaga a'zo bo'ling",
+                                                   switch_pm_parameter="fj", cache_time=1, is_personal=True)
+                        except Exception as _ie:
+                            import logging
+                            logging.getLogger(__name__).warning(f"inline FJ javob: {_ie}")
+                        blocked = True
+                    elif not_joined:
                         await send_join_request(event, not_joined, event.bot)
                         if isinstance(event, CallbackQuery):
                             await event.answer(
@@ -297,6 +323,7 @@ async def main():
     dp  = Dispatcher(storage=MemoryStorage())
     dp.message.middleware(ForceJoinMiddleware())
     dp.callback_query.middleware(ForceJoinMiddleware())
+    dp.inline_query.middleware(ForceJoinMiddleware())
     dp.message.middleware(BlockedUserMiddleware())
     dp.callback_query.middleware(BlockedUserMiddleware())
     dp.poll_answer.middleware(BlockedUserMiddleware())
@@ -347,6 +374,13 @@ async def main():
         bot.default.protect_content = ram.is_protect_content()
         log.info(f"✅ Yuklandi: {ram.stats()['tests']} test meta, {ram.stats()['users']} user (savollar lazy)")
         _blocked_mod.load()
+
+        # Force join — Supabase'dan yuklash (avval main() da umuman yuklanmasdi!)
+        try:
+            from utils.force_join import load_from_db
+            await load_from_db()
+        except Exception as _fje:
+            log.warning(f"force_join load: {_fje}")
     else:
         log.error("❌ SUPABASE_URL / SUPABASE_KEY sozlanmagan — bot ma'lumotlarsiz ishga tushadi!")
 
@@ -607,6 +641,7 @@ async def _main_no_signals():
     # ── Barcha middlewarelar (main() bilan bir xil) ──
     dp.message.middleware(ForceJoinMiddleware())
     dp.callback_query.middleware(ForceJoinMiddleware())
+    dp.inline_query.middleware(ForceJoinMiddleware())
     dp.message.middleware(BlockedUserMiddleware())
     dp.callback_query.middleware(BlockedUserMiddleware())
     dp.poll_answer.middleware(BlockedUserMiddleware())
@@ -720,13 +755,6 @@ async def _main_no_signals():
                 f"✅ <b>Bot ishga tushdi!</b>\n"
                 f"📅 {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')} UTC")
         except Exception: pass
-
-    # Force join — Supabase'dan yuklash (bot restart bo'lsa ham saqlangan holat qaytadi)
-    try:
-        from utils.force_join import load_from_db
-        await load_from_db()
-    except Exception as _fje:
-        log.warning(f"force_join load: {_fje}")
 
     log.info("🚀 Bot ishga tushdi!")
     # handle_signals=False — thread dan ishga tushirilganda signal xatosini oldini oladi
