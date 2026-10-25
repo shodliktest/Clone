@@ -49,18 +49,36 @@ async def _run(fn, *args, **kwargs):
 
 async def select(table: str, columns: str = "*", filters: dict | None = None,
                   order: str | None = None, desc: bool = False, limit: int | None = None):
-    def _do():
+    PAGE = 1000   # PostgREST bir so'rovda ko'pi bilan 1000 qator qaytaradi
+
+    def _do(start=0, end=None):
         q = get_client().table(table).select(columns)
         if filters:
             for k, v in filters.items():
                 q = q.eq(k, v)
         if order:
             q = q.order(order, desc=desc)
-        if limit:
+        if end is not None:
+            q = q.range(start, end)
+        elif limit:
             q = q.limit(limit)
         return q.execute()
-    res = await _run(_do)
-    return res.data or []
+
+    if limit:
+        res = await _run(_do)
+        return res.data or []
+
+    # limit berilmagan → BARCHA qatorlarni sahifalab o'qiymiz (avval 1000 dan keyingisi
+    # jim tushib qolardi: user_stats/users/tests to'liq yuklanmasdi)
+    out, start = [], 0
+    while True:
+        res = await _run(_do, start, start + PAGE - 1)
+        rows = res.data or []
+        out.extend(rows)
+        if len(rows) < PAGE:
+            break
+        start += PAGE
+    return out
 
 
 async def select_one(table: str, pk_col: str, pk_val):

@@ -360,9 +360,57 @@ def get_all_tests_admin():
 
 # ══ NATIJALAR ══════════════════════════════════════════════════
 
+async def ensure_user_stats_loaded(user_id) -> bool:
+    """
+    User statistikasi RAM da yo'q bo'lsa (2 soatdan keyin keshdan o'chiriladi, yoki
+    reboot'dan keyin yuklanmagan) — AVVAL Supabase'dan o'qiymiz.
+    Aks holda `get_user_stats_cache(...) or {}` bo'sh dict bilan boshlanib, foydalanuvchining
+    BARCHA oldingi test tarixi bitta test bilan ustiga yozilib ketardi
+    ("hech kim yechmagan" ko'rinishining asosiy sabablaridan biri).
+    """
+    uid_str = str(user_id)
+    if ram.get_user_stats_cache(uid_str) is not None:
+        return True
+    from utils import tg_db, supabase_client as sb
+    if not tg_db.ready():
+        return False
+    for attempt in range(3):
+        try:
+            row = await sb.select_one("user_stats", "tg_id", int(user_id))
+            ram.set_user_stats_cache(uid_str, dict((row or {}).get("data") or {}), dirty=False)
+            return True
+        except Exception as e:
+            log.error(f"ensure_user_stats_loaded({user_id}) urinish {attempt+1}: {e}")
+            await asyncio.sleep(0.7 * (attempt + 1))
+    return False
+
+
+async def register_participant_now(user_id, test_id, test=None):
+    """Test BOSHLANGANDA ishtirokchini darhol bazaga yozadi (yakunlamasa ham 'Kim yechgan' da ko'rinsin)."""
+    from datetime import datetime, timezone as _tz
+    from utils import tg_db
+    uid_str = str(user_id)
+    if not await ensure_user_stats_loaded(user_id):
+        return          # bazadan o'qib bo'lmadi — mavjud tarixni buzmaslik uchun yozmaymiz
+    stats = ram.get_user_stats_cache(uid_str) or {}
+    if test_id in stats:
+        return
+    stats[test_id] = {
+        "attempts": 0, "all_pcts": [], "best_score": 0.0, "avg_score": 0.0,
+        "last_at": str(datetime.now(_tz.utc))[:16], "passed": False, "started": True,
+    }
+    ram.set_user_stats_cache(uid_str, stats, dirty=True)
+    try:
+        await tg_db.write_user_stats_now(int(user_id), stats)
+    except Exception as e:
+        log.error(f"register_participant_now({user_id},{test_id}): {e}")
+        tg_db.mark_stats_dirty()
+
+
 async def save_result(user_id, test_id, result, via_link=False):
     # Test yechildi — last_access yangilanadi (48h TTL uzayadi)
     ram.touch_test_access(test_id)
+    await ensure_user_stats_loaded(user_id)
     """
     Natija RAMga DARHOL saqlanadi VA Supabase'ga ham DARHOL yoziladi
     (avvalgi versiyada faqat RAM'da turib, 5 daqiqada bir marta yoki

@@ -959,6 +959,9 @@ async def save_settings(settings_dict: dict) -> bool:
         data = dict(settings_dict or {})
         if "__security__" in current:
             data["__security__"] = current["__security__"]
+        # Majburiy obuna sozlamasi RAM dagi eski nusxa tufayli o'chib ketmasin
+        if "force_join" in current:
+            data["force_join"] = current["force_join"]   # faqat force_join moduli o'zgartiradi
         await sb.upsert("app_settings", {"id": 1, "data": data}, on_conflict="id")
         return True
     except Exception as e:
