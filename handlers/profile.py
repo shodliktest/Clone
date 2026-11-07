@@ -203,16 +203,28 @@ async def analysis_handler(callback: CallbackQuery):
     page  = int(parts[1]) if len(parts)>1 else 0
     uid   = callback.from_user.id
     det   = get_analysis(uid, rid)
+    parts2 = str(rid).split("_",1)
+    tid    = parts2[1] if len(parts2)==2 else ""
+    snap_title = None
+    if not det and tid:
+        # RAM da yo'q (2 soatdan keyin / restart) — Statistika kanalidagi JSON dan
+        from utils import stats_store
+        saved = await stats_store.load_analysis(callback.bot, uid, tid)
+        if saved:
+            det = saved.get("detailed", [])
+            snap_title = saved.get("title")
     if not det:
         return await callback.answer(
             "❌ Tahlil topilmadi.\nFaqat oxirgi yechilgan test tahlili mavjud.",
             show_alert=True
         )
-    parts2 = str(rid).split("_",1)
-    tid    = parts2[1] if len(parts2)==2 else ""
-    test   = await get_test_full(tid) if tid else {}
+    has_text = any(d.get("question") for d in det)
+    test   = {} if has_text else (await get_test_full(tid) if tid else {})
     qs     = test.get("questions",[]) if test else []
-    title  = test.get("title","Test") if test else "Test"
+    title  = snap_title or (test.get("title","Test") if test else "Test")
+    if snap_title is None and tid and has_text:
+        _m = get_test_by_id(tid)
+        title = (_m or {}).get("title", "Test")
     PG     = 5
     tot    = (len(det)+PG-1)//PG
     page   = max(0, min(page, tot-1))
@@ -231,8 +243,8 @@ async def analysis_handler(callback: CallbackQuery):
         u_a  = d.get("user_answer") or "Belgilanmagan"
         c_a  = d.get("correct_answer","?")
         q_o  = qs[i] if i<len(qs) else {}
-        q_t  = q_o.get("question",q_o.get("text",f"{i+1}-savol"))
-        expl = q_o.get("explanation","")
+        q_t  = d.get("question") or q_o.get("question",q_o.get("text",f"{i+1}-savol"))
+        expl = d.get("explanation") or q_o.get("explanation","")
         pts  = d.get("earned_points",0)
         mp   = d.get("max_points",1)
         text += f"{'✅' if is_c else '❌'} <b>Savol {i+1}</b> [{pts}/{mp}]\n"

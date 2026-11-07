@@ -734,9 +734,10 @@ async def adm_test_detail(callback: CallbackQuery):
         )
         # Web tahrirlash tugmasi
         from handlers.webauth import WEBAPP_URL
+        from aiogram.types import WebAppInfo as _WAI
         b.row(InlineKeyboardButton(
             text="🌐 Tahrirlash (web)",
-            url=f"{WEBAPP_URL}/edit.html?id={tid}"
+            web_app=_WAI(url=f"{WEBAPP_URL}/edit.html?id={tid}")      # Mini App ichida ochiladi
         ))
         b.row(InlineKeyboardButton(text="📢 Testni e'lon qilish", callback_data=f"test_announce_{tid}"))
         b.row(InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"del_test_{tid}"))
@@ -2571,3 +2572,115 @@ async def import_json_file(message: Message, state: FSMContext):
         f"➡️ Keyingi JSON faylni yuboring, yoki /done"
     )
 
+
+
+# ══ "KIM YECHGAN" snapshotlarini qayta qurish (Statistika kanali) ═════════════
+@router.message(Command("rebuild_solvers"))
+async def cmd_rebuild_solvers(message: Message):
+    """Admin: barcha testlarning "kim yechgan" JSON snapshotini xom yozuvlardan (user_stats + results)
+    qayta quradi va test META sini (solve_count, avg_score) yangilaydi. Birinchi o'rnatishda va
+    ma'lumot nomuvofiq bo'lib qolganda ishlatiladi."""
+    if not is_admin(message.from_user.id):
+        return
+    from utils import solvers_store, stats_store
+    if not solvers_store.active():
+        return await message.answer(
+            "⚠️ Statistika kanali sozlanmagan yoki Supabase tayyor emas.\n"
+            "Secret'ga <code>STATISTIKA_ID</code> qo'shing va botni kanalda admin qiling.")
+    wait = await message.answer("⏳ Snapshotlar qurilmoqda...")
+    try:
+        n = await solvers_store.rebuild_all(message.bot)
+        mins = max(1, round(n * stats_store._SPACING / 60))
+        await wait.edit_text(
+            f"✅ <b>{n}</b> ta test uchun snapshot navbatga qo'yildi.\n"
+            f"Kanalga yozish taxminan <b>{mins} daqiqa</b> oladi (Telegram tezlik chegarasi).\n"
+            f"Test META (yechilgan soni, o'rtacha foiz) ham shu paytda yangilanadi.")
+    except Exception as e:
+        await wait.edit_text(f"❌ Xato: <code>{str(e)[:300]}</code>")
+
+
+# ══ TESTLAR ARXIVI (Testlar kanali) ═══════════════════════════════════════════
+@router.message(Command("archive_status"))
+async def cmd_archive_status(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    from utils import test_archive
+    if not test_archive.enabled():
+        return await message.answer(
+            "⚠️ Testlar kanali sozlanmagan.\nSecret'ga <code>TESTLAR_ID</code> qo'shing va botni kanalda admin qiling.")
+    st = await test_archive.status()
+    await message.answer(
+        f"🗄 <b>Testlar arxivi</b>\n\n"
+        f"📚 Jami testlar: <b>{st['tests']}</b>\n"
+        f"📨 Kanalda nusxasi bor: <b>{st['mirrored']}</b>\n"
+        f"❄️ Sovutilgan (Supabase'dan olingan): <b>{st['archived']}</b> (~{st['archived_mb']} MB)\n"
+        f"⏳ {st['days']} kundan beri ochilmagan (sovutishga tayyor): <b>{st['stale_candidates']}</b>\n\n"
+        f"<i>/archive_tests — barcha testlarni kanalga yozish\n"
+        f"/archive_sweep [kun] — sovutishni hozir ishga tushirish\n"
+        f"/restore_test KOD — testni kanaldan qaytarish</i>")
+
+
+@router.message(Command("archive_tests"))
+async def cmd_archive_tests(message: Message):
+    """Admin: mavjud BARCHA testlarni Testlar kanaliga yozadi (birinchi o'rnatishda)."""
+    if not is_admin(message.from_user.id):
+        return
+    from utils import test_archive, stats_store
+    if not test_archive.enabled():
+        return await message.answer("⚠️ Testlar kanali sozlanmagan (<code>TESTLAR_ID</code>).")
+    wait = await message.answer("⏳ Testlar tekshirilmoqda...")
+    try:
+        r = await test_archive.scan_mirror(message.bot, limit=100000)
+        mins = max(1, round(r["queued"] * stats_store._SPACING / 60))
+        await wait.edit_text(
+            f"✅ Jami <b>{r['total']}</b> test, kanalga yozilishi kerak: <b>{r['need']}</b>.\n"
+            f"Navbatga qo'yildi: <b>{r['queued']}</b> (taxminan {mins} daqiqa, Telegram tezlik chegarasi).\n"
+            f"Holatni /archive_status bilan kuzating.")
+    except Exception as e:
+        await wait.edit_text(f"❌ Xato: <code>{str(e)[:300]}</code>")
+
+
+@router.message(Command("archive_sweep"))
+async def cmd_archive_sweep(message: Message):
+    """Admin: /archive_sweep [kun] — N kundan beri ochilmagan testlarni Supabase'dan sovutadi."""
+    if not is_admin(message.from_user.id):
+        return
+    from utils import test_archive
+    if not test_archive.enabled():
+        return await message.answer("⚠️ Testlar kanali sozlanmagan (<code>TESTLAR_ID</code>).")
+    parts = (message.text or "").split()
+    days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+    dry = len(parts) > 2 and parts[2].lower() == "dry"
+    wait = await message.answer("⏳ Sovutish tekshirilmoqda...")
+    try:
+        r = await test_archive.sweep(message.bot, days=days, dry=dry)
+        if r.get("error"):
+            return await wait.edit_text(f"⚠️ {r['error']}")
+        head = ("🔎 <b>Sinov (hech narsa o'zgarmadi)</b>" if dry else "✅ <b>Sovutish tugadi</b>")
+        done_lbl = "Sovutiladi" if dry else "Sovutildi"
+        done_n = (r["candidates"] - r["remirror"]) if dry else r["archived"]
+        await wait.edit_text(
+            f"{head} — {r['days']} kun\n\n"
+            f"Nomzodlar: <b>{r['candidates']}</b>\n"
+            f"{done_lbl}: <b>{done_n}</b>\n"
+            f"Avval kanal nusxasi yangilanadi: <b>{r['remirror']}</b>\n"
+            f"O'tkazib yuborildi (fayl mos emas/xato): <b>{r['skipped']}</b>\n"
+            f"Bo'shagan joy: ~<b>{round(r['freed_bytes']/1e6, 2)} MB</b>")
+    except Exception as e:
+        await wait.edit_text(f"❌ Xato: <code>{str(e)[:300]}</code>")
+
+
+@router.message(Command("restore_test"))
+async def cmd_restore_test(message: Message):
+    """Admin: /restore_test KOD — sovutilgan testni kanaldan Supabase'ga qaytaradi."""
+    if not is_admin(message.from_user.id):
+        return
+    from utils import test_archive
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        return await message.answer("Foydalanish: <code>/restore_test TEST_KODI</code>")
+    t = await test_archive.restore(parts[1].strip())
+    if t:
+        await message.answer(f"✅ <b>{t.get('title', parts[1])}</b> tiklandi ({len(t.get('questions', []))} savol).")
+    else:
+        await message.answer("❌ Tiklab bo'lmadi (indeksda fayl yo'q yoki kanal xato). Loglarni tekshiring.")

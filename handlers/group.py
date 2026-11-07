@@ -151,6 +151,18 @@ async def _warn_busy(bot, chat_id: int, callback: CallbackQuery = None):
 _join_dm_ts: Dict[int, float] = {}
 
 
+def cleanup_group_caches() -> int:
+    """Throttle lug'atlari (uid / chat bo'yicha) — 1 soatdan eskilari o'chiriladi."""
+    import time
+    now = time.time()
+    n = 0
+    for d in (_join_dm_ts, _busy_warn_ts):
+        for k in [k for k, ts in d.items() if now - ts > 3600]:
+            d.pop(k, None)
+            n += 1
+    return n
+
+
 POPUP_TEXT = ("🔒 Avval majburiy obunaga a'zo bo'ling!\n"
               "Botga o'tib /start bosing — havolalar yuboriladi.")
 

@@ -792,8 +792,18 @@ async def _finish_poll(bot, cid, state, d):
         "partial":       d.get("is_partial", False),
     })
     tid = test.get("test_id", "")
+
+    # Xatolar ustida ishlash (qayta yechish): natija test statistikasiga YOZILMAYDI
+    if test.get("is_retry") and not is_demo:
+        return await _finish_retry(bot, cid, state, test, qs, scored, uid, _protect)
+
+    from utils import stats_store
+    if not is_demo:
+        stats_store.attach_question_text(qs, scored)       # tahlilda to'g'ri savol matni chiqishi uchun
     rid = await save_result(uid, tid, scored, via_link=via_link)
     await state.clear()
+    if not is_demo:
+        await stats_store.on_test_finished(bot, uid, test, qs, scored, rid)   # tahlil + xatolar → Statistika kanali (navbat)
 
     daily   = get_daily()
     pct     = scored.get("percentage", 0)
@@ -829,9 +839,34 @@ async def _finish_poll(bot, cid, state, d):
         await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"), protect_content=_protect)
         return
 
-    await bot.send_message(cid, result_text, reply_markup=result_kb(tid, rid, include_home=False), protect_content=_protect)
+    _wrong = bool(stats_store.wrong_indexes(scored)) and stats_store.enabled()
+    await bot.send_message(cid, result_text, reply_markup=result_kb(tid, rid, include_home=False, wrong=_wrong), protect_content=_protect)
     # Test tugagach ReplyKeyboard yana doimiy asosiy menyuga qaytadi.
     await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"), protect_content=_protect)
+
+
+async def _finish_retry(bot, cid, state, test, qs, scored, uid, protect):
+    """Xatolarni qayta yechish tugadi: to'g'ri topilganlar ro'yxatdan chiqadi, qolganlari yangilanadi."""
+    from utils import stats_store
+    await state.clear()
+    det = {int(r["question_index"]): r for r in scored.get("detailed_results", [])}
+    remaining = [qs[i] for i in range(len(qs)) if not det.get(i, {}).get("is_correct")]
+    orig  = test.get("orig_test_id", "")
+    title = str(test.get("title", "")).replace("❌ Xatolar: ", "", 1)
+    await stats_store.on_retry_finished(bot, uid, orig, title, int(test.get("total", len(qs))),
+                                        int(test.get("poll_time", 30) or 30), remaining)
+    fixed = len(qs) - len(remaining)
+    text = (f"❌➡️✅ <b>Xatolar ustida ishlash</b>\n📝 {title}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ To'g'ri topildi: <b>{fixed}/{len(qs)}</b>\n")
+    b = InlineKeyboardBuilder()
+    if remaining:
+        text += f"❌ Hali xato/belgilanmagan: <b>{len(remaining)}</b> ta (saqlandi)\n"
+        b.row(InlineKeyboardButton(text="🔁 Qolgan xatolarni yechish", callback_data=f"wr_go_{orig}"))
+    else:
+        text += "\n🎉 <b>Hammasi to'g'ri!</b> Xatolar ro'yxati tozalandi."
+    await bot.send_message(cid, text, reply_markup=b.as_markup() if remaining else None, protect_content=protect)
+    await bot.send_message(cid, "🏠 <b>Asosiy menyu</b> 👇", reply_markup=main_kb(uid, "private"), protect_content=protect)
 
 
 # ── ReplyKeyboard tugmalari (pastdagi tugmalar) ───────────────

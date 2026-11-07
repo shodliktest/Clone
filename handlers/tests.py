@@ -1331,6 +1331,9 @@ async def _finish_inline(bot, cid, state, d):
     })
     tid = test.get("test_id", "")
 
+    from utils import stats_store
+    if not is_demo:
+        stats_store.attach_question_text(qs, scored)       # tahlilda to'g'ri savol matni
     try:
         rid = await save_result(uid, tid, scored, via_link=via_link)
     except Exception as e:
@@ -1338,6 +1341,8 @@ async def _finish_inline(bot, cid, state, d):
         rid = f"{uid}_{tid}"
 
     await state.clear()
+    if not is_demo:
+        await stats_store.on_test_finished(bot, uid, test, qs, scored, rid)   # tahlil + xatolar → Statistika kanali
 
     try:
         result_text = format_result(scored, test)
@@ -1350,7 +1355,8 @@ async def _finish_inline(bot, cid, state, d):
         result_text = "⚠️ <b>Test yarim qoldirildi</b>\n\n" + result_text
 
     try:
-        kb = result_kb(tid, rid, include_home=False)
+        kb = result_kb(tid, rid, include_home=False,
+                       wrong=bool(stats_store.wrong_indexes(scored)) and stats_store.enabled())
     except Exception as e:
         log.error(f"_finish_inline result_kb xato: {e}")
         kb = None
