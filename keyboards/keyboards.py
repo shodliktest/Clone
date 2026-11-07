@@ -169,11 +169,13 @@ def test_created_kb(tid, bot_username=""):
     return b.as_markup()
 
 
-def result_kb(tid, rid, include_home=True):
+def result_kb(tid, rid, include_home=True, wrong=False):
     from handlers.webauth import WEBAPP_URL as _WU
     _web = f"{_WU}/web_test.html?id={tid}"
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="🔍 Batafsil tahlil", callback_data=f"analysis_{rid}_0"))
+    if wrong:
+        b.row(InlineKeyboardButton(text="❌ Xatolarni qayta yechish", callback_data=f"wr_go_{tid}"))
     b.row(
         InlineKeyboardButton(text="🌐 Web test",  web_app=WebAppInfo(url=_web)),
         InlineKeyboardButton(text="📊 Quiz Poll", callback_data=f"start_poll_{tid}"),
@@ -376,7 +378,7 @@ def mytest_settings_kb(tid, is_paused=False, is_admin=False):
     b.row(InlineKeyboardButton(text="👁 Ko'rish",          callback_data=f"mytest_view_{tid}"))
     b.row(InlineKeyboardButton(
         text="🌐 Tahrirlash (web)",
-        url=edit_url
+        web_app=WebAppInfo(url=edit_url)          # alohida oyna emas — Mini App ichida ochiladi
     ))
     b.row(
         InlineKeyboardButton(
