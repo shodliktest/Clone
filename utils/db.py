@@ -405,6 +405,8 @@ async def register_participant_now(user_id, test_id, test=None):
     except Exception as e:
         log.error(f"register_participant_now({user_id},{test_id}): {e}")
         tg_db.mark_stats_dirty()
+    from utils import solvers_store
+    await solvers_store.record(user_id, test_id)     # "Kim yechgan" snapshoti (Statistika kanali)
 
 
 async def save_result(user_id, test_id, result, via_link=False):
@@ -463,14 +465,18 @@ async def save_result(user_id, test_id, result, via_link=False):
         # RAM'da baribir bor, keyingi flush urinib ko'radi
         tg_db.mark_stats_dirty()
 
+    from utils import solvers_store
     try:
-        if meta:
+        # Snapshot rejimida META (solve_count, avg_score) bot VA web natijalaridan birga hisoblanib,
+        # snapshot yangilanganda yoziladi — bot RAM dagi eskirgan sanoq webdagisini bosib ketmasin.
+        if meta and not solvers_store.active():
             await tg_db.write_test_stats_now(
                 test_id, meta.get("solve_count", 0), meta.get("avg_score", 0)
             )
     except Exception as e:
         log.error(f"save_result: test stats darhol yozishda xato: {e}")
         tg_db.mark_stats_dirty()
+    await solvers_store.record(user_id, test_id)     # "Kim yechgan" snapshoti (Statistika kanali)
 
     try:
         u = ram.get_user(user_id)
@@ -505,9 +511,58 @@ def get_test_solvers(test_id):
     return ram.get_all_solvers_for_test(test_id)
 
 
+async def _merge_live(test_id, result, users):
+    """Webda boshlangan, lekin tugatilmagan urinishlar (live_sessions) ro'yxatga qo'shiladi."""
+    from utils import supabase_client as sb
+    # Webda boshlangan, lekin tugatilmagan urinishlar (live_sessions) — ro'yxatda ko'rinsin.
+    # Bu urinish hisoblanmaydi (attempts=0): tugatganda alohida natija yoziladi, ikki marta sanalmaydi.
+    try:
+        live = await sb.select("live_sessions",
+                               columns="user_id,user_name,user_username,last_seen",
+                               filters={"test_id": str(test_id)})
+        have = {r["uid"] for r in result}
+        for l in live or []:
+            uid_str = str(l.get("user_id"))
+            if uid_str in have:
+                continue
+            user = users.get(uid_str, {})
+            result.append({
+                "uid":            uid_str,
+                "name":           user.get("name") or l.get("user_name") or f"User {uid_str}",
+                "username":       user.get("username") or l.get("user_username") or "",
+                "attempts":       0,
+                "all_pcts":       [],
+                "best_score":     0.0,
+                "avg_score":      0.0,
+                "last_at":        str(l.get("last_seen") or "")[:16].replace("T", " "),
+                "passed":         False,
+                "ever_passed":    False,
+                "ever_completed": False,
+                "started":        True,
+            })
+            have.add(uid_str)
+    except Exception as e:
+        log.debug(f"get_test_solvers_full live_sessions: {e}")
+
+
 async def get_test_solvers_full(test_id):
     """
-    Test yechgan BARCHA userlarni Supabase'dan (user_stats jadvali)
+    "Kim yechgan" ro'yxati. Asosiy manba — Statistika kanalidagi snapshot JSON (bot + web natijalari,
+    Supabase'da faqat indeks). Snapshot hali yo'q yoki kanal sozlanmagan bo'lsa — eski usul (user_stats).
+    Webda boshlangan, tugatilmagan urinishlar har ikki holatda ham qo'shiladi.
+    """
+    from utils import solvers_store
+    result = await solvers_store.get_solvers(str(test_id))
+    if result is None:
+        return await _get_test_solvers_legacy(test_id)
+    await _merge_live(test_id, result, ram.get_users())
+    result.sort(key=lambda x: (x["attempts"] > 0, x["best_score"]), reverse=True)
+    return result
+
+
+async def _get_test_solvers_legacy(test_id):
+    """
+    [ZAXIRA usul] Test yechgan BARCHA userlarni Supabase'dan (user_stats jadvali)
     to'g'ridan-to'g'ri o'qiydi. Bot qancha marta o'chib-yonmasin, RAM
     TTL tugagan bo'lsin — bu funksiya har doim TO'LIQ va TO'G'RI
     natija beradi, chunki manba RAM emas, doimiy ma'lumotlar bazasi.
@@ -554,6 +609,7 @@ async def get_test_solvers_full(test_id):
             "ever_completed": entry.get("ever_completed", True),
             "started":        entry["attempts"] > 0,
         })
+    await _merge_live(test_id, result, users)
     result.sort(key=lambda x: (x["attempts"] > 0, x["best_score"]), reverse=True)
     return result
 

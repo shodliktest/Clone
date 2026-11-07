@@ -258,13 +258,16 @@ async def get_test_full(tid: str) -> dict:
     """
     from utils import ram_cache as ram
 
+    from utils import test_archive
     if tid in _tests_cache:
         ram.touch_test_access(tid)
+        test_archive.touch(tid)
         return _tests_cache[tid]
 
     cached = ram.get_cached_questions(tid)
     if cached:
         _tests_cache[tid] = cached
+        test_archive.touch(tid)
         return cached
 
     if not ready():
@@ -285,9 +288,37 @@ async def get_test_full(tid: str) -> dict:
     full["title"]     = row.get("title", full.get("title", ""))
     full["questions"] = row.get("questions") or []
 
+    # Sovutilgan test (14 kun murojaat bo'lmagan): savollar Supabase'dan olingan — kanaldan tiklaymiz
+    if not full["questions"] and int(row.get("question_count") or 0) > 0:
+        restored = await test_archive.restore(tid)
+        if restored and restored.get("questions"):
+            full = dict(restored)
+            full["test_id"] = tid
+        else:
+            log.error(f"get_test_full({tid}): test sovutilgan, lekin kanaldan tiklab bo'lmadi")
+            return full
+
+    test_archive.touch(tid)
     _tests_cache[tid] = full
     ram.cache_questions(tid, full)
     return full
+
+
+def prune_tests_cache(max_items: int = 300) -> int:
+    """
+    `_tests_cache` ni tozalaydi: ram_cache dagi savollar keshi (48 soat TTL) allaqachon o'chirilgan
+    yozuvlar (yetimlar) olib tashlanadi, va jami yozuvlar `max_items` dan oshmaydi.
+    """
+    from utils import ram_cache as ram
+    n = 0
+    for tid in [t for t in list(_tests_cache) if ram.get_cached_questions(t) is None]:
+        _tests_cache.pop(tid, None)
+        n += 1
+    if len(_tests_cache) > max_items:
+        for tid in list(_tests_cache)[:len(_tests_cache) - max_items]:   # eng eskilari (qo'shilish tartibi)
+            _tests_cache.pop(tid, None)
+            n += 1
+    return n
 
 
 async def get_tests():
@@ -334,6 +365,11 @@ async def save_test_full(test: dict) -> bool:
         ram.cache_questions(tid, test)
 
         log.info(f"save_test_full: {tid} saqlandi ({qc} savol)")
+        try:
+            from utils import test_archive
+            await test_archive.on_saved(test)       # Testlar kanaliga JSON nusxa (navbat orqali)
+        except Exception as _ae:
+            log.debug(f"test_archive.on_saved: {_ae}")
         return True
     except Exception as e:
         log.error(f"save_test_full({tid}): {e}")
@@ -1198,11 +1234,14 @@ async def get_web_live_sessions() -> list:
         except Exception:
             continue
         elapsed_sec = int((now - last_seen).total_seconds())
-        # 10 daqiqadan ortiq "ping" bo'lmasa — brauzer yopilgan/uzilgan deb hisoblaymiz
+        # 10 daqiqadan ortiq "ping" bo'lmasa — brauzer yopilgan/uzilgan: jonli monitorda ko'rsatilmaydi.
+        # Lekin qator O'CHIRILMAYDI: u "yarim qolgan urinish" yozuvi ("Kim yechgan" da ko'rinadi).
+        # Faqat 30 kundan eskilari tozalanadi (har user+test uchun bitta qator, hajmi kichik).
         if elapsed_sec > 600:
-            sid = r.get("session_id")
-            if sid:
-                stale.append(sid)
+            if elapsed_sec > 30 * 86400:
+                sid = r.get("session_id")
+                if sid:
+                    stale.append(sid)
             continue
         try:
             started = datetime.fromisoformat(str(r.get("started_at")).replace("Z", "+00:00"))

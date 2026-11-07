@@ -282,37 +282,25 @@ _chan_err_ts: dict = {}           # kanal -> oxirgi xato log vaqti (spam bo'lmas
 _pending_start: dict = {}         # uid -> "/start ..." parametri (obunadan keyin qaytarish)
 
 
-_pub: dict = {}                    # uid -> (ok, vaqt)  (web uchun holat e'loni)
-
-
 def publish_status(uid: int, ok: bool):
-    """
-    Foydalanuvchining obuna holatini Supabase `force_join_status` jadvaliga yozadi (fonda,
-    o'zgarganda yoki 20 daqiqada bir). Web sahifa shu jadvalni o'qib, obunasizni to'xtatadi
-    (qarang: WEB_FORCE_JOIN.md).
-    """
-    now = _time.time()
-    last = _pub.get(uid)
-    if last and last[0] == ok and now - last[1] < 1200:
-        return
-    _pub[uid] = (ok, now)
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
+    """Eskirgan: web majburiy obunani serverda o'zi tekshiradi (api/proxy.js → getChatMember)."""
+    return
 
-    async def _go():
-        try:
-            from utils import tg_db, supabase_client as sb
-            if tg_db.ready():
-                from datetime import datetime, timezone
-                await sb.upsert("force_join_status",
-                                {"user_id": int(uid), "ok": bool(ok),
-                                 "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
-                                on_conflict="user_id")
-        except Exception as e:
-            log.debug("force_join_status yozilmadi: %s", e)
-    loop.create_task(_go())
+
+def cleanup() -> int:
+    """A'zolik keshi va vaqtinchalik belgilar: muddati o'tganlari o'chiriladi."""
+    now = _time.time()
+    n = 0
+    for k in [k for k, (ts, _) in _member_cache.items() if now - ts > 600]:
+        _member_cache.pop(k, None)
+        n += 1
+    for k in [k for k, ts in _chan_err_ts.items() if now - ts > 3600]:
+        _chan_err_ts.pop(k, None)
+        n += 1
+    if len(_pending_start) > 1000:
+        _pending_start.clear()
+        n += 1
+    return n
 
 
 def invalidate_member_cache(uid: int = None):
