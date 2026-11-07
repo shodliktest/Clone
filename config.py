@@ -34,10 +34,10 @@ GITHUB_PAGES_URL: str = _s("GITHUB_PAGES_URL", "https://shodliktest.github.io/Te
 # Test Baza Guruhi — har yangi test shu guruhga e'lon qilinadi
 BAZA_GROUP_ID: int = int(_s("BAZA_GROUP_ID", "0"))
 
-# ── Xato javoblar kanali (User_false_id) ─────────────────────────
-# Bot har bir foydalanuvchining har bir testi bo'yicha XATO savollarini shu kanalga
-# JSON fayl qilib tashlaydi; qaysi xabar qaysi userga tegishli ekani Supabase'dagi
-# `user_wrong_answers` jadvalida turadi. Bot kanalda ADMIN bo'lishi shart.
+# ── Statistika kanali (xatolar va batafsil tahlil JSON fayllari) ─────────────
+# Bot test tugagach shu kanalga JSON yozadi; Supabase'da faqat indeks qatorlari turadi.
+# Bot kanalda ADMIN bo'lishi shart (xabar yuborish va tahrirlash huquqi bilan).
+# Secret nomi: STATISTIKA_ID  (kanal ID si, masalan -1001234567890)
 def _int_secret(*keys, default=0):
     for k in keys:
         try:
@@ -48,8 +48,18 @@ def _int_secret(*keys, default=0):
             continue
     return default
 
-USER_FALSE_ID: int = _int_secret("USER_FALSE_ID", "User_false_id", "USER_FALSE_CHANNEL_ID")
-WRONG_KEEP_PER_USER: int = _int_secret("WRONG_KEEP_PER_USER", default=20)   # har user uchun nechta test xatosi saqlanadi
+STATS_CHANNEL_ID: int = _int_secret("STATISTIKA_ID", "STATISTIKA_CHANNEL_ID", "STATS_CHANNEL_ID",
+                                    "USER_FALSE_ID", "User_false_id", "USER_FALSE_CHANNEL_ID")
+USER_FALSE_ID: int = STATS_CHANNEL_ID          # eski nom (moslik uchun)
+
+# ── Testlar kanali (test JSON arxivi) ────────────────────────────────────────
+# Har test (meta + savollar) shu kanalga JSON qilib yoziladi. ARCHIVE_AFTER_DAYS kun hech kim
+# ochmagan test Supabase'dan "sovutiladi" (savollari olinadi, meta va indeks qoladi) va
+# qayta murojaatda shu kanaldan tiklanadi. Bot kanalda ADMIN bo'lishi shart.
+# Secret nomi: TESTLAR_ID  (kanal ID si, masalan -1001234567890)
+TESTS_CHANNEL_ID: int = _int_secret("TESTLAR_ID", "TESTS_CHANNEL_ID", "TESTLAR_CHANNEL_ID")
+ARCHIVE_AFTER_DAYS: int = _int_secret("ARCHIVE_AFTER_DAYS", default=14)
+MAX_ANALYSIS_PER_USER_TG: int = _int_secret("MAX_ANALYSIS_PER_USER", default=30)
 
 PASSING_SCORE = 60
 MAX_FILE_MB   = 20

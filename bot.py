@@ -303,6 +303,7 @@ async def main():
     from handlers.poll_router import router as r_poll_router
     from handlers.group       import router as r_group
     from handlers.poll_test   import router as r_poll
+    from handlers.wrong_retry import router as r_wrong
     from handlers.start       import router as r_start
     from handlers.tests       import router as r_tests
     from handlers.create_test  import router as r_create
@@ -321,6 +322,12 @@ async def main():
     bot = SecureBot(token=BOT_TOKEN,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=False))
     dp  = Dispatcher(storage=MemoryStorage())
+    # Statistika kanali navbati va "kim yechgan" snapshotlari uchun bot ni ro'yxatdan o'tkazamiz
+    from utils import stats_store as _stats_store, solvers_store as _solvers_store
+    _stats_store.set_bot(bot)
+    _solvers_store.start_background(bot)
+    from utils import test_archive as _test_archive
+    _test_archive.start_background(bot)
     dp.message.middleware(ForceJoinMiddleware())
     dp.callback_query.middleware(ForceJoinMiddleware())
     dp.inline_query.middleware(ForceJoinMiddleware())
@@ -337,6 +344,7 @@ async def main():
     dp.include_router(r_poll_router)
     dp.include_router(r_group)
     dp.include_router(r_poll)
+    dp.include_router(r_wrong)
     dp.include_router(r_start)
     dp.include_router(r_tests)
     dp.include_router(r_create)
@@ -529,6 +537,26 @@ async def _cache_cleanup_loop():
             if sts:
                 log.info(f"🧹 Stats: {sts} ta user stats RAMdan o'chirildi")
 
+            # ── Yangi keshlar (xatolar/tahlil, "kim yechgan", arxiv, majburiy obuna, guruh) ──
+            try:
+                from utils import stats_store, solvers_store, test_archive, force_join
+                from handlers import group as _group_mod
+                extra = (stats_store.cleanup() + solvers_store.cleanup() + test_archive.cleanup()
+                         + force_join.cleanup() + _group_mod.cleanup_group_caches()
+                         + tg_db.prune_tests_cache())
+                if extra:
+                    log.info(f"🧹 Qo'shimcha keshlar: {extra} ta yozuv o'chirildi")
+                try:
+                    import resource
+                    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                    log.info(f"📊 RAM: testlar keshi={len(tg_db._tests_cache)}, "
+                             f"tahlil/xato keshi={len(stats_store._cache_ana)}/{len(stats_store._cache_wrong)}, "
+                             f"snapshot keshi={len(solvers_store._cache)}, eng yuqori RSS≈{rss_mb:.0f} MB")
+                except Exception:
+                    pass
+            except Exception as _ce:
+                log.warning(f"Qo'shimcha kesh tozalash: {_ce}")
+
             # ── Eskirgan vaqtinchalik fayllar (fingerprint uchun saqlangan,
             #    lekin foydalanuvchi hech qanday tugma bosmagan bo'lishi mumkin) ──
             try:
@@ -620,6 +648,7 @@ async def _main_no_signals():
     from handlers.poll_router import router as r_poll_router
     from handlers.group       import router as r_group
     from handlers.poll_test   import router as r_poll
+    from handlers.wrong_retry import router as r_wrong
     from handlers.start       import router as r_start
     from handlers.tests       import router as r_tests
     from handlers.create_test import router as r_create
@@ -638,6 +667,12 @@ async def _main_no_signals():
     bot = SecureBot(token=BOT_TOKEN,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=False))
     dp  = Dispatcher(storage=MemoryStorage())
+    # Statistika kanali navbati va "kim yechgan" snapshotlari uchun bot ni ro'yxatdan o'tkazamiz
+    from utils import stats_store as _stats_store, solvers_store as _solvers_store
+    _stats_store.set_bot(bot)
+    _solvers_store.start_background(bot)
+    from utils import test_archive as _test_archive
+    _test_archive.start_background(bot)
     # ── Barcha middlewarelar (main() bilan bir xil) ──
     dp.message.middleware(ForceJoinMiddleware())
     dp.callback_query.middleware(ForceJoinMiddleware())
@@ -655,6 +690,7 @@ async def _main_no_signals():
     dp.include_router(r_poll_router)
     dp.include_router(r_group)
     dp.include_router(r_poll)
+    dp.include_router(r_wrong)
     dp.include_router(r_start)
     dp.include_router(r_tests)
     dp.include_router(r_create)
