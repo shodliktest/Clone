@@ -46,6 +46,8 @@ BOT_COMMANDS = [
     ("reindex",         "Test indekslarini qayta qurish",                    "admin"),
     ("rescan",          "Testlarni qayta skanerlash",                        "admin"),
     ("photo_upload",    "Test savollariga rasm yuklash",                     "admin"),
+    ("delete",          "Testlarni kodi bo'yicha o'chirish: /delete KOD, KOD, ...", "admin"),
+    ("setowner",        "Testga egani belgilash: /setowner KOD TG_ID",       "admin"),
     ("restore_test",    "Sovutilgan (arxivlangan) testni kanaldan tiklash",  "admin"),
     ("archive_status",  "Testlar arxivi holati",                             "admin"),
     ("archive_tests",   "Barcha testlarni Testlar kanaliga yozish",          "admin"),
@@ -2875,3 +2877,88 @@ async def adm_arch_rebuild(callback: CallbackQuery):
     from utils import solvers_store
     n = await solvers_store.rebuild_all(callback.bot)
     await callback.answer(f"Kim yechgan: {n} ta test navbatda", show_alert=True)
+
+
+# ══ ADMIN: /delete KOD, KOD, ...  va  /setowner KOD TG_ID ═══════════════════════
+import re as _re
+
+@router.message(Command("delete"))
+async def cmd_delete_tests(message: Message):
+    """Admin: bir yoki bir nechta testni kodi bo'yicha o'chiradi.
+    Misol: /delete 3D46D269, A1B2C3D4 , FF00AA11
+    Har bir test bazadan, RAMdan va Testlar/Statistika holat indeksidan o'chiriladi.
+    Oldin nusxasi 'backups' jadvaliga (TG backup) saqlanadi."""
+    if not is_admin(message.from_user.id):
+        return
+    raw = (message.text or "").split(maxsplit=1)
+    if len(raw) < 2 or not raw[1].strip():
+        return await message.answer(
+            "🗑 <b>Testlarni o'chirish</b>\n\n"
+            "Foydalanish: <code>/delete KOD</code>\n"
+            "Bir nechta: <code>/delete KOD1, KOD2, KOD3</code>\n\n"
+            "Test kodini Mening testlarim / test kartasidan ko'rasiz.\n"
+            "<i>Eslatma: o'chirilgan test qaytmaydi (nusxasi backups da qoladi).</i>")
+    codes = []
+    for c in _re.split(r"[,\s;]+", raw[1].strip()):
+        c = _re.sub(r"[^A-Za-z0-9_\-]", "", c).upper()      # faqat harf/raqam (HTML belgilari tashlanadi)
+        if c and c not in codes:
+            codes.append(c)
+    if len(codes) > 30:
+        return await message.answer("⚠️ Bir martada ko'pi bilan 30 ta kod. Qolganini keyinroq yuboring.")
+
+    from utils import ram_cache as ram, supabase_client as sb, tg_db
+    from utils.db import delete_test
+    ok, missing, failed = [], [], []
+    for tid in codes:
+        try:
+            meta = ram.get_test_meta_any(tid)
+            if not meta and tg_db.ready():
+                row = await sb.select_one("tests", "test_id", tid)
+                if row:
+                    meta = {"title": row.get("title", tid)}
+            if not meta:
+                missing.append(tid)
+                continue
+            title = meta.get("title", tid)
+            await delete_test(tid)
+            # Qo'shimcha indekslar ham tozalanadi (test qayta tiklanib qolmasligi uchun)
+            for tbl in ("test_archive_index", "test_solvers_index"):
+                try:
+                    await sb.delete_where(tbl, {"test_id": tid})
+                except Exception as e:
+                    log.debug("delete %s(%s): %s", tbl, tid, e)
+            ok.append(f"{title} [{tid}]")
+        except Exception as e:
+            log.error("/delete %s: %s", tid, e)
+            failed.append(f"{tid} ({str(e)[:60]})")
+
+    lines = [f"🗑 <b>O'chirish natijasi</b> — {len(codes)} ta kod", "━━━━━━━━━━━━━━━━━━━━━━━━"]
+    if ok:
+        lines.append(f"✅ O'chirildi ({len(ok)}):\n" + "\n".join("• " + x for x in ok))
+    if missing:
+        lines.append(f"❓ Topilmadi ({len(missing)}): " + ", ".join(missing))
+    if failed:
+        lines.append(f"❌ Xato ({len(failed)}):\n" + "\n".join("• " + x for x in failed))
+    await message.answer("\n\n".join(lines))
+
+
+@router.message(Command("setowner"))
+async def cmd_setowner(message: Message):
+    """Admin: testga egani belgilash. Egasiz (creator 0) eski testlarni tuzatish uchun.
+    Misol: /setowner 3D46D269 123456789"""
+    if not is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 3 or not parts[2].isdigit():
+        return await message.answer(
+            "Foydalanish: <code>/setowner TEST_KODI TELEGRAM_ID</code>\n"
+            "Misol: <code>/setowner 3D46D269 123456789</code>")
+    tid, owner = parts[1].strip().upper(), int(parts[2])
+    from utils import ram_cache as ram, tg_db
+    meta = ram.get_test_meta_any(tid)
+    if not meta:
+        return await message.answer(f"❓ Test topilmadi: <code>{tid}</code>")
+    await tg_db.update_test_meta_tg(tid, {"creator_id": owner})
+    await message.answer(
+        f"✅ <b>{meta.get('title', tid)}</b> [{tid}] egasi endi: <code>{owner}</code>\n"
+        f"Endi shu foydalanuvchi testni web'da tahrirlab, o'chira oladi.")

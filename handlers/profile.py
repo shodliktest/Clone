@@ -415,15 +415,17 @@ async def _show_mycat_tests(msg, uid, cat_name, page=0, edit=False):
 @router.callback_query(F.data.startswith("mytest_settings_"))
 async def mytest_settings_cb(callback: CallbackQuery):
     await callback.answer()
+    from utils.db import is_test_owner
     tid  = callback.data[16:]
     uid  = callback.from_user.id
     meta = get_test_meta_any(tid)
     if not meta:
         return await callback.answer("❌ Test topilmadi.", show_alert=True)
     from config import ADMIN_IDS
-    if uid != meta.get("creator_id") and uid not in ADMIN_IDS:
+    if not is_test_owner(uid, meta) and uid not in ADMIN_IDS:
         return await callback.answer("⚠️ Ruxsat yo'q!", show_alert=True)
     await _show_test_settings(callback.message, meta, tid, edit=True, viewer_uid=uid)
+
 
 async def _show_test_settings(msg, meta, tid, edit=False, viewer_uid=None):
     from config import ADMIN_IDS as _AIDS
@@ -1274,9 +1276,9 @@ async def del_mytest_confirm(callback: CallbackQuery):
     tid  = callback.data[11:]
     uid  = callback.from_user.id
     from utils import ram_cache as ram
+    from utils.db import is_test_owner
     meta = ram.get_test_meta_any(tid)
     if not meta:
-        # TG kanaldan yuklab ko'rish
         try:
             from utils import tg_db
             full = await tg_db.get_test_full(tid)
@@ -1289,9 +1291,10 @@ async def del_mytest_confirm(callback: CallbackQuery):
         return await callback.answer("❌ Test topilmadi. Sahifani yangilang.", show_alert=True)
     from config import ADMIN_IDS
     is_admin = uid in ADMIN_IDS
-    is_owner = uid == meta.get("creator_id")
+    is_owner = is_test_owner(uid, meta)
     if not is_admin and not is_owner:
         return await callback.answer("⚠️ Faqat test egasi o'chira oladi!", show_alert=True)
+    await callback.answer()
     b = InlineKeyboardBuilder()
     b.row(
         InlineKeyboardButton(text="✅ Ha, o'chirish", callback_data=f"del_mytest_ok_{tid}"),
@@ -1319,8 +1322,8 @@ async def del_mytest_exec(callback: CallbackQuery):
     tid  = callback.data[14:]
     uid  = callback.from_user.id
     from utils import ram_cache as ram
+    from utils.db import is_test_owner
     meta = ram.get_test_meta_any(tid)
-    # Meta yo'q bo'lsa TG dan yuklab ko'rish
     if not meta:
         try:
             from utils import tg_db
@@ -1332,28 +1335,38 @@ async def del_mytest_exec(callback: CallbackQuery):
             pass
     from config import ADMIN_IDS
     is_admin = uid in ADMIN_IDS
-    is_owner = uid == (meta or {}).get("creator_id")
+    is_owner = is_test_owner(uid, meta)
     if not is_admin and not is_owner:
-        return
-    if is_admin:
-        from utils.db import delete_test
-        await delete_test(tid)
-        result_text = (
-            f"✅ <b>{meta.get('title','?')}</b> butunlay o'chirildi.\n"
-            f"🗑 Bazadan, RAMdan, TG dan tozalandi."
-        )
-    else:
-        from utils.db import creator_delete_test
-        await creator_delete_test(tid)
-        result_text = (
-            f"✅ <b>{meta.get('title','?')}</b> sizning ro'yxatingizdan yashirildi.\n"
-            f"ℹ️ Admin ko'rishda qoladi."
-        )
+        return await callback.answer("⚠️ Faqat test egasi o'chira oladi!", show_alert=True)
+    title = (meta or {}).get("title", "?")
+    try:
+        if is_admin:
+            from utils.db import delete_test
+            await delete_test(tid)
+            done = not ram.get_test_meta_any(tid)            # haqiqatan RAM dan yo'qoldimi
+            result_text = (
+                f"✅ <b>{title}</b> butunlay o'chirildi.\n🗑 Bazadan, RAMdan, TG dan tozalandi."
+                if done else
+                f"❌ <b>{title}</b> to'liq o'chirilmadi. Qayta urinib ko'ring yoki /delete {tid}")
+        else:
+            from utils.db import creator_delete_test
+            await creator_delete_test(tid)
+            hidden = bool((ram.get_test_meta_any(tid) or {}).get("is_deleted"))
+            result_text = (
+                f"✅ <b>{title}</b> sizning ro'yxatingizdan yashirildi.\nℹ️ Admin ko'rishda qoladi."
+                if hidden else
+                f"❌ <b>{title}</b> o'chirilmadi (saqlashda xato). Qayta urinib ko'ring.")
+    except Exception as e:
+        log.error("del_mytest_exec(%s): %s", tid, e)
+        result_text = f"❌ O'chirishda xato: <code>{str(e)[:150]}</code>\nQayta urinib ko'ring."
     try:
         await callback.message.edit_text(result_text)
-    except: pass
+    except Exception:
+        try:
+            await callback.message.answer(result_text)
+        except Exception:
+            pass
     await _show_mytest_cats(callback.message, uid)
-
 
 # ── Kim yechgan ━━━━━━━━━━━━━━━━━━━━━━━━
 @router.callback_query(F.data.startswith("test_solvers_"))
