@@ -46,7 +46,7 @@ BOT_COMMANDS = [
     ("reindex",         "Test indekslarini qayta qurish",                    "admin"),
     ("rescan",          "Testlarni qayta skanerlash",                        "admin"),
     ("photo_upload",    "Test savollariga rasm yuklash",                     "admin"),
-    ("delete",          "Testlarni kodi bo'yicha o'chirish: /delete KOD, KOD, ...", "admin"),
+    ("delete",          "O'z testingizni kodi bo'yicha o'chirish (admin — hammasini)", "user"),
     ("setowner",        "Testga egani belgilash: /setowner KOD TG_ID",       "admin"),
     ("restore_test",    "Sovutilgan (arxivlangan) testni kanaldan tiklash",  "admin"),
     ("archive_status",  "Testlar arxivi holati",                             "admin"),
@@ -2882,64 +2882,128 @@ async def adm_arch_rebuild(callback: CallbackQuery):
 # ══ ADMIN: /delete KOD, KOD, ...  va  /setowner KOD TG_ID ═══════════════════════
 import re as _re
 
+def classify_delete(uid, is_admin, meta):
+    """/delete uchun qaror: 'admin' (to'liq o'chirish), 'owner' (o'z testi — yashirish),
+    'hidden' (allaqachon yashirilgan), 'missing' (topilmadi), 'denied' (boshqaning testi)."""
+    if not meta:
+        return "missing"
+    if is_admin:
+        return "admin"
+    from utils.db import is_test_owner
+    if not is_test_owner(uid, meta):
+        return "denied"
+    if meta.get("is_deleted"):
+        return "hidden"
+    return "owner"
+
+
+def delete_guide_text(name: str, denied_codes: list) -> str:
+    """Boshqa foydalanuvchi testini o'chirmoqchi bo'lganda chiqadigan ogohlantirish va yo'riqnoma."""
+    import html as _html
+    nm = _html.escape(name or "foydalanuvchi")
+    codes = ", ".join(f"<code>{c}</code>" for c in denied_codes)
+    return (
+        f"⚠️ <b>Hurmatli {nm}</b>, quyidagi test(lar) sizning emas, shuning uchun o'chirilmadi:\n"
+        f"{codes}\n\n"
+        f"Siz faqat <b>o'zingiz yaratgan</b> testlarni o'chira olasiz.\n\n"
+        f"📌 <b>Yo'riqnoma:</b>\n"
+        f"1. Asosiy menyuda «🗂 Mening testlarim» ni oching.\n"
+        f"2. O'chirmoqchi bo'lgan testingizni tanlang.\n"
+        f"3. «⚙️ Sozlamalar» → «🗑 Testni o'chirish» → «✅ Ha, o'chirish».\n\n"
+        f"Yoki buyruq bilan: <code>/delete KOD</code> (faqat o'zingizning test kodingiz).\n"
+        f"Boshqa test bo'yicha muammo bo'lsa, admin bilan bog'laning."
+    )
+
+
 @router.message(Command("delete"))
 async def cmd_delete_tests(message: Message):
-    """Admin: bir yoki bir nechta testni kodi bo'yicha o'chiradi.
-    Misol: /delete 3D46D269, A1B2C3D4 , FF00AA11
-    Har bir test bazadan, RAMdan va Testlar/Statistika holat indeksidan o'chiriladi.
-    Oldin nusxasi 'backups' jadvaliga (TG backup) saqlanadi."""
-    if not is_admin(message.from_user.id):
+    """/delete KOD[, KOD ...]
+    • Admin: istalgan testni to'liq o'chiradi (bazadan, RAMdan, indekslardan; nusxa backups da).
+    • Oddiy foydalanuvchi: faqat O'Z testini yashiradi (admin ko'rishda qoladi).
+      Boshqaning testi uchun ogohlantirish, ismi bilan murojaat va yo'riqnoma chiqadi."""
+    if message.chat.type != "private":
         return
+    uid = message.from_user.id
+    adm = is_admin(uid)
     raw = (message.text or "").split(maxsplit=1)
     if len(raw) < 2 or not raw[1].strip():
-        return await message.answer(
-            "🗑 <b>Testlarni o'chirish</b>\n\n"
-            "Foydalanish: <code>/delete KOD</code>\n"
-            "Bir nechta: <code>/delete KOD1, KOD2, KOD3</code>\n\n"
-            "Test kodini Mening testlarim / test kartasidan ko'rasiz.\n"
-            "<i>Eslatma: o'chirilgan test qaytmaydi (nusxasi backups da qoladi).</i>")
+        guide = ("🗑 <b>Testni o'chirish</b>\n\n"
+                 "Foydalanish: <code>/delete KOD</code>\n"
+                 "Bir nechta: <code>/delete KOD1, KOD2, KOD3</code>\n\n"
+                 "Test kodini «🗂 Mening testlarim» → test → «⚙️ Sozlamalar»da ko'rasiz.\n")
+        if adm:
+            guide += "<i>Admin: o'chirilgan test qaytmaydi (nusxasi backups da qoladi).</i>"
+        else:
+            guide += "<i>Faqat o'zingizning testlaringiz o'chiriladi.</i>"
+        return await message.answer(guide)
+
     codes = []
     for c in _re.split(r"[,\s;]+", raw[1].strip()):
-        c = _re.sub(r"[^A-Za-z0-9_\-]", "", c).upper()      # faqat harf/raqam (HTML belgilari tashlanadi)
+        c = _re.sub(r"[^A-Za-z0-9_\-]", "", c).upper()
         if c and c not in codes:
             codes.append(c)
     if len(codes) > 30:
         return await message.answer("⚠️ Bir martada ko'pi bilan 30 ta kod. Qolganini keyinroq yuboring.")
 
     from utils import ram_cache as ram, supabase_client as sb, tg_db
-    from utils.db import delete_test
-    ok, missing, failed = [], [], []
+    from utils.db import delete_test, creator_delete_test
+    done_full, done_hidden, missing, failed, denied, hidden = [], [], [], [], [], []
     for tid in codes:
         try:
             meta = ram.get_test_meta_any(tid)
             if not meta and tg_db.ready():
                 row = await sb.select_one("tests", "test_id", tid)
                 if row:
-                    meta = {"title": row.get("title", tid)}
-            if not meta:
+                    meta = dict(row.get("meta") or {})
+                    meta.setdefault("title", row.get("title", tid))
+                    meta.setdefault("is_deleted", False)
+            decision = classify_delete(uid, adm, meta)
+            title = (meta or {}).get("title", tid)
+            if decision == "missing":
                 missing.append(tid)
-                continue
-            title = meta.get("title", tid)
-            await delete_test(tid)
-            # Qo'shimcha indekslar ham tozalanadi (test qayta tiklanib qolmasligi uchun)
-            for tbl in ("test_archive_index", "test_solvers_index"):
-                try:
-                    await sb.delete_where(tbl, {"test_id": tid})
-                except Exception as e:
-                    log.debug("delete %s(%s): %s", tbl, tid, e)
-            ok.append(f"{title} [{tid}]")
+            elif decision == "denied":
+                denied.append(tid)
+            elif decision == "hidden":
+                hidden.append(f"{title} [{tid}]")
+            elif decision == "admin":
+                await delete_test(tid)
+                for tbl in ("test_archive_index", "test_solvers_index"):
+                    try:
+                        await sb.delete_where(tbl, {"test_id": tid})
+                    except Exception as e:
+                        log.debug("delete %s(%s): %s", tbl, tid, e)
+                if ram.get_test_meta_any(tid):
+                    failed.append(f"{tid} (RAMdan o'chmadi)")
+                else:
+                    done_full.append(f"{title} [{tid}]")
+            elif decision == "owner":
+                await creator_delete_test(tid)
+                if (ram.get_test_meta_any(tid) or {}).get("is_deleted"):
+                    done_hidden.append(f"{title} [{tid}]")
+                else:
+                    failed.append(f"{tid} (saqlashda xato)")
         except Exception as e:
-            log.error("/delete %s: %s", tid, e)
+            log.error("/delete %s uid=%s: %s", tid, uid, e)
             failed.append(f"{tid} ({str(e)[:60]})")
 
-    lines = [f"🗑 <b>O'chirish natijasi</b> — {len(codes)} ta kod", "━━━━━━━━━━━━━━━━━━━━━━━━"]
-    if ok:
-        lines.append(f"✅ O'chirildi ({len(ok)}):\n" + "\n".join("• " + x for x in ok))
+    lines = []
+    if done_full:
+        lines.append(f"🗑 <b>To'liq o'chirildi ({len(done_full)}):</b>\n" + "\n".join("• " + x for x in done_full))
+    if done_hidden:
+        lines.append(f"✅ <b>Ro'yxatingizdan yashirildi ({len(done_hidden)}):</b>\n"
+                     + "\n".join("• " + x for x in done_hidden)
+                     + ("\n<i>Admin ko'rishda qoladi.</i>" if not adm else ""))
+    if hidden:
+        lines.append("ℹ️ Allaqachon yashirilgan:\n" + "\n".join("• " + x for x in hidden))
     if missing:
-        lines.append(f"❓ Topilmadi ({len(missing)}): " + ", ".join(missing))
+        lines.append(f"❓ Topilmadi: " + ", ".join(f"<code>{x}</code>" for x in missing))
     if failed:
         lines.append(f"❌ Xato ({len(failed)}):\n" + "\n".join("• " + x for x in failed))
-    await message.answer("\n\n".join(lines))
+    if lines:
+        await message.answer("━━━━━━━━━━━━━━━━━━━━━━━━\n" + "\n\n".join(lines))
+    if denied:
+        name = message.from_user.full_name or message.from_user.first_name or ""
+        await message.answer(delete_guide_text(name, denied))
 
 
 @router.message(Command("setowner"))
