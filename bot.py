@@ -326,6 +326,11 @@ async def main():
     from utils import stats_store as _stats_store, solvers_store as _solvers_store
     _stats_store.set_bot(bot)
     _solvers_store.start_background(bot)
+    try:
+        from handlers.admin import sync_bot_commands
+        await sync_bot_commands(bot)
+    except Exception as _sce:
+        log.warning(f"buyruq menyusi: {_sce}")
     from utils import test_archive as _test_archive
     _test_archive.start_background(bot)
     dp.message.middleware(ForceJoinMiddleware())
@@ -671,6 +676,11 @@ async def _main_no_signals():
     from utils import stats_store as _stats_store, solvers_store as _solvers_store
     _stats_store.set_bot(bot)
     _solvers_store.start_background(bot)
+    try:
+        from handlers.admin import sync_bot_commands
+        await sync_bot_commands(bot)
+    except Exception as _sce:
+        log.warning(f"buyruq menyusi: {_sce}")
     from utils import test_archive as _test_archive
     _test_archive.start_background(bot)
     # ── Barcha middlewarelar (main() bilan bir xil) ──
