@@ -127,7 +127,9 @@ async def get_test_full(tid):
     return meta if meta else {}
 
 def get_all_tests():
-    return [t for t in ram.get_tests_meta() if t.get("is_active", True)]
+    # is_deleted (yaratuvchi yoki web o'chirgan) testlar hech qaerda ko'rinmasin
+    return [t for t in ram.get_tests_meta()
+            if t.get("is_active", True) and not t.get("is_deleted", False)]
 
 def get_public_tests():
     return [t for t in get_all_tests() if t.get("visibility") == "public"]
@@ -135,8 +137,17 @@ def get_public_tests():
 def get_link_tests():
     return [t for t in get_all_tests() if t.get("visibility") == "link"]
 
+def is_test_owner(uid, meta) -> bool:
+    """Egasini tur-xavfsiz solishtiradi (creator_id int, str yoki 0 bo'lishi mumkin)."""
+    try:
+        c = (meta or {}).get("creator_id")
+        return bool(c) and str(int(c)) == str(int(uid))
+    except (TypeError, ValueError):
+        return False
+
+
 def get_my_tests(creator_id):
-    return [t for t in get_all_tests() if t.get("creator_id") == creator_id]
+    return [t for t in get_all_tests() if is_test_owner(creator_id, t)]
 
 async def create_test(creator_id, data, creator_name="", creator_username=""):
     tid  = str(uuid.uuid4())[:8].upper()

@@ -31,6 +31,7 @@ MAX_FILE_BYTES = 19 * 1024 * 1024   # Telegram yuklab olish chegarasi (20 MB) da
 _touch_ts: dict = {}
 _restoring: dict = {}           # tid -> asyncio.Future (bir vaqtda ikki marta tiklamaslik)
 _bg_task = None
+_flags_task = None
 
 
 def _now() -> datetime:
@@ -325,9 +326,47 @@ async def _loop(bot):
 
 
 def start_background(bot):
-    global _bg_task
+    global _bg_task, _flags_task
     try:
+        loop = asyncio.get_running_loop()
         if _bg_task is None or _bg_task.done():
-            _bg_task = asyncio.get_running_loop().create_task(_loop(bot))
+            _bg_task = loop.create_task(_loop(bot))
+        if _flags_task is None or _flags_task.done():
+            _flags_task = loop.create_task(_flags_loop())
     except RuntimeError:
         pass
+
+
+# ── O'CHIRISH BELGISINI SINXRONLASH (web'dan o'chirilgan testlar botda tezda yo'qolsin) ──
+FLAGS_EVERY = 120          # soniya
+
+async def sync_deleted_flags() -> int:
+    """Supabase'dagi meta.is_deleted / is_active ni RAM ga o'tkazadi (faqat belgilar, savollar emas).
+    Web'da egasi o'chirgan test 2 daqiqa ichida botda ham yashiriladi. → o'zgargan testlar soni."""
+    from utils import supabase_client as sb, ram_cache as ram
+    rows = await sb.select("tests", columns="test_id,meta,is_active")
+    changed = 0
+    for r in rows or []:
+        tid = r.get("test_id")
+        meta = r.get("meta") or {}
+        cur = ram.get_test_meta_any(tid) or {}
+        want_deleted = bool(meta.get("is_deleted", False))
+        want_active = bool(r.get("is_active", True))
+        if cur and (bool(cur.get("is_deleted", False)) != want_deleted
+                    or bool(cur.get("is_active", True)) != want_active):
+            ram.update_test_meta(tid, {"is_deleted": want_deleted, "is_active": want_active})
+            changed += 1
+    return changed
+
+
+async def _flags_loop():
+    await asyncio.sleep(90)
+    while True:
+        try:
+            if enabled():
+                n = await sync_deleted_flags()
+                if n:
+                    log.info("test_archive: %d ta test belgisi yangilandi (web)", n)
+        except Exception as e:
+            log.debug("test_archive flags: %s", e)
+        await asyncio.sleep(FLAGS_EVERY)
