@@ -22,6 +22,61 @@ UTC    = timezone.utc
 
 def is_admin(uid): return uid in ADMIN_IDS
 
+# ══ BUYRUQLAR (bitta manba: menyu, admin panel va /help shu ro'yxatdan) ══════════════
+# (buyruq, tavsif, guruh) — guruh: user | admin | group | system
+BOT_COMMANDS = [
+    ("start",           "Botni ishga tushirish, asosiy menyu",              "user"),
+    ("help",            "Foydalanish yo'riqnomasi",                          "user"),
+    ("commands",        "Barcha buyruqlar ro'yxati",                         "user"),
+    ("id",              "Sizning Telegram ID raqamingiz",                    "user"),
+    ("webapp",          "Veb-saytni ochish",                                 "user"),
+    ("balance",         "Tanga balansingiz",                                 "user"),
+    ("coins",           "Tangalar va ularni ishlatish",                      "user"),
+    ("referral",        "Referal havolangiz va bonuslar",                    "user"),
+    ("xatolar",         "Oxirgi testdagi xato savollarni qayta yechish",     "user"),
+    ("admin",           "Admin panelni ochish",                              "admin"),
+    ("users",           "Foydalanuvchilar ro'yxati",                         "admin"),
+    ("user",            "Bitta foydalanuvchi haqida ma'lumot (ID bilan)",    "admin"),
+    ("setrole",         "Foydalanuvchiga rol berish (ID, rol)",              "admin"),
+    ("settings",        "Bot sozlamalari",                                   "admin"),
+    ("resetall",        "Barcha foydalanuvchi statistikasini tozalash (xavfli)", "admin"),
+    ("import_json",     "JSON fayldan test import qilish",                   "admin"),
+    ("done",            "JSON import jarayonini yakunlash",                  "admin"),
+    ("cancel",          "Joriy amalni bekor qilish",                         "admin"),
+    ("reindex",         "Test indekslarini qayta qurish",                    "admin"),
+    ("rescan",          "Testlarni qayta skanerlash",                        "admin"),
+    ("photo_upload",    "Test savollariga rasm yuklash",                     "admin"),
+    ("restore_test",    "Sovutilgan (arxivlangan) testni kanaldan tiklash",  "admin"),
+    ("archive_status",  "Testlar arxivi holati",                             "admin"),
+    ("archive_tests",   "Barcha testlarni Testlar kanaliga yozish",          "admin"),
+    ("archive_sweep",   "14 kun ochilmagan testlarni sovutish ([kun] [dry])", "admin"),
+    ("rebuild_solvers", "\"Kim yechgan\" snapshotlarini qayta qurish",       "admin"),
+    ("quiz_start",      "Guruhda test boshlash (KOD)",                       "group"),
+    ("quiz_start_poll", "Guruhda Quiz Poll rejimida boshlash",               "group"),
+    ("quiz_start_inline","Eski buyruq — Poll rejimiga yo'naltiriladi",       "group"),
+    ("quiz_stop",       "Guruhdagi faol testni to'xtatish (boshlovchi/admin)", "group"),
+    ("set_tests",       "Guruh jadvali: testlar ro'yxatini belgilash",        "group"),
+    ("start_set",       "Guruh jadvali: testlarni boshlash",                  "group"),
+    ("stop_set",        "Guruh jadvali: testlarni to'xtatish",                "group"),
+    ("start_create",    "Guruh jadvali: yangi jadval yaratish",               "group"),
+]
+GROUP_LABELS = {"user": "👤 Foydalanuvchi", "admin": "👑 Admin", "group": "👥 Guruh", "system": "⚙️ Tizim"}
+
+
+def commands_text(group: str = None) -> str:
+    rows = [c for c in BOT_COMMANDS if group is None or c[2] == group]
+    out = ["📋 <b>BOT BUYRUQLARI</b>", "━━━━━━━━━━━━━━━━━━━━━━━━"]
+    for g in ("user", "group", "admin"):
+        items = [c for c in rows if c[2] == g]
+        if not items:
+            continue
+        out.append(f"\n<b>{GROUP_LABELS[g]}</b>")
+        for cmd, desc, _ in items:
+            out.append(f"/{cmd} — {desc}")
+    out.append(f"\nJami: <b>{len(rows)}</b> ta buyruq")
+    return "\n".join(out)
+
+
 # test_id -> broadcast job. RAM-only control state; recipient list is snapshotted
 # at start so users added during a broadcast are handled on the next announcement.
 _test_broadcast_jobs: dict[str, dict] = {}
@@ -2684,3 +2739,139 @@ async def cmd_restore_test(message: Message):
         await message.answer(f"✅ <b>{t.get('title', parts[1])}</b> tiklandi ({len(t.get('questions', []))} savol).")
     else:
         await message.answer("❌ Tiklab bo'lmadi (indeksda fayl yo'q yoki kanal xato). Loglarni tekshiring.")
+
+
+# ══ ADMIN: BUYRUQLAR va ARXIV bo'limlari ═══════════════════════════════════════
+@router.callback_query(F.data == "adm_commands")
+async def adm_commands(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫", show_alert=True)
+    await callback.answer()
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="👑 Admin", callback_data="adm_cmd_admin"),
+        InlineKeyboardButton(text="👤 Foydalanuvchi", callback_data="adm_cmd_user"),
+    )
+    b.row(
+        InlineKeyboardButton(text="👥 Guruh", callback_data="adm_cmd_group"),
+        InlineKeyboardButton(text="📜 Hammasi", callback_data="adm_cmd_all"),
+    )
+    b.row(InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_panel"))
+    await callback.message.edit_text(
+        commands_text(None).split("\n\n<b>")[0] + "\n\nGuruh bo'yicha ko'rish uchun tanlang:",
+        reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data.startswith("adm_cmd_"))
+async def adm_commands_group(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫", show_alert=True)
+    await callback.answer()
+    key = callback.data[len("adm_cmd_"):]
+    grp = None if key == "all" else key
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="⬅️ Buyruqlar", callback_data="adm_commands"))
+    b.row(InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_panel"))
+    await callback.message.edit_text(commands_text(grp), reply_markup=b.as_markup())
+
+
+@router.message(Command("commands"))
+async def cmd_commands(message: Message):
+    """Barcha buyruqlar ro'yxati (foydalanuvchiga — faqat o'z darajasidagilar, admin — hammasi)."""
+    if message.chat.type != "private":
+        return
+    if is_admin(message.from_user.id):
+        return await message.answer(commands_text(None))
+    await message.answer(commands_text("user"))
+
+
+async def sync_bot_commands(bot):
+    """Telegram'dagi "/" menyusini yangilaydi: oddiy foydalanuvchilarga — user, adminlarga — hammasi."""
+    from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
+    user_cmds = [BotCommand(command=c, description=d[:250]) for c, d, g in BOT_COMMANDS if g == "user"]
+    try:
+        await bot.set_my_commands(user_cmds, scope=BotCommandScopeDefault())
+        for aid in ADMIN_IDS:
+            admin_cmds = [BotCommand(command=c, description=d[:250]) for c, d, g in BOT_COMMANDS if g in ("user", "admin")]
+            try:
+                await bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=aid))
+            except Exception as e:
+                log.debug("admin menyusi %s: %s", aid, e)
+        log.info("Bot buyruq menyusi yangilandi (%d foydalanuvchi, %d admin)", len(user_cmds), len(ADMIN_IDS))
+    except Exception as e:
+        log.warning("set_my_commands: %s", e)
+
+
+@router.callback_query(F.data == "adm_archive")
+async def adm_archive(callback: CallbackQuery):
+    """Arxiv va "kim yechgan" holati + tezkor amallar."""
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫", show_alert=True)
+    await callback.answer()
+    from utils import test_archive, solvers_store
+    try:
+        st = await test_archive.status()
+        arch_txt = (f"📚 Testlar: <b>{st['tests']}</b> · kanalda nusxa: <b>{st['mirrored']}</b>\n"
+                    f"❄️ Sovutilgan: <b>{st['archived']}</b> (~{st['archived_mb']} MB)\n"
+                    f"⏳ {st['days']} kun ochilmagan: <b>{st['stale_candidates']}</b>\n"
+                    f"📡 Testlar kanali: {'✅ ulangan' if st['channel'] else '❌ sozlanmagan'}")
+    except Exception as e:
+        arch_txt = f"⚠️ Arxiv holati o'qilmadi: {str(e)[:120]}"
+    snap = "✅ faol" if solvers_store.active() else "❌ o'chiq (STATISTIKA_ID yo'q)"
+    text = (f"🗄 <b>ARXIV va KIM YECHGAN</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{arch_txt}\n\n👥 Kim yechgan snapshoti: {snap}")
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="🔎 Sinov (dry)", callback_data="adm_arch_dry"),
+        InlineKeyboardButton(text="❄️ Sovutish", callback_data="adm_arch_sweep"),
+    )
+    b.row(
+        InlineKeyboardButton(text="📤 Testlarni yozish", callback_data="adm_arch_mirror"),
+        InlineKeyboardButton(text="🔁 Kim yechganni qurish", callback_data="adm_arch_rebuild"),
+    )
+    b.row(InlineKeyboardButton(text="⬅️ Admin panel", callback_data="admin_panel"))
+    try:
+        await callback.message.edit_text(text, reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        await callback.message.answer(text, reply_markup=b.as_markup())
+
+
+@router.callback_query(F.data == "adm_arch_dry")
+async def adm_arch_dry(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫", show_alert=True)
+    from utils import test_archive
+    r = await test_archive.sweep(callback.bot, dry=True)
+    await callback.answer(
+        f"Sinov: {r.get('candidates', 0)} ta nomzod, {r.get('remirror', 0)} ta avval yangilanadi",
+        show_alert=True)
+
+
+@router.callback_query(F.data == "adm_arch_sweep")
+async def adm_arch_sweep(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫", show_alert=True)
+    from utils import test_archive
+    await callback.answer("Sovutish boshlandi")
+    r = await test_archive.sweep(callback.bot)
+    await callback.message.answer(
+        f"❄️ Sovutish: nomzod {r.get('candidates', 0)}, sovutildi {r.get('archived', 0)}, "
+        f"o'tkazildi {r.get('skipped', 0)}")
+
+
+@router.callback_query(F.data == "adm_arch_mirror")
+async def adm_arch_mirror(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫", show_alert=True)
+    from utils import test_archive
+    r = await test_archive.scan_mirror(callback.bot, limit=100000)
+    await callback.answer(f"Navbatga qo'yildi: {r.get('queued', 0)}", show_alert=True)
+
+
+@router.callback_query(F.data == "adm_arch_rebuild")
+async def adm_arch_rebuild(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫", show_alert=True)
+    from utils import solvers_store
+    n = await solvers_store.rebuild_all(callback.bot)
+    await callback.answer(f"Kim yechgan: {n} ta test navbatda", show_alert=True)
