@@ -312,6 +312,10 @@ def admin_kb():
         InlineKeyboardButton(text="🧹 Tahlil/Tarix tozalash", callback_data="purge_user_stats"),
     )
     b.row(
+        InlineKeyboardButton(text="📋 Buyruqlar", callback_data="adm_commands"),
+        InlineKeyboardButton(text="🗄 Arxiv / Kim yechgan", callback_data="adm_archive"),
+    )
+    b.row(
         InlineKeyboardButton(text="🏠 Menyu", callback_data="main_menu"),
     )
     return b.as_markup()
