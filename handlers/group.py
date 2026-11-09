@@ -55,13 +55,19 @@ def _shuffle_options(qs):
             corr_text = strip_lbl(corr_val)
         else:
             corr_text = None
+        _cidx = q.get("correct_index")
+        if isinstance(_cidx, int) and 0 <= _cidx < len(pure):
+            corr_text = pure[_cidx]
         random.shuffle(pure)
         q["options"] = [f"{LABELS[i]}) {t}" for i, t in enumerate(pure)]
         if corr_text is not None:
             new_idx = next((i for i,t in enumerate(pure) if t == corr_text), 0)
             q["correct"] = f"{LABELS[new_idx]}) {corr_text}"
+            q["correct_index"] = new_idx
 
 
+
+from utils.quiz_model import strip_label as _strip_label_fn
 
 router = Router()
 
@@ -374,21 +380,16 @@ async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int
         opts    = q.get("options",[])
         if qtype == "true_false":
             opts = ["Ha","Yo'q"]
-        clean_opts = []
-        for opt in opts:
-            ot = str(opt).split(")",1)[-1].strip() if ")" in str(opt) else str(opt)
-            clean_opts.append(ot[:100])
+        from utils.quiz_model import poll_payload
+        if qtype == "true_false":
+            clean_opts = ["Ha","Yo'q"]
+            ci = 0 if "ha" in str(q.get("correct","")).lower() else 1
+        else:
+            _texts, _ci = poll_payload(q)
+            clean_opts = [t[:100] for t in _texts]
+            ci = _ci if _ci is not None else 0
         if not clean_opts:
             continue
-
-        corr = q.get("correct","")
-        if qtype == "true_false":
-            ci = 0 if "ha" in str(corr).lower() else 1
-        elif isinstance(corr, int):
-            ci = corr
-        else:
-            m  = re.match(r"^([A-Za-z])", str(corr).strip())
-            ci = (ord(m.group(1).upper()) - ord("A")) if m else 0
         ci = max(0, min(ci, len(clean_opts)-1))
 
         expl = q.get("explanation") or None
@@ -683,7 +684,7 @@ async def _run_inline_session(
             labels = ["🅐","🅑","🅒","🅓","🅔","🅕"]
             btns   = []
             for j, opt in enumerate(opts[:6]):
-                opt_clean = str(opt).split(")",1)[-1].strip() if ")" in str(opt) else str(opt)
+                opt_clean = _strip_label_fn(opt)
                 btns.append([InlineKeyboardButton(
                     text=f"{labels[j]}  {opt_clean[:40]}",
                     callback_data=f"gi_ans:{chat_id}:{i}:{j}"
@@ -804,7 +805,7 @@ async def _reveal_inline_answer(
         bar   = "🟩" * bar_n + "⬜" * (10 - bar_n)
         lbl   = labels[j] if j < len(labels) else str(j+1)
         mark  = "✅ " if j == ci else "    "
-        opt_clean = str(opt).split(")",1)[-1].strip() if ")" in str(opt) else str(opt)
+        opt_clean = _strip_label_fn(opt)
         opt_lines.append(
             f"{mark}{lbl}  {opt_clean}\n"
             f"        {bar}  {pct}%  ({cnt} kishi)"
@@ -908,7 +909,7 @@ async def handle_inline_answer(callback: CallbackQuery):
         await callback.answer("✅ To'g'ri! Ajoyib!", show_alert=False)
     else:
         corr_opt = opts[ci] if 0 <= ci < len(opts) else "?"
-        corr_clean = str(corr_opt).split(")",1)[-1].strip() if ")" in str(corr_opt) else str(corr_opt)
+        corr_clean = _strip_label_fn(corr_opt)
         await callback.answer(
             f"❌ Noto'g'ri!\n✅ To'g'ri javob: {corr_clean}",
             show_alert=True

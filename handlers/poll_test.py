@@ -345,6 +345,9 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
             pure[corr] if isinstance(corr, int) and 0 <= corr < len(pure)
             else _strip(corr) if isinstance(corr, str) else None
         )
+        _cidx = q.get("correct_index")
+        if isinstance(_cidx, int) and 0 <= _cidx < len(pure):
+            corr_text = pure[_cidx]
         random.shuffle(pure)
         # Telegram poll max 10 variant qabul qiladi
         # LABELS 8 ta — 8 dan ortiq bo'lsa kesib olamiz
@@ -355,6 +358,7 @@ async def _begin_poll(bot, state, uid, chat_id, tid, via_link=False, test=None, 
             ni = next((i for i, t in enumerate(pure) if t == corr_text), None)
             if ni is not None:
                 q["correct"] = f"{LABELS[ni]}) {corr_text}"
+                q["correct_index"] = ni
 
     qs = [q for q in all_qs if q.get("type", "multiple_choice") in POLL_TYPES]
     skipped = len(all_qs) - len(qs)
@@ -493,21 +497,16 @@ async def _send_poll(bot, cid, state):
     live_update(d.get("uid", cid), idx)
 
 
-    opts = []
-    for opt in q.get("options", []):
-        ot = str(opt).split(")", 1)[-1].strip() if ")" in str(opt) else str(opt)
-        opts.append(ot)
-    if q.get("type") == "true_false" or not opts:
-        opts = ["Ha", "Yo'q"]
-
-    corr = q.get("correct","")
+    from utils.quiz_model import poll_payload
     if q.get("type") == "true_false":
-        ci = 0 if "ha" in str(corr).lower() else 1
-    elif isinstance(corr, int):
-        ci = corr
+        opts = ["Ha", "Yo'q"]
+        ci = 0 if "ha" in str(q.get("correct", "")).lower() else 1
     else:
-        m  = re.match(r"^([A-Za-z])", str(corr).strip())
-        ci = (ord(m.group(1).upper()) - ord("A")) if m else 0
+        opts, ci = poll_payload(q)
+        if not opts:
+            opts = ["Ha", "Yo'q"]
+        if ci is None:
+            ci = 0                                  # xato log qilingan (poll_payload); bu holat kam uchraydi
     ci = max(0, min(ci, len(opts) - 1))
 
     expl = q.get("explanation","") or None

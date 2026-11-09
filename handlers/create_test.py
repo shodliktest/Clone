@@ -419,6 +419,8 @@ async def finish_text(callback: CallbackQuery, state: FSMContext):
             tmp.write(full_text)
             tmp_path = tmp.name
         questions = parse_file(tmp_path)
+        from utils.parser import pdf_image_summary as _pdf_img_summary
+        _pdf_img_txt = _pdf_img_summary()
         os.remove(tmp_path)
 
         if not questions:
@@ -771,6 +773,8 @@ async def upload_file(message: Message, state: FSMContext):
         )
 
         questions = parse_file(tmp_path)
+        from utils.parser import pdf_image_summary as _pdf_img_summary
+        _pdf_img_txt = _pdf_img_summary()
         # Rasmli savollar uchun tmp_path ni state da saqlaymiz
         has_img_qs = any(q.get("_has_image") for q in questions)
         if has_img_qs:
@@ -791,96 +795,36 @@ async def upload_file(message: Message, state: FSMContext):
                 reply_markup=_format_error_keyboard()
             )
 
-        total    = len(questions)
-        unmarked = sum(1 for q in questions if not q.get("_marked"))
-
-        # Rasmli savollar bo'lsa — rasmlarni TG kanalga yuklab file_id olamiz
-        img_count = sum(1 for q in questions if q.get("_img_bytes"))
-        # Faylda umuman rasm bormi (parse qilolmagan bo'lsa ham)
-        img_in_file = 0
-        try:
-            if os.path.exists(tmp_path):
-                _ii = check_images_in_file(tmp_path)
-                img_in_file = _ii.get("count", 0)
-        except Exception:
-            img_in_file = img_count
-
-        img_upload_summary = ""
-        if img_count > 0:
-            await status.edit_text(
-                f"🖼 <b>{img_count} ta rasm test bilan ulanmoqda...</b>\n"
-                f"<i>Iltimos kuting</i>",
-                parse_mode="HTML"
-            )
-            questions, up_ok, up_fail, up_total = await _upload_images_to_channel(message.bot, questions)
-            if up_fail > 0:
-                img_upload_summary = (
-                    f"🖼 Rasmlar: <b>{up_ok}/{up_total}</b> muvaffaqiyatli, "
-                    f"<b>{up_fail}</b> ta xato bo'ldi\n"
-                )
-        elif img_in_file > 0:
-            log.info(f"Faylda {img_in_file} rasm bor, savolga bog'lanmadi")
-
-        await state.update_data(questions=questions, _file_id=doc.file_id)
-        await state.set_state(CreateTest.upload_file)  # state saqlanadi
-
-        if unmarked > 0:
-            b = InlineKeyboardBuilder()
-            b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
-            b.button(text="🤖 AI bilan yechish",   callback_data="uj_ai")
-            b.button(text="📨 Adminga murojaat",   callback_data="uj_admin")
-            b.button(text="▶️ Shundayicha davom",  callback_data="uj_skip")
-            b.adjust(1)
-            img_line = ""
-            if img_count > 0:
-                img_line = f"🖼 Rasmli: <b>{img_count}</b> ta (test bilan ulandi)\n"
-            elif img_in_file > 0:
-                img_line = f"⚠️ Faylda {img_in_file} rasm bor, lekin bog\'lanmadi\n"
-            await status.edit_text(
-                f"📋 <b>{total} TA SAVOL TOPILDI</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
-                f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n"
-                + img_line + img_upload_summary +
-                f"\n<i>To\'g\'ri javob aniqlanmagan. Nima qilamiz?</i>",
-                parse_mode="HTML",
-                reply_markup=b.as_markup()
-            )
-        else:
-            if img_upload_summary:
-                await status.edit_text(img_upload_summary, parse_mode="HTML")
-            await _ask_poll_time(status, state, total)
+        return await _present_questions(message.bot, status, state, questions, tmp_path, doc.file_name, (doc.file_id if doc else ''))
 
     except Exception as e:
         log.error(f"upload_file xato: {e}", exc_info=True)
         await status.edit_text("❌ Faylni o\'qishda xatolik. Boshqa fayl yoki formatni sinab ko\'ring.")
 
 
-async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, file_id: str = ""):
-    """
-    tmp_path'dagi faylni parse qilib, natijani (savollar soni,
-    belgilanmagan savollar, rasm) ko'rsatadi. upload_file (bitta fayl)
-    va _run_next_queued_file (ko'p fayl navbati) ikkalasi ham shu
-    funksiyani ishlatadi — parse mantig'i bitta joyda saqlanadi.
-    """
-    questions = parse_file(tmp_path)
-    has_img_qs = any(q.get("_has_image") for q in questions)
-    if has_img_qs:
-        await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
-    else:
-        await state.update_data(_file_name=file_name)
-        try: os.remove(tmp_path)
-        except Exception: pass
-
-    if not questions:
-        return await status.edit_text(
-            _format_error_text(file_name),
-            parse_mode="HTML",
-            reply_markup=_format_error_keyboard()
-        )
-
-    total    = len(questions)
+async def _present_questions(bot, status, state, questions, tmp_path, file_name, file_id=""):
+    """Parse qilingan savollarni ko'rsatadi. PDF da rasm topilsa avval «topilgan testlar soni»
+    va rasmlardan foydalanish holati chiqadi; foydalanuvchi rasm bilan yoki rasmsiz davom etadi."""
+    from utils.parser import pdf_image_counts, pdf_report_text
+    total = len(questions)
     unmarked = sum(1 for q in questions if not q.get("_marked"))
+    found, _att, _rs = pdf_image_counts(tmp_path)
+    if found > 0:
+        await state.update_data(_pdf_questions=questions, _pdf_name=file_name,
+                                _pdf_file_id=file_id, _pdf_tmp=tmp_path)
+        b = InlineKeyboardBuilder()
+        b.button(text="🖼 Rasmlar bilan davom etish", callback_data="pdf_img_yes")
+        b.button(text="➡️ Rasmsiz davom etish", callback_data="pdf_img_no")
+        b.adjust(1)
+        await status.edit_text(pdf_report_text(file_name, total, tmp_path)
+                               + "\n<i>Davom etish usulini tanlang:</i>",
+                               parse_mode="HTML", reply_markup=b.as_markup())
+        return
+    return await _continue_present(bot, status, state, questions, tmp_path, file_name, file_id, unmarked, total)
+
+
+async def _continue_present(bot, status, state, questions, tmp_path, file_name, file_id, unmarked, total):
+    """Rasm yuklash va natija tanlovlari (avvalgi _parse_and_present qoldig'i)."""
 
     img_count = sum(1 for q in questions if q.get("_img_bytes"))
     img_in_file = 0
@@ -935,6 +879,55 @@ async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, 
         if img_upload_summary:
             await status.edit_text(img_upload_summary, parse_mode="HTML")
         await _ask_poll_time(status, state, total)
+
+
+def _strip_pdf_images(questions):
+    for q in questions:
+        for k in ("_img_bytes", "_img_ext", "_has_image", "_extra_images"):
+            q.pop(k, None)
+
+
+@router.callback_query(F.data.in_({"pdf_img_yes", "pdf_img_no"}))
+async def pdf_img_choice(cb: CallbackQuery, state: FSMContext):
+    d = await state.get_data()
+    questions = d.get("_pdf_questions")
+    if not questions:
+        return await cb.answer("Ma'lumot topilmadi. Faylni qayta yuboring.", show_alert=True)
+    await cb.answer()
+    if cb.data == "pdf_img_no":
+        _strip_pdf_images(questions)
+    await state.update_data(_pdf_questions=None)
+    unmarked = sum(1 for q in questions if not q.get("_marked"))
+    await _continue_present(cb.bot, cb.message, state, questions, d.get("_pdf_tmp"),
+                            d.get("_pdf_name", "fayl"), d.get("_pdf_file_id", ""),
+                            unmarked, len(questions))
+
+
+async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, file_id: str = ""):
+    """
+    tmp_path'dagi faylni parse qilib, natijani (savollar soni,
+    belgilanmagan savollar, rasm) ko'rsatadi. upload_file (bitta fayl)
+    va _run_next_queued_file (ko'p fayl navbati) ikkalasi ham shu
+    funksiyani ishlatadi — parse mantig'i bitta joyda saqlanadi.
+    """
+    questions = parse_file(tmp_path)
+    has_img_qs = any(q.get("_has_image") for q in questions)
+    if has_img_qs:
+        await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
+    else:
+        await state.update_data(_file_name=file_name)
+        try: os.remove(tmp_path)
+        except Exception: pass
+
+    if not questions:
+        return await status.edit_text(
+            _format_error_text(file_name),
+            parse_mode="HTML",
+            reply_markup=_format_error_keyboard()
+        )
+
+    return await _present_questions(bot, status, state, questions, tmp_path, file_name, file_id)
+
 
 
 async def _run_next_queued_file(msg, state, next_file: dict):
@@ -1071,6 +1064,8 @@ async def fp_force_reparse(callback: CallbackQuery, state: FSMContext):
         )
 
         questions = parse_file(tmp_path)
+        from utils.parser import pdf_image_summary as _pdf_img_summary
+        _pdf_img_txt = _pdf_img_summary()
         has_img_qs = any(q.get("_has_image") for q in questions)
         if has_img_qs:
             await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
@@ -1086,63 +1081,7 @@ async def fp_force_reparse(callback: CallbackQuery, state: FSMContext):
                 parse_mode="HTML"
             )
 
-        total    = len(questions)
-        unmarked = sum(1 for q in questions if not q.get("_marked"))
-
-        img_count = sum(1 for q in questions if q.get("_img_bytes"))
-        img_in_file = 0
-        try:
-            if os.path.exists(tmp_path):
-                _ii = check_images_in_file(tmp_path)
-                img_in_file = _ii.get("count", 0)
-        except Exception:
-            img_in_file = img_count
-
-        img_upload_summary = ""
-        if img_count > 0:
-            await status.edit_text(
-                f"🖼 <b>{img_count} ta rasm test bilan ulanmoqda...</b>\n"
-                f"<i>Iltimos kuting</i>",
-                parse_mode="HTML"
-            )
-            questions, up_ok, up_fail, up_total = await _upload_images_to_channel(callback.bot, questions)
-            if up_fail > 0:
-                img_upload_summary = (
-                    f"🖼 Rasmlar: <b>{up_ok}/{up_total}</b> muvaffaqiyatli, "
-                    f"<b>{up_fail}</b> ta xato bo'ldi\n"
-                )
-        elif img_in_file > 0:
-            log.info(f"Faylda {img_in_file} rasm bor, savolga bog\'lanmadi")
-
-        await state.update_data(questions=questions, _file_id=None)
-        await state.set_state(CreateTest.upload_file)
-
-        if unmarked > 0:
-            b = InlineKeyboardBuilder()
-            b.button(text="🔡 Seryalik javob",    callback_data="uj_serial")
-            b.button(text="🤖 AI bilan yechish",   callback_data="uj_ai")
-            b.button(text="📨 Adminga murojaat",   callback_data="uj_admin")
-            b.button(text="▶️ Shundayicha davom",  callback_data="uj_skip")
-            b.adjust(1)
-            img_line = ""
-            if img_count > 0:
-                img_line = f"🖼 Rasmli: <b>{img_count}</b> ta (test bilan ulandi)\n"
-            elif img_in_file > 0:
-                img_line = f"⚠️ Faylda {img_in_file} rasm bor, lekin bog\'lanmadi\n"
-            await status.edit_text(
-                f"📋 <b>{total} TA SAVOL TOPILDI</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"✅ Belgilangan: <b>{total - unmarked}</b> ta\n"
-                f"❓ Belgilanmagan: <b>{unmarked}</b> ta\n"
-                + img_line + img_upload_summary +
-                f"\n<i>To\'g\'ri javob aniqlanmagan. Nima qilamiz?</i>",
-                parse_mode="HTML",
-                reply_markup=b.as_markup()
-            )
-        else:
-            if img_upload_summary:
-                await status.edit_text(img_upload_summary, parse_mode="HTML")
-            await _ask_poll_time(status, state, total)
+        return await _present_questions(callback.bot, status, state, questions, tmp_path, file_name, '')
 
     except Exception as e:
         log.error(f"fp_force_reparse xato: {e}", exc_info=True)
@@ -1682,8 +1621,8 @@ async def _ai_solve(questions: list, msg, explain_mode: str = "full") -> list:
                     validated.append((oi, ci, str(item.get("explanation", "") or "")))
 
                 for oi, ci, explanation in validated:
-                    opts = questions[oi].get("options", [])
-                    questions[oi]["correct"] = opts[ci]
+                    from utils.quiz_model import set_correct
+                    set_correct(questions[oi], ci)            # indeks + "X) matn" (DB va aralashtirish uchun)
                     questions[oi]["explanation"] = explanation
                     questions[oi]["_ai_solved"] = True
                     solved += 1
@@ -2653,15 +2592,17 @@ async def reupload_file(message: Message, state: FSMContext):
         await message.bot.download_file(file.file_path, tmp_path)
 
         questions = parse_file(tmp_path)
+        from utils.parser import pdf_image_summary as _pdf_img_summary
+        _pdf_img_txt = _pdf_img_summary()
 
         # Rasmlarni TG kanalga yuklaymiz
         img_count = sum(1 for q in questions if q.get("_img_bytes"))
-        img_upload_summary = ""
+        img_upload_summary = _pdf_img_txt
         if img_count > 0:
             await status.edit_text(f"🖼 {img_count} ta rasm yuklanmoqda...")
             questions, up_ok, up_fail, up_total = await _upload_images_to_channel(message.bot, questions)
             if up_fail > 0:
-                img_upload_summary = (
+                img_upload_summary = _pdf_img_txt + (
                     f"🖼 Rasmlar: <b>{up_ok}/{up_total}</b> muvaffaqiyatli, "
                     f"<b>{up_fail}</b> ta xato bo'ldi\n"
                 )

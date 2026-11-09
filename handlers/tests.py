@@ -131,11 +131,15 @@ def _shuffle_options(qs):
         else:
             corr_text = None
         import random
+        _cidx = q.get("correct_index")
+        if isinstance(_cidx, int) and 0 <= _cidx < len(pure):
+            corr_text = pure[_cidx]
         random.shuffle(pure)
         q["options"] = [f"{LABELS[i]}) {t}" for i, t in enumerate(pure)]
         if corr_text is not None:
             new_idx = next((i for i,t in enumerate(pure) if t == corr_text), 0)
             q["correct"] = f"{LABELS[new_idx]}) {corr_text}"
+            q["correct_index"] = new_idx
 
 
 def _timer_bar(remaining, total_sec, width=15):
