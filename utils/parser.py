@@ -103,8 +103,41 @@ def check_images_in_file(path: str) -> dict:
     return result
 
 
+PDF_REPORTS: dict = {}   # fayl yo'li → PDF rasm hisoboti (parse_file dan keyin, aralashmaydi)
+
+
 def parse_file(path: str) -> list:
+    """Fayldan savollarni oladi va shu faylning rasm hisobotini PDF_REPORTS ga yozadi."""
+    global LAST_PDF_IMAGE_REPORT
+    LAST_PDF_IMAGE_REPORT = {}
+    result = _parse_file_impl(path)
+    PDF_REPORTS[path] = dict(LAST_PDF_IMAGE_REPORT) if LAST_PDF_IMAGE_REPORT else {}
+    if len(PDF_REPORTS) > 500:                       # xotira cheklovi
+        for k in list(PDF_REPORTS)[:250]:
+            PDF_REPORTS.pop(k, None)
+    return result
+
+
+def _parse_file_impl(path: str) -> list:
     ext = Path(path).suffix.lower()
+    # 1) Yagona matn parseri — TXT/PDF/DOCX uchun bir xil natija (rasmsiz hujjatlar)
+    global LAST_PDF_IMAGE_REPORT
+    LAST_PDF_IMAGE_REPORT = {}
+    if ext in (".txt", ".pdf", ".docx", ".doc", ".xlsx", ".xlsm"):
+        try:
+            has_img = False
+            if ext in (".docx", ".doc", ".pdf"):
+                has_img = bool((check_images_in_file(path) or {}).get("has_images"))
+            if not has_img:
+                from utils.quiz_text import parse_file_unified
+                uq, rep = parse_file_unified(path)
+                blocks = max(1, rep.get("blocks", 0))
+                if uq and len(rep.get("dropped", [])) <= 0.2 * blocks:
+                    log.info(f"parse_file unified: {len(uq)} savol ({ext})")
+                    return uq
+        except Exception as e:
+            log.warning(f"unified parser ishlamadi, eski yo'lga o'tildi: {e}")
+    # 2) Eski ixtisoslashgan parserlar (rasmli DOCX, jadval, maxsus formatlar)
     try:
         # .doc → matn/docx konvertatsiya (sof Python, LibreOffice yo'q)
         if ext == ".doc":
@@ -1398,14 +1431,10 @@ def _read_txt(path: str) -> str:
 # ═══════════════════════════════════════════════════════════
 
 def parse_text(text: str) -> list:
-    text = text.replace("\r\n", "\n")
-    blocks = re.split(r"\n(?=\d+[\.)] *\S)", "\n" + text.strip())
-    result = []
-    for b in blocks:
-        q = _parse_block(b.strip())
-        if q:
-            result.append(q)
-    return result
+    """Yagona matn parseri (utils.quiz_text) — eski qoidalar bilan bir xil natija shakli."""
+    from utils.quiz_text import parse_quiz_text
+    qs, _rep = parse_quiz_text(text)
+    return qs
 
 
 def _clean_dup_label(text: str) -> str:
@@ -1895,6 +1924,13 @@ def _parse_docx_numbered_with_images(doc) -> list:
         correct_idx = -1
         while i < n:
             if i in img_map:
+                # Rasm savol matni va variantlar ORASIDA bo'lsa — shu savolga tegishli.
+                # Variantlardan keyin bo'lsa va undan keyin yangi savol kelsa — keyingi savolga.
+                nxt = next((paras[k].text.strip() for k in range(i + 1, n) if paras[k].text.strip()), "")
+                if not variants or (nxt and OPT_RE.match(nxt) and not Q_RE.match(nxt)):
+                    q_images.extend(img_map[i])
+                    i += 1
+                    continue
                 break
             vt = paras[i].text.strip()
             if not vt:
@@ -2160,6 +2196,106 @@ def _parse_pdf_with_images(path: str) -> list:
 # UNIVERSAL RASM BIRIKTIRISH (barcha PDF formatlar uchun)
 # ═══════════════════════════════════════════════════════════
 
+# Oxirgi PDF rasm hisoboti — parse_file dan keyin darhol o'qiladi (sinxron, aralashmaydi)
+LAST_PDF_IMAGE_REPORT: dict = {}
+
+
+def _assign_images(images: list, q_positions: list, questions: list):
+    """Rasmlarni savollarga biriktiradi. images: [(gy, bytes, ext, page)], q_positions: [(gy, qi)].
+    → (per_image) ro'yxat: {"idx", "page", "q" (1-based | None), "action", "reason"}"""
+    records = []
+    for k, (img_y, img_bytes, img_ext, page) in enumerate(images, start=1):
+        rec = {"idx": k, "page": page, "q": None, "action": "qo'shilmadi", "reason": ""}
+        if not q_positions:
+            rec["reason"] = "savol matni PDF da topilmadi"
+            records.append(rec)
+            continue
+        best_qi, best = None, float("inf")
+        for q_y, qi in q_positions:               # rasmdan yuqoridagi eng yaqin savol
+            if q_y <= img_y and img_y - q_y < best:
+                best, best_qi = img_y - q_y, qi
+        if best_qi is None:                        # yuqorida yo'q — eng yaqin pastdagisi
+            for q_y, qi in q_positions:
+                if abs(q_y - img_y) < best:
+                    best, best_qi = abs(q_y - img_y), qi
+        if best_qi is None:
+            rec["reason"] = "mos savol topilmadi"
+        elif questions[best_qi].get("_img_bytes"):
+            rec["reason"] = "bu savolda rasm allaqachon bor"
+            rec["q"] = best_qi + 1
+        else:
+            questions[best_qi]["_img_bytes"] = img_bytes
+            questions[best_qi]["_img_ext"] = img_ext
+            questions[best_qi]["_has_image"] = True
+            rec.update(q=best_qi + 1, action="qo'shildi", reason="")
+        records.append(rec)
+    return records
+
+
+def _publish_pdf_report(found: int, records: list, fitz_ok: bool, note: str = "") -> None:
+    global LAST_PDF_IMAGE_REPORT
+    LAST_PDF_IMAGE_REPORT = {
+        "source": "pdf", "found": found, "fitz": fitz_ok, "note": note,
+        "attached": sum(1 for r in records if r["action"] == "qo'shildi"),
+        "records": records,
+    }
+
+
+def pdf_image_counts(path: str = None) -> tuple:
+    """(topilgan_rasm, savolga_biriktirilgan, sabablar_Counter). path berilsa shu fayl uchun, aks holda oxirgisi."""
+    from collections import Counter
+    r = PDF_REPORTS.get(path) if path else LAST_PDF_IMAGE_REPORT
+    r = r or {}
+    if not r or r.get("source") != "pdf":
+        return 0, 0, Counter()
+    reasons = Counter(rec["reason"] for rec in r.get("records", []) if rec["action"] != "qo'shildi")
+    if r.get("note"):
+        reasons[r["note"]] += max(0, r["found"] - r["attached"]) or 1
+    return r["found"], r["attached"], reasons
+
+
+def pdf_report_text(file_name: str, total: int, path: str = None) -> str:
+    """Foydalanuvchiga: faylda topilgan testlar soni va rasmlardan foydalanish holati."""
+    found, attached, reasons = pdf_image_counts(path)
+    lines = [f"📄 <b>«{file_name}»</b>",
+             f"📝 Faylda topilgan testlar: <b>{total}</b> ta"]
+    if found == 0:
+        lines.append("🖼 Rasm topilmadi")
+        return "\n".join(lines) + "\n"
+    lines.append(f"🖼 Rasmlar topildi: <b>{found}</b> ta")
+    lines.append(f"✅ Savolga biriktiriladi: <b>{attached}</b> ta")
+    if found - attached > 0:
+        lines.append(f"🚫 Biriktirilmaydi: <b>{found - attached}</b> ta")
+        for reason, n in reasons.most_common(4):
+            lines.append(f"   • {reason} ({n})")
+    return "\n".join(lines) + "\n"
+
+
+def pdf_image_summary() -> str:
+    """Foydalanuvchi uchun HTML hisobot: topilgan rasmlar soni va har biri qo'shildimi-yo'qmi.
+    PDF bo'lmasa — bo'sh qator."""
+    r = LAST_PDF_IMAGE_REPORT
+    if not r or r.get("source") != "pdf":
+        return ""
+    found, att = r["found"], r["attached"]
+    if found == 0:
+        return "\n📷 <b>PDF da rasm topilmadi.</b>\n"
+    lines = [f"\n📷 <b>PDF da {found} ta rasm topildi</b>",
+             f"✅ Savolga qo'shildi: <b>{att}</b> ta"]
+    if r.get("note"):
+        lines.append(f"⚠️ {r['note']}")
+    recs = r.get("records", [])
+    for rec in recs[:25]:
+        if rec["action"] == "qo'shildi":
+            lines.append(f"🖼 #{rec['idx']} (sahifa {rec['page']}) → <b>{rec['q']}-savolga qo'shildi</b>")
+        else:
+            qpart = f" (savol {rec['q']})" if rec.get("q") else ""
+            lines.append(f"🚫 #{rec['idx']} (sahifa {rec['page']}) → qo'shilmadi{qpart}: {rec['reason']}")
+    if len(recs) > 25:
+        lines.append(f"… va yana {len(recs) - 25} ta rasm")
+    return "\n".join(lines) + "\n"
+
+
 def _attach_pdf_images(path: str, questions: list, full_text: str) -> list:
     """
     PDF dagi rasmlarni savollarga biriktiradi — FORMAT FARQI YO'Q.
@@ -2176,6 +2312,14 @@ def _attach_pdf_images(path: str, questions: list, full_text: str) -> list:
         import fitz
     except ImportError:
         # PyMuPDF yo'q — rasm biriktirib bo'lmaydi (lekin matn ishlaydi)
+        try:
+            import pdfplumber
+            with pdfplumber.open(path) as _pdf:
+                _found = sum(len(p.images) for p in _pdf.pages)
+        except Exception:
+            _found = 0
+        _publish_pdf_report(_found, [], False,
+                            note="PyMuPDF o'rnatilmagan — rasmlar savollarga biriktirilmadi" if _found else "")
         return questions
 
     try:
@@ -2185,9 +2329,9 @@ def _attach_pdf_images(path: str, questions: list, full_text: str) -> list:
         return questions
 
     # ─── 1. Rasmlarni ajratamiz (global Y bilan) ───
-    images = []  # (global_y, img_bytes, img_ext)
+    images = []  # (global_y, img_bytes, img_ext, page_no)
     page_y_offset = 0.0
-    for page in doc:
+    for pno, page in enumerate(doc, start=1):
         page_h = page.rect.height
         for img_info in page.get_images(full=True):
             xref = img_info[0]
@@ -2198,13 +2342,14 @@ def _attach_pdf_images(path: str, questions: list, full_text: str) -> list:
                 gy = page_y_offset
             try:
                 base = doc.extract_image(xref)
-                images.append((gy, base["image"], "." + base.get("ext", "png")))
+                images.append((gy, base["image"], "." + base.get("ext", "png"), pno))
             except Exception:
                 pass
         page_y_offset += page_h
 
     if not images:
         doc.close()
+        _publish_pdf_report(0, [], True)
         return questions
 
     # ─── 2. Savol matnlarining global Y pozitsiyasi ───
@@ -2239,35 +2384,17 @@ def _attach_pdf_images(path: str, questions: list, full_text: str) -> list:
     doc.close()
 
     if not q_positions:
+        _publish_pdf_report(len(images), [
+            {"idx": k, "page": pg, "q": None, "action": "qo'shilmadi",
+             "reason": "savol matni PDF da topilmadi"}
+            for k, (_gy, _b, _e, pg) in enumerate(images, start=1)], True)
         return questions
 
     q_positions.sort()
 
     # ─── 3. Har rasmni eng yaqin (yuqoridagi) savolga biriktiramiz ───
-    for img_y, img_bytes, img_ext in images:
-        # Rasmdan YUQORIDA va eng yaqin savolni topamiz
-        best_qi = None
-        best_dist = float("inf")
-        for q_y, qi in q_positions:
-            if q_y <= img_y:  # Savol rasmdan yuqorida
-                dist = img_y - q_y
-                if dist < best_dist:
-                    best_dist = dist
-                    best_qi = qi
-        # Agar yuqorida savol topilmasa — eng yaqin pastdagisi
-        if best_qi is None:
-            for q_y, qi in q_positions:
-                dist = abs(q_y - img_y)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_qi = qi
-
-        # Biriktiramiz (agar bu savolda hali rasm bo'lmasa)
-        if best_qi is not None and not questions[best_qi].get("_img_bytes"):
-            questions[best_qi]["_img_bytes"] = img_bytes
-            questions[best_qi]["_img_ext"]   = img_ext
-            questions[best_qi]["_has_image"]  = True
-
+    records = _assign_images(images, q_positions, questions)
+    _publish_pdf_report(len(images), records, True)
     img_attached = sum(1 for q in questions if q.get("_img_bytes"))
-    log.info(f"PDF rasm biriktirildi: {img_attached} ta savol")
+    log.info(f"PDF rasm: topildi={len(images)}, biriktirildi={img_attached}")
     return questions

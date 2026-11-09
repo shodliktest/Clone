@@ -27,11 +27,14 @@ def esc(s) -> str:
     return _re.sub(r"[&<>]", lambda m: _ESC[m.group()], str(s if s is not None else ""))
 
 
+_OPT_LABEL = _re.compile(r"^\s*[A-Ja-j]\s*[\)\.:]\s*")
+
+
 def _opt_text(opt) -> str:
-    """'A) matn' ko'rinishidan toza variant matnini ajratib oladi."""
-    s = str(opt)
-    s = s.split(")", 1)[-1].strip() if ")" in s else s.strip()
-    return s
+    """'A) matn' dan toza matnni oladi: faqat BOSHIDAGI bitta label olib tashlanadi.
+    Matn ichidagi qavslar ("Rinit (burun oqishi)") buzilmaydi."""
+    s = _OPT_LABEL.sub("", str(opt), count=1)
+    return s.strip()
 
 
 def sanitize_poll(question, options, correct_index=0,

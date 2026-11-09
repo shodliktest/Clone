@@ -30,9 +30,15 @@ def _check(q, ans, pts):
     if c is None: return False, 0.0
     try:
         if t == "multiple_choice":
-            am = re.match(r"^([A-Za-z])",str(ans).strip())
-            cm = re.match(r"^([A-Za-z])",str(c).strip())
-            ok = (am.group(1).lower()==cm.group(1).lower()) if am and cm else str(ans).strip().lower()==str(c).strip().lower()
+            from utils import quiz_model as _qm
+            ci = _qm.resolve_correct(q)
+            ui = _user_index(q, ans)
+            if ci is not None and ui is not None:
+                ok = (ui == ci)
+            else:
+                am = re.match(r"^([A-Za-z])",str(ans).strip())
+                cm = re.match(r"^([A-Za-z])",str(c).strip())
+                ok = (am.group(1).lower()==cm.group(1).lower()) if am and cm else str(ans).strip().lower()==str(c).strip().lower()
             return ok, pts if ok else 0.0
         if t == "true_false":
             ok = str(ans).strip().lower()==str(c).strip().lower(); return ok,pts if ok else 0.0
@@ -51,6 +57,25 @@ def _check(q, ans, pts):
             ok=u==cc or u in acc; return ok,pts if ok else 0.0
     except Exception as e: log.error(f"Scoring: {e}")
     return False,0.0
+
+def _user_index(q, ans):
+    """Foydalanuvchi javobini variant indeksiga aylantiradi: int | 'C' | 'C) matn' | matn."""
+    from utils import quiz_model as _qm
+    if isinstance(ans, bool):
+        return None
+    if isinstance(ans, int):
+        return ans
+    s = str(ans).strip()
+    if not s:
+        return None
+    m = re.match(r"^([A-Ja-j])\s*[\)\.:]?(?:\s|$)", s)
+    if m and ord(m.group(1).upper()) - 65 < len(_qm.option_texts(q)):
+        return ord(m.group(1).upper()) - 65
+    target = _qm.strip_label(s).lower()
+    for i, o in enumerate(_qm.option_texts(q)):
+        if o.lower() == target:
+            return i
+    return None
 
 def _grade(p):
     if p>=90: return "A+"
