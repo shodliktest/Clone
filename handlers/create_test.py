@@ -911,15 +911,11 @@ async def _parse_and_present(bot, status, state, tmp_path: str, file_name: str, 
     funksiyani ishlatadi — parse mantig'i bitta joyda saqlanadi.
     """
     questions = parse_file(tmp_path)
-    has_img_qs = any(q.get("_has_image") for q in questions)
-    if has_img_qs:
-        await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
-    else:
-        await state.update_data(_file_name=file_name)
-        try: os.remove(tmp_path)
-        except Exception: pass
+    await state.update_data(_tmp_path=tmp_path, _file_name=file_name)
 
     if not questions:
+        try: os.remove(tmp_path)
+        except Exception: pass
         return await status.edit_text(
             _format_error_text(file_name),
             parse_mode="HTML",
