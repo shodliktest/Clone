@@ -27,7 +27,7 @@ def esc(s) -> str:
     return _re.sub(r"[&<>]", lambda m: _ESC[m.group()], str(s if s is not None else ""))
 
 
-_OPT_LABEL = _re.compile(r"^\s*[A-Ja-j]\s*[\)\.:]\s*")
+_OPT_LABEL = _re.compile(r"^\s*[A-Ja-jА-Яа-яёЁ]\s*[\)\.:\-]\s*")
 
 
 def _opt_text(opt) -> str:
@@ -62,6 +62,8 @@ def sanitize_poll(question, options, correct_index=0,
         t = _opt_text(o) if strip_label else str(o).strip()
         if not t:
             t = "—"                       # hech qachon bo'sh bo'lmasin
+        if len(t) > MAX_OPTION:
+            t = t[:MAX_OPTION - 1] + "…"
         cleaned.append(esc(t)[:MAX_OPTION])
 
     # Kamida 2 ta variant bo'lishi shart

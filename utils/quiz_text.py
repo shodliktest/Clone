@@ -27,10 +27,29 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 # ── Regexlar ───────────────────────────────────────────────
+# Savol boshlanishi: 1. Matn, 1) Matn, [1/10] Matn, 1.Matn (bo'shliqsiz ham), 1-savol:, # 1., # 83-84., № 1.
 _Q_START = re.compile(
-    r"^\s*(?:\[\s*(\d{1,4})\s*/\s*\d{1,4}\s*\]\s*|(\d{1,4})\s*[\.\)]\s+)(\S.*)$"
+    r"^\s*(?:(?:#|№|savol\s*|topshiriq\s*)?\s*\[\s*(\d{1,4})\s*/\s*\d{1,4}\s*\]\s*|(?:#|№|savol\s*|topshiriq\s*)?\s*(\d{1,4})(?:\s*-\s*\d{1,4})?\s*(?:[\.\)]|-savol[\.:]?|-topshiriq[\.:]?|:)\s*)(\S.*)$",
+    re.IGNORECASE
 )
-_OPT_START = re.compile(r"^\s*([A-Ja-j])\s*[\)\.:]\s*(.*)$")
+
+# Kril va Lotin harflari: A-J, А-Я
+_OPT_LABEL_CHARS = r"[A-Ja-jА-Яа-яёЁ]"
+
+# Prefix to'g'ri javob belgilari: ===, ==, --, *, +, #, ✅, ✔, ✓, ~, •, ►, →, ■, ●, ▶, ◆, ★, ☑
+_MARK_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:={1,}|[-]{2,}|[*+#•►→✓✔√■●▶◆★☑~]|✅|✔️)\s*"
+)
+
+# Variant boshlanishi: A) , A. , A: , A - (Lotin va Krill)
+_OPT_START = re.compile(rf"^\s*({_OPT_LABEL_CHARS})\s*[\)\.:\-]\s*(.*)$")
+
+# Harfsiz variantlar: + To'g'ri javob, - Noto'g'ri javob
+_PLUS_MINUS_OPT = re.compile(r"^\s*([+\-])\s+(\S.*)$")
+
+# Variant oxiridagi yoki ichidagi to'g'ri javob belgilari
+_MARK_SUFFIX = re.compile(r"\s*([*+#•►→✓✔√■●▶◆★☑~]|✅|✔|✓|✔️)\s*$")
+
 _ANSWER = re.compile(
     r"^\s*(?:to['’ʻ`‘]?g['’ʻ`‘]?ri\s+javob|javob|correct(?:\s+answer)?|answer|kalit)\s*[:：\-–]\s*(.+?)\s*$",
     re.IGNORECASE,
@@ -42,7 +61,6 @@ _EXPL = re.compile(
 _DECOR_LINE = re.compile(r"^\s*[=\-_*#~•·.]{4,}\s*$")
 _FOOTER = re.compile(r"^\s*[=\-_*#~]{2,}.*\b(jami|total)\b.*$", re.IGNORECASE)
 _MARK_PREFIX = re.compile(r"^\s*\+\s+")
-_MARK_SUFFIX = re.compile(r"\s*(\*|✅|✔|✓|✔️)\s*$")
 _WS = re.compile(r"[ \t\u00a0\u200b\u200c\u200d\ufeff]+")
 
 
@@ -177,9 +195,10 @@ def _split_glued(line: str) -> list[str]:
 
 
 def _strip_marker(text: str) -> tuple[str, bool]:
-    """'+ matn' / 'matn *' / 'matn ✅' — to'g'ri belgisi. Matn ichidagi '+' ga tegmaydi."""
-    if _MARK_PREFIX.match(text):
-        return _MARK_PREFIX.sub("", text, count=1).strip(), True
+    """Variant matnidan to'g'ri javob belgilarini tozalash."""
+    if _MARK_PREFIX_PATTERN.match(text):
+        m = _MARK_PREFIX_PATTERN.match(text)
+        return text[m.end():].strip(), True
     m = _MARK_SUFFIX.search(text)
     if m and len(text[:m.start()].strip()) > 0:
         return text[:m.start()].strip(), True
@@ -187,6 +206,7 @@ def _strip_marker(text: str) -> tuple[str, bool]:
 
 
 _BRACKET_NO = re.compile(r"^\s*\[\s*\d{1,4}\s*/\s*\d{1,4}\s*\]\s*")
+CYRILLIC_MAP = {"А": 0, "Б": 1, "В": 2, "Г": 3, "Д": 4, "Е": 5, "Ж": 6, "З": 7, "И": 8, "К": 9}
 
 
 def _finish(cur: dict, report: dict) -> dict | None:
@@ -196,6 +216,19 @@ def _finish(cur: dict, report: dict) -> dict | None:
     if not q_text:
         report["dropped"].append((cur["no"], "savol matni yo'q"))
         return None
+
+    # Ha / Yo'q (true_false) savollari uchun avtomatik variantlar
+    is_tf = cur.get("type") == "true_false" or (
+        not opts and cur.get("hint") and str(cur.get("hint")).lower().strip() in ("ha", "yoq", "yo'q", "true", "false", "yes", "no")
+    )
+    if is_tf and len(opts) < 2:
+        opts = ["Ha", "Yo'q"]
+        if cur.get("hint"):
+            hl = str(cur["hint"]).lower().strip()
+            cur["marks"] = [hl in ("ha", "true", "yes"), hl in ("yoq", "yo'q", "false", "no")]
+        elif not cur["marks"]:
+            cur["marks"] = [True, False]
+
     if len([o for o in opts if o]) < 2:
         report["dropped"].append((cur["no"], f"variant {len(opts)} ta (kamida 2 kerak)"))
         return None
@@ -208,13 +241,19 @@ def _finish(cur: dict, report: dict) -> dict | None:
 
     ci = None
     marked = [i for i, mk in enumerate(cur["marks"]) if mk]
-    if len(marked) == 1:
+    if len(marked) >= 1:
         ci = marked[0]
     if ci is None and cur.get("hint"):
         h = cur["hint"].strip()
-        mm = re.match(r"^([A-Ja-j])\s*[\)\.:]?(?:\s|$)", h)
-        if mm and ord(mm.group(1).upper()) - 65 < len(opts):
-            ci = ord(mm.group(1).upper()) - 65
+        mm = re.match(r"^([A-Ja-jА-Яа-яёЁ])\s*[\)\.:]?(?:\s|$)", h)
+        if mm:
+            char = mm.group(1).upper()
+            if char in CYRILLIC_MAP:
+                idx = CYRILLIC_MAP[char]
+            else:
+                idx = ord(char) - 65
+            if 0 <= idx < len(opts):
+                ci = idx
         else:
             hn = _norm(h)
             hits = [i for i, o in enumerate(opts) if _norm(o) == hn]
@@ -225,7 +264,7 @@ def _finish(cur: dict, report: dict) -> dict | None:
 
     labeled = [f"{chr(65 + i)}) {o}" for i, o in enumerate(opts)]
     return {
-        "type": "multiple_choice",
+        "type": "true_false" if is_tf else "multiple_choice",
         "question": q_text,
         "options": labeled,
         "correct": (f"{chr(65 + ci)}) {opts[ci]}" if ci is not None else None),
@@ -267,14 +306,24 @@ def parse_quiz_text(text: str) -> tuple[list[dict], dict]:
     mode = "q"            # q | opt | expl | hint
     seen_numbers: set[int] = set()
 
+    forced_type = None
+
     def start_question(no: int, text_: str) -> None:
-        nonlocal cur, mode
+        nonlocal cur, mode, forced_type
         if cur is not None:
             blocks.append(cur)
-        cur = {"no": no, "q": text_, "opts": [], "marks": [], "hint": None, "expl": ""}
+        cur = {"no": no, "q": text_, "opts": [], "marks": [], "hint": None, "expl": "", "type": forced_type}
+        forced_type = None
         mode = "q"
 
     for l in lines:
+        # 0) TYPE formati (TYPE: true_false, TYPE: fill_blank, etc.)
+        if l.upper().startswith("TYPE:"):
+            forced_type = l.split(":", 1)[1].strip().lower()
+            if cur is not None and not cur["opts"]:
+                cur["type"] = forced_type
+            continue
+
         # 1) Javob kaliti / izoh satrlari (savol va variant ichida ham uchrashi mumkin)
         ma = _ANSWER.match(l)
         if ma and cur is not None:
@@ -309,21 +358,48 @@ def parse_quiz_text(text: str) -> tuple[list[dict], dict]:
             start_question(expected_no, l)
             continue
 
-        # 4) Variant (to'g'ri belgisi "+ C) matn" ko'rinishida label'dan oldin ham bo'lishi mumkin)
-        lp = _MARK_PREFIX.sub("", l, count=1) if _MARK_PREFIX.match(l) else l
-        if _CHECK_PREFIX.match(lp):
-            lp = _CHECK_PREFIX.sub("", lp, count=1)
-            l_marked_prefix = True
-        else:
-            l_marked_prefix = False
-        mo = _OPT_START.match(lp)
+        # 4) Variant (to'g'ri belgisi: "===A) ...", "*A) ...", "+A) ...", "A)* ...", "A) ... *")
+        is_marked = False
+        raw_line = l.strip()
+
+        # A) Boshidagi to'g'ri javob belgisi (===, ==, *, +, #, ✅, ✔, ✓ va h.k.)
+        mp = _MARK_PREFIX_PATTERN.match(raw_line)
+        if mp:
+            is_marked = True
+            raw_line = raw_line[mp.end():].strip()
+
+        mo = _OPT_START.match(raw_line)
         if mo and cur is not None:
             body = mo.group(2).strip()
-            body, marked = _strip_marker(body)
-            if _MARK_PREFIX.match(l) or l_marked_prefix:
-                marked = True
+
+            # B) Qavsdan keyingi belgi: A)* yoki A)+ yoki A) *
+            body_mp = _MARK_PREFIX_PATTERN.match(body)
+            if body_mp:
+                is_marked = True
+                body = body[body_mp.end():].strip()
+
+            # C) Variant oxiridagi belgi: A) Toshkent *
+            body_ms = _MARK_SUFFIX.search(body)
+            if body_ms:
+                is_marked = True
+                body = body[:body_ms.start()].strip()
+
             cur["opts"].append(body)
-            cur["marks"].append(marked)
+            cur["marks"].append(is_marked)
+            mode = "opt"
+            continue
+
+        # B) Harfsiz variantlar: "+ To'g'ri javob", "- Noto'g'ri javob"
+        mpm = _PLUS_MINUS_OPT.match(l)
+        if mpm and cur is not None and (mode in ("q", "opt")):
+            is_marked = (mpm.group(1) == "+")
+            body = mpm.group(2).strip()
+            body_ms = _MARK_SUFFIX.search(body)
+            if body_ms:
+                is_marked = True
+                body = body[:body_ms.start()].strip()
+            cur["opts"].append(body)
+            cur["marks"].append(is_marked)
             mode = "opt"
             continue
 
@@ -367,9 +443,10 @@ def _join(a: str, b: str) -> str:
 def _is_new_question(mq, expected_no: int, cur: dict) -> bool:
     """Raqamli faylda: raqam kutilgan keyingi raqam bo'lsa — yangi savol (variant raqami emas)."""
     no = int(mq.group(1) or mq.group(2))
-    if expected_no <= no <= expected_no + 2:
+    if expected_no <= no <= expected_no + 5:
         return True
-    # Variant ichidagi "1) ..." yoki katta sakrash — savol emas
+    if cur is not None and no > cur.get("no", 0):
+        return True
     return False
 
 
@@ -396,9 +473,15 @@ def parse_file_unified(path: str) -> tuple[list[dict], dict]:
             rep.update(r, mode="xlsx")
         elif ext == ".docx":
             text = extract_text(path)
-            if text.count("====") >= 10 or "++++" in text:
+            if text.count("====") >= 5 or re.search(r"\+{3,}", text):
                 qs, r = FP.parse_docx_blocks(path)
                 rep.update(r, mode="docx-blok")
+        elif ext == ".txt":
+            text = extract_text(path)
+            if text.count("====") >= 5 or re.search(r"\+{3,}", text):
+                lines = [l.strip() for l in text.split("\n") if l.strip()]
+                qs, r = FP.parse_text_blocks(lines)
+                rep.update(r, mode="txt-blok")
         if not qs and ext not in (".xlsx", ".xlsm"):
             if not text:
                 text = extract_text(path)

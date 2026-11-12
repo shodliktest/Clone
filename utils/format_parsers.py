@@ -68,9 +68,14 @@ def _docx_lines(path: str) -> list[str]:
 
 
 def parse_docx_blocks(path: str) -> tuple[list[dict], dict]:
+    """DOCX dagi ==== / ++++ / # bloklarini o'qiydi."""
+    lines = _docx_lines(path)
+    return parse_text_blocks(lines)
+
+
+def parse_text_blocks(lines: list[str]) -> tuple[list[dict], dict]:
     """Qoida: savol → (====  variant)* → '++++' (blok oxiri). '#' belgili variant = to'g'ri javob.
     Sarlavha va noto'g'ri bloklar (6 tadan ko'p variant) tashlanadi va hisobotga yoziladi."""
-    lines = _docx_lines(path)
     out: list[dict] = []
     rep = {"blocks": 0, "dropped": []}
     q_text: str | None = None
@@ -89,8 +94,8 @@ def parse_docx_blocks(path: str) -> tuple[list[dict], dict]:
         q_text, opts, ci = None, [], None
 
     for raw in lines:
-        if "++++" in raw:                                # blok oxiri (ichida matn bo'lishi mumkin)
-            pre = raw.split("++++", 1)[0].strip()
+        if _BLOCK_END.search(raw):                       # blok oxiri (+++, ++++, +++++ va h.k.)
+            pre = _BLOCK_END.split(raw, 1)[0].strip()
             if pre and q_text is not None and not _SEP.match(pre):
                 marked = pre.startswith("#")
                 if marked:
@@ -223,8 +228,9 @@ def parse_unlabeled_lines(lines: list[str], opt_count: int = 4) -> tuple[list[di
     return out, rep
 
 
-# ── 4) Javob kaliti: "1-B 2-C" yoki "1. B" ──────────────────
-_KEY_PAIR = re.compile(r"(?<!\d)(\d{1,4})\s*[-.)]\s*([A-Ja-j])(?![A-Za-z])")
+# ── 4) Javob kaliti: "1-B 2-C" yoki "1. B" (Lotin va Krill) ──────────────────
+_KEY_PAIR = re.compile(r"(?<!\d)(\d{1,4})\s*[-.)]\s*([A-Ja-jА-Яа-яёЁ])(?![A-Za-zА-Яа-яёЁ])")
+_CYRILLIC_KEY_MAP = {"А": 0, "Б": 1, "В": 2, "Г": 3, "Д": 4, "Е": 5, "Ж": 6, "З": 7, "И": 8, "К": 9}
 
 
 def apply_answer_key(qs: list[dict], text: str) -> int:
@@ -233,14 +239,22 @@ def apply_answer_key(qs: list[dict], text: str) -> int:
     tail = text[m.end():] if m else ""
     if not tail:
         return 0
-    byno = {int(a): ord(b.upper()) - 65 for a, b in _KEY_PAIR.findall(tail)}
+
+    byno = {}
+    for a, b in _KEY_PAIR.findall(tail):
+        bu = b.upper()
+        if bu in _CYRILLIC_KEY_MAP:
+            byno[int(a)] = _CYRILLIC_KEY_MAP[bu]
+        else:
+            byno[int(a)] = ord(bu) - 65
+
     applied = 0
     for q in qs:
         if q.get("_marked"):
             continue
         ci = byno.get(int(q.get("number", -1)))
         if ci is not None and 0 <= ci < len(q["options"]):
-            opts = [re.sub(r"^[A-Ja-j]\s*[\)\.:]\s*", "", o) for o in q["options"]]
+            opts = [re.sub(r"^[A-Ja-jА-Яа-яёЁ]\s*[\)\.:\-]\s*", "", o) for o in q["options"]]
             q["correct_index"] = ci
             q["correct"] = f"{chr(65 + ci)}) {opts[ci]}"
             q["_marked"] = True
