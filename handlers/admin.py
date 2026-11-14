@@ -2008,9 +2008,10 @@ async def fj_check_cb(callback: CallbackQuery):
         try:
             from keyboards.keyboards import main_kb
             from utils.db import get_or_create_user
+            from utils.display_name import user_display_name
             u = callback.from_user
             user = await get_or_create_user(
-                u.id, u.full_name or str(u.id), u.username or ""
+                u.id, user_display_name(u, max_len=40), u.username or ""
             )
             await callback.message.answer(
                 f"🏠 <b>Asosiy menyu</b>",

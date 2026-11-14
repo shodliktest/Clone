@@ -483,7 +483,8 @@ async def _scheduler_loop(bot, chat_id):
 
             # Testni boshlash
             from handlers.group import _start_group_test
-            await _start_group_test(bot, chat_id, sched["host_id"], tid, "poll")
+            # lobby=False: rejalashtirilgan test darhol boshlanadi (_wait_for_test kutadi)
+            await _start_group_test(bot, chat_id, sched["host_id"], tid, "poll", lobby=False)
 
             # Info xabarni o'chirish
             try: await bot.delete_message(chat_id, info_msg.message_id)

@@ -14,11 +14,14 @@ Natijalar:
   - Ikkalasida ham: calculate_score → save_result → rasm leaderboard
 """
 import asyncio
+import html
 import logging
 import re
+import time
 from typing import Dict, Optional
 
 from utils.poll_safe import sanitize_poll, sanitize_explanation
+from utils.display_name import user_display_name, clean_text, has_letters, FALLBACK
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -81,6 +84,11 @@ _group_sessions: Dict[int, dict] = {}
 # Inline sessiyasi: {chat_id: {...}}
 _inline_sessions: Dict[int, dict] = {}
 
+# Lobby (tayyorgarlik): {chat_id: {...}} — test "Tayyorman"/"Boshlash" kutadi
+_lobby_sessions: Dict[int, dict] = {}
+LOBBY_TIMEOUT_SEC      = 600   # shu vaqt ichida boshlanmasa lobby yopiladi
+LOBBY_EDIT_MIN_SEC     = 2.0   # lobby xabarini tahrirlash orasidagi minimal vaqt
+
 # ─── Bitta guruhda bir vaqtda faqat BITTA faol test ━━━━━━━━━━━━━━
 # _starting — test boshlanish jarayonidagi chatlar (ikki kishi bir vaqtda
 # bosganda ikkala test ham ochilib ketmasligi uchun, race-condition himoyasi)
@@ -94,17 +102,20 @@ STOP_HINT = (
 
 
 def _active_session(chat_id: int):
-    """('poll'|'inline', session) yoki (None, None)"""
+    """('poll'|'inline'|'lobby', session) yoki (None, None)"""
     if chat_id in _group_sessions:
         return "poll", _group_sessions[chat_id]
     if chat_id in _inline_sessions:
         return "inline", _inline_sessions[chat_id]
+    if chat_id in _lobby_sessions:
+        return "lobby", _lobby_sessions[chat_id]
     return None, None
 
 
 def _is_busy(chat_id: int) -> bool:
     return (chat_id in _group_sessions
             or chat_id in _inline_sessions
+            or chat_id in _lobby_sessions
             or chat_id in _starting)
 
 
@@ -128,6 +139,19 @@ async def _warn_busy(bot, chat_id: int, callback: CallbackQuery = None):
     markup = None
     if session is None:
         text = "⏳ <b>Test hozirgina boshlanmoqda...</b>\nBir necha soniya kuting."
+    elif kind == "lobby":
+        title = html.escape(str((session.get("test") or {}).get("title", "Test")))
+        text = (
+            f"⏳ <b>Guruhda test tayyorlanmoqda!</b>\n\n"
+            f"📝 <b>{title}</b>\n\n"
+            f"Yangi test boshlash uchun avval joriy lobbyni yoping yoki "
+            f"boshlovchi «▶️ Boshlash» tugmasini bosguncha kuting.\n\n"
+            f"{STOP_HINT}"
+        )
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="❌ Lobbyni bekor qilish",
+                                   callback_data=f"gl_cancel_{chat_id}"))
+        markup = b.as_markup()
     else:
         title = html.escape(str((session.get("test") or {}).get("title", "Test")))
         host  = session.get("host_id")
@@ -239,7 +263,7 @@ async def route_poll_answer(poll_answer: PollAnswer) -> bool:
     q_idx   = session["poll_map"][poll_id]
     if uid_str not in session["answers"]:
         session["answers"][uid_str] = {}
-    session["names"][uid_str] = poll_answer.user.full_name
+    session["names"][uid_str] = user_display_name(poll_answer.user)
     opt_idx = poll_answer.option_ids[0]
     q = session["questions"][q_idx] if q_idx < len(session["questions"]) else {}
     if q.get("type") == "true_false":
@@ -300,75 +324,10 @@ async def _group_start_poll_impl(callback: CallbackQuery):
             "Testni guruhga yuboring va u yerda bosing.",
             show_alert=True
         )
-    if is_test_paused(tid):
-        return await callback.answer("⚠️ Bu test vaqtincha to'xtatilgan!", show_alert=True)
-    if chat_id in _group_sessions:
-        return await callback.answer(
-            "⚠️ Guruhda allaqachon test ketmoqda!\n"
-            "Avval uni tugating.", show_alert=True
-        )
-    if chat_id in _inline_sessions:
-        return await callback.answer(
-            "⚠️ Guruhda inline test ketmoqda!\n"
-            "Avval uni tugating.", show_alert=True
-        )
 
-    test = await _load_test(callback.bot, chat_id, tid)
-    if not test:
-        return await callback.answer("❌ Test topilmadi.", show_alert=True)
-
-    if not await _group_test_access(tid, uid, test):
-        return await callback.answer("🔐 Bu testni guruhda boshlash uchun sizga ruxsat berilmagan.", show_alert=True)
-
-    qs = [q for q in test.get("questions",[])
-          if q.get("type","multiple_choice") in ("multiple_choice","true_false")]
-    if not qs:
-        return await callback.answer(
-            "⚠️ Bu testda quiz poll uchun savollar yo'q!", show_alert=True
-        )
-
-    poll_time = test.get("poll_time", 30) or 30
-
-    import random, copy
-    qs = copy.deepcopy(qs)
-    if test.get("shuffle_questions", True):
-        random.shuffle(qs)
-    _shuffle_options(qs)
-
-    _group_sessions[chat_id] = {
-        "tid": tid, "test": test, "questions": qs,
-        "answers": {}, "names": {}, "poll_map": {},
-        "host_id": uid, "poll_time": poll_time, "task": None,
-    }
-
-    try: await callback.message.delete()
-    except: pass
-
-    cdown = await callback.bot.send_message(chat_id, f"📝 <b>{test.get('title')}</b>", protect_content=is_protect_content())
-    for emoji in COUNT_EMOJIS:
-        await asyncio.sleep(0.8)
-        try: await cdown.edit_text(emoji)
-        except: pass
-    await asyncio.sleep(0.5)
-    try: await cdown.delete()
-    except: pass
-
-    b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="⏹ Testni to'xtatish", callback_data=f"gstop_{uid}"))
-    skipped  = len(test.get("questions",[])) - len(qs)
-    skip_txt = f"\n⚠️ <i>{skipped} ta matn savol o'tkazildi</i>" if skipped else ""
-    await callback.bot.send_message(
-        chat_id,
-        f"🚀 <b>TEST BOSHLANDI!</b> | {len(qs)} savol | ⏱{poll_time}s{skip_txt}\n"
-        f"📢 Hamma qatnashing!\n{STOP_HINT}",
-        reply_markup=b.as_markup()
-    ,
-        protect_content=is_protect_content())
-
-    task = asyncio.create_task(
-        _run_group_polls(callback.bot, chat_id, tid, qs, poll_time)
-    )
-    _group_sessions[chat_id]["task"] = task
+    # Test darhol boshlanmaydi — avval "✋ Tayyorman" lobbisi ochiladi
+    if await _open_lobby(callback.bot, chat_id, uid, tid):
+        await _delete_quiet(callback.bot, chat_id, callback.message.message_id)
 
 
 async def _run_group_polls(bot, chat_id: int, tid: str, qs: list, poll_time: int):
@@ -877,7 +836,7 @@ async def handle_inline_answer(callback: CallbackQuery):
     # Javobni saqlash
     if uid_str not in session["answers"]:
         session["answers"][uid_str] = {}
-    session["names"][uid_str] = user.full_name or user.first_name or "O'quvchi"
+    session["names"][uid_str] = user_display_name(user)
 
     qs    = session["questions"]
     q     = qs[q_idx] if q_idx < len(qs) else {}
@@ -1083,9 +1042,10 @@ async def _show_group_leaderboard(
                 scored_entry = r
                 break
         user = ram.get_user(uid_str) or {}
+        # Kunlik guruh reytingi ham test paytidagi toza ismni oladi (ism→familiya→username)
         ram.update_group_leaderboard(
             uid_str,
-            user.get("name", f"User {uid_str}"),
+            scored_entry.get("first_name") or user.get("name", f"User {uid_str}"),
             scored_entry.get("score", 0),
             scored_entry.get("correct", 0),
             scored_entry.get("total", len(qs)),
@@ -1149,19 +1109,10 @@ def _trim_caption(text: str, limit: int = 1024) -> str:
 
 
 def _clean_name(name: str, max_len: int) -> str:
-    """Emoji, maxsus Unicode (𒐫 kabi), nazorat belgilarini olib tashlaydi va qisqartiradi."""
-    import unicodedata
-    result = []
-    for ch in name:
-        cat = unicodedata.category(ch)
-        if cat.startswith(('L', 'N', 'P', 'Z')) and ord(ch) < 0x10000:
-            result.append(ch)
-    cleaned = ''.join(result).strip()
-    if not cleaned:
-        cleaned = "NoName"
-    if len(cleaned) > max_len:
-        cleaned = cleaned[:max_len] + "…"
-    return cleaned
+    """Ismni tozalaydi (emoji/maxsus belgilar olib tashlanadi, fancy yozuv NFKC bilan o'qiladi).
+    Harf qolmasa — NoName."""
+    cleaned = clean_text(name, max_len)
+    return cleaned if has_letters(cleaned) else FALLBACK
 
 
 def _build_caption(results, title, passing, stopped_early):
@@ -1170,7 +1121,7 @@ def _build_caption(results, title, passing, stopped_early):
     passed   = sum(1 for r in results if r["score"] >= passing)
     avg      = sum(r["score"] for r in results) / len(results)
     top      = results[0]
-    top_name = top.get("username") or top.get("first_name","?")
+    top_name = html.escape(_clean_name(top.get("username") or top.get("first_name") or "?", 25))
     stop_txt = "\n⛔ <i>Test to'xtatildi</i>" if stopped_early else ""
     return (
         f"🏁 <b>{title}</b>\n\n"
@@ -1203,7 +1154,7 @@ def _build_text_leaderboard(tid, results, test, qs, bot_uname, stopped_early, pa
         filled  = round(pct / 10)
         bar     = "🟩" * filled + "⬜️" * (10 - filled)
         raw     = r.get("first_name") or r.get("username") or "O'quvchi"
-        name    = _clean_name(raw, 20)
+        name    = html.escape(_clean_name(raw, 20))
         text   += (
             f"{medal} <b>{name}</b>\n"
             f"    {bar}  {pct:.0f}%  ({correct}/{total} ✅)\n\n"
@@ -1247,7 +1198,7 @@ async def _send_text_leaderboard(
         filled  = round(pct / 10)
         bar     = "🟩" * filled + "⬜️" * (10 - filled)
         raw     = r.get("first_name") or r.get("username") or "O'quvchi"
-        name    = _clean_name(raw, 20)
+        name    = html.escape(_clean_name(raw, 20))
         text   += (
             f"{medal} <b>{name}</b>\n"
             f"    {bar}  {pct:.0f}%  ({correct}/{total} ✅)\n\n"
@@ -1381,6 +1332,254 @@ async def cmd_quiz_start_inline(message: Message):
 
 
 
+# ══════════════════════════════════════════════════════════════
+# LOBBY — "✋ Tayyorman" → "▶️ Boshlash" (test darhol boshlanmaydi)
+# ══════════════════════════════════════════════════════════════
+# Guruhda test chaqirilganda avval lobby ochiladi: ishtirokchilar
+# "✋ Tayyorman" bosib tayyorligini bildiradi. Test faqat boshlovchi
+# (yoki guruh admini) "▶️ Boshlash" bosganda sanoq bilan boshlanadi.
+# Boshlanmasa, LOBBY_TIMEOUT_SEC dan keyin lobby avtomatik yopiladi.
+
+_bg_tasks: set = set()   # fon tasklari ustidan GC ketmasligi uchun
+
+
+def _spawn(coro):
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
+
+
+def _lobby_text(lobby: dict) -> str:
+    test  = lobby["test"]
+    title = html.escape(str(test.get("title", "Test")))
+    ps    = test.get("passing_score", 60)
+    names = list(lobby["ready"].values())
+    rows  = "\n".join(f"{i}. {html.escape(n)}" for i, n in enumerate(names[:30], 1))
+    rows  = rows or "<i>Hali hech kim tayyor emas</i>"
+    more  = f"\n<i>...va yana {len(names) - 30} kishi</i>" if len(names) > 30 else ""
+    skip  = f"\n⚠️ {lobby['skipped']} ta matn savol o'tkazildi" if lobby.get("skipped") else ""
+    return (
+        f"🎯 <b>{title}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 {lobby['total']} ta savol | ⏱ {lobby['poll_time']}s/savol\n"
+        f"🎯 O'tish: {ps}%{skip}\n"
+        f"👤 Boshlovchi: <a href=\"tg://user?id={lobby['host_id']}\">profil</a>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✋ <b>Tayyor: {len(names)} kishi</b>\n"
+        f"{rows}{more}\n\n"
+        f"👉 Tayyor bo'lganlar «✋ Tayyorman» ni bosing.\n"
+        f"▶️ Boshlovchi yoki admin «Boshlash» ni bossa, test boshlanadi."
+    )
+
+
+def _lobby_kb(chat_id: int):
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="✋ Tayyorman", callback_data=f"gl_ready_{chat_id}"))
+    b.row(
+        InlineKeyboardButton(text="▶️ Boshlash", callback_data=f"gl_go_{chat_id}"),
+        InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"gl_cancel_{chat_id}"),
+    )
+    return b.as_markup()
+
+
+def _chat_from_cb(data: str, prefix: str) -> Optional[int]:
+    try:
+        return int(data[len(prefix):])
+    except (TypeError, ValueError):
+        return None
+
+
+def _cancel_lobby_task(lobby: dict):
+    task = lobby.get("task")
+    if task and not task.done():
+        task.cancel()
+
+
+async def _close_lobby_message(bot, chat_id: int, lobby: dict, text: str):
+    if not lobby.get("msg_id"):
+        return
+    try:
+        await bot.edit_message_text(text, chat_id=chat_id, message_id=lobby["msg_id"],
+                                    reply_markup=None)
+    except Exception as e:
+        log.debug("lobby xabarini yopib bo'lmadi: %s", e)
+
+
+async def _delete_quiet(bot, chat_id: int, message_id):
+    if not message_id:
+        return
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
+
+async def _refresh_lobby(bot, chat_id: int, lobby: dict, force: bool = False):
+    """Lobby xabarini yangilaydi. Tez-tez bosilganda Telegram limitiga tushmaslik uchun
+    LOBBY_EDIT_MIN_SEC da bir marta tahrirlaydi; oxirgi o'zgarish ham kechiktirib yetkaziladi."""
+    if not lobby.get("msg_id"):                 # xabar hali yuborilmagan (ochilish davomida)
+        return
+    now  = time.monotonic()
+    wait = LOBBY_EDIT_MIN_SEC - (now - lobby.get("last_edit", 0.0))
+    if not force and wait > 0:
+        if not lobby.get("pending"):
+            lobby["pending"] = True
+            _spawn(_delayed_lobby_refresh(bot, chat_id, lobby, wait))
+        return
+    lobby["last_edit"] = now
+    try:
+        await bot.edit_message_text(
+            _lobby_text(lobby), chat_id=chat_id, message_id=lobby["msg_id"],
+            reply_markup=_lobby_kb(chat_id),
+        )
+    except Exception as e:
+        log.debug("lobby yangilanmadi: %s", e)
+
+
+async def _delayed_lobby_refresh(bot, chat_id: int, lobby: dict, delay: float):
+    await asyncio.sleep(delay)
+    lobby["pending"] = False
+    if _lobby_sessions.get(chat_id) is lobby:
+        await _refresh_lobby(bot, chat_id, lobby, force=True)
+
+
+async def _lobby_timeout(bot, chat_id: int, lobby: dict):
+    try:
+        await asyncio.sleep(LOBBY_TIMEOUT_SEC)
+    except asyncio.CancelledError:
+        return
+    if _lobby_sessions.get(chat_id) is not lobby:
+        return
+    _lobby_sessions.pop(chat_id, None)
+    await _close_lobby_message(
+        bot, chat_id, lobby,
+        "⌛ <b>Tayyorgarlik vaqti tugadi.</b>\n"
+        "Testni boshlash uchun uni guruhga yana yuboring.",
+    )
+
+
+async def _open_lobby(bot, chat_id: int, uid: int, tid: str) -> bool:
+    """Lobby ochadi. True — ochildi; False — sabab guruhga yuborilgan."""
+    if is_test_paused(tid):
+        await bot.send_message(chat_id, "⚠️ Bu test vaqtincha to'xtatilgan!",
+                               protect_content=is_protect_content())
+        return False
+
+    test = await _load_test(bot, chat_id, tid)
+    if not test:
+        await bot.send_message(chat_id, f"❌ <code>{tid}</code> kodli test topilmadi.",
+                               protect_content=is_protect_content())
+        return False
+
+    if not await _group_test_access(tid, uid, test):
+        from config import ADMIN_USERNAME
+        b = InlineKeyboardBuilder()
+        b.row(InlineKeyboardButton(text="📩 Adminga murojat", url=f"https://t.me/{ADMIN_USERNAME}"))
+        await bot.send_message(
+            chat_id,
+            f"🔐 <b>Kirish cheklangan</b>\n\n"
+            f"Bu testni guruhda boshlash uchun ruxsatingiz yo'q.\n"
+            f"Ruxsat olish uchun @{ADMIN_USERNAME} ga yozing.",
+            reply_markup=b.as_markup(), protect_content=is_protect_content(),
+        )
+        return False
+
+    qs = [q for q in test.get("questions", [])
+          if q.get("type", "multiple_choice") in ("multiple_choice", "true_false")]
+    if not qs:
+        await bot.send_message(chat_id, "⚠️ Bu testda poll uchun savollar yo'q!",
+                               protect_content=is_protect_content())
+        return False
+
+    lobby = {
+        "tid":       tid,
+        "test":      test,
+        "host_id":   uid,
+        "total":     len(qs),
+        "skipped":   len(test.get("questions", [])) - len(qs),
+        "poll_time": test.get("poll_time", 30) or 30,
+        "ready":     {},          # {uid_str: ko'rsatiladigan ism}
+        "msg_id":    None,
+        "last_edit": 0.0,
+        "pending":   False,
+        "task":      None,
+    }
+    _lobby_sessions[chat_id] = lobby
+    try:
+        msg = await bot.send_message(
+            chat_id, _lobby_text(lobby), reply_markup=_lobby_kb(chat_id),
+            protect_content=is_protect_content(),
+        )
+    except Exception as e:
+        _lobby_sessions.pop(chat_id, None)
+        log.error("lobby ochilmadi chat=%s: %s", chat_id, e)
+        return False
+    lobby["msg_id"] = msg.message_id
+    lobby["task"]   = _spawn(_lobby_timeout(bot, chat_id, lobby))
+    return True
+
+
+@router.callback_query(F.data.startswith("gl_ready_"))
+async def lobby_ready(callback: CallbackQuery):
+    """'✋ Tayyorman' — ishtirokchi tayyorligini bildiradi (test hali boshlanmaydi)."""
+    chat_id = _chat_from_cb(callback.data, "gl_ready_")
+    lobby   = _lobby_sessions.get(chat_id) if chat_id is not None else None
+    if not lobby:
+        return await callback.answer("⌛ Bu lobby allaqachon yopilgan.", show_alert=True)
+    user    = callback.from_user
+    uid_str = str(user.id)
+    if uid_str in lobby["ready"]:
+        return await callback.answer(f"✅ Siz allaqachon tayyorsiz! ({len(lobby['ready'])} kishi)")
+    lobby["ready"][uid_str] = user_display_name(user, max_len=25)
+    await callback.answer(f"✅ Tayyor! Hozir {len(lobby['ready'])} kishi tayyor.")
+    await _refresh_lobby(callback.bot, chat_id, lobby)
+
+
+@router.callback_query(F.data.startswith("gl_go_"))
+async def lobby_go(callback: CallbackQuery):
+    """'▶️ Boshlash' — faqat boshlovchi yoki admin. Test shu yerdan boshlanadi."""
+    chat_id = _chat_from_cb(callback.data, "gl_go_")
+    lobby   = _lobby_sessions.get(chat_id) if chat_id is not None else None
+    if not lobby:
+        return await callback.answer("⌛ Bu lobby allaqachon yopilgan.", show_alert=True)
+    uid = callback.from_user.id
+    if uid != lobby["host_id"] and not await _is_admin(callback.bot, chat_id, uid):
+        return await callback.answer("⚠️ Faqat boshlovchi yoki admin boshlashi mumkin!",
+                                     show_alert=True)
+    if _lobby_sessions.get(chat_id) is not lobby:          # await vaqtida yopilgan bo'lishi mumkin
+        return await callback.answer("⌛ Bu lobby allaqachon yopilgan.", show_alert=True)
+    # Lobbyni shu zahoti yopamiz (await dan oldin) — ikki marta bosilsa ham test bir marta boshlanadi
+    _lobby_sessions.pop(chat_id, None)
+    _cancel_lobby_task(lobby)
+    _starting.add(chat_id)
+    try:
+        await callback.answer("🚀 Boshlanmoqda...")
+        await _delete_quiet(callback.bot, chat_id, lobby.get("msg_id"))
+        await _start_group_test_impl(callback.bot, chat_id, lobby["host_id"], lobby["tid"], "poll")
+    finally:
+        _starting.discard(chat_id)
+
+
+@router.callback_query(F.data.startswith("gl_cancel_"))
+async def lobby_cancel(callback: CallbackQuery):
+    """'❌ Bekor qilish' — faqat boshlovchi yoki admin."""
+    chat_id = _chat_from_cb(callback.data, "gl_cancel_")
+    lobby   = _lobby_sessions.get(chat_id) if chat_id is not None else None
+    if not lobby:
+        return await callback.answer("⌛ Bu lobby allaqachon yopilgan.", show_alert=True)
+    uid = callback.from_user.id
+    if uid != lobby["host_id"] and not await _is_admin(callback.bot, chat_id, uid):
+        return await callback.answer("⚠️ Faqat boshlovchi yoki admin bekor qilishi mumkin!",
+                                     show_alert=True)
+    if _lobby_sessions.get(chat_id) is not lobby:
+        return await callback.answer("⌛ Bu lobby allaqachon yopilgan.", show_alert=True)
+    _lobby_sessions.pop(chat_id, None)
+    _cancel_lobby_task(lobby)
+    await callback.answer("❌ Bekor qilindi")
+    await _close_lobby_message(callback.bot, chat_id, lobby, "❌ <b>Test bekor qilindi.</b>")
+
+
 async def _group_test_access(tid: str, uid: int, test: dict | None = None) -> bool:
     """Guruh testi uchun yagona access tekshiruvi: allowed_users yoki active Premium."""
     try:
@@ -1402,8 +1601,10 @@ async def _group_test_access(tid: str, uid: int, test: dict | None = None) -> bo
             return False
 
 
-async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
-    """Guruhda test boshlash. start.py, cmd_quiz_start va scheduler ishlatadi.
+async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str, lobby: bool = True):
+    """Guruhda test chaqirish. start.py va cmd_quiz_start ishlatadi (lobby=True):
+    avval "✋ Tayyorman" lobbisi ochiladi, test boshlovchi "▶️ Boshlash" bosgach boshlanadi.
+    Scheduler lobby=False bilan chaqiradi — rejalashtirilgan test darhol boshlanadi.
     Guruhda faqat BITTA faol test bo'lishi mumkin. Majburiy obuna guruhda TEKSHIRILMAYDI.
     Guruhda faqat Poll rejimi bor: eski "inline" so'rovlari Poll ga aylantiriladi."""
     mode = "poll"
@@ -1411,6 +1612,9 @@ async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str):
         return await _warn_busy(bot, chat_id)
     _starting.add(chat_id)           # tekshiruv va band qilish orasida await yo'q
     try:
+        if lobby:
+            await _open_lobby(bot, chat_id, uid, tid)
+            return None
         return await _start_group_test_impl(bot, chat_id, uid, tid, mode)
     finally:
         _starting.discard(chat_id)
@@ -1591,6 +1795,17 @@ async def cmd_quiz_stop(message: Message):
 
     # Admin yoki host tekshiruvi
     stopped = False
+
+    lobby = _lobby_sessions.get(chat_id)
+    if lobby:
+        if uid == lobby.get("host_id") or await _is_admin(message.bot, chat_id, uid):
+            _lobby_sessions.pop(chat_id, None)
+            _cancel_lobby_task(lobby)
+            await _close_lobby_message(message.bot, chat_id, lobby,
+                                       "⏹ <b>Lobby to'xtatildi.</b>")
+            stopped = True
+        else:
+            return await message.answer("⚠️ Faqat test boshlovchi yoki admin to\'xtatishi mumkin!")
 
     if chat_id in _inline_sessions:
         session = _inline_sessions[chat_id]

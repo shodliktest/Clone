@@ -10,6 +10,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 from config import ADMIN_IDS
 from utils.db import get_or_create_user
+from utils.display_name import user_display_name
 from utils.ram_cache import get_test_by_id, get_test_meta
 from keyboards.keyboards import main_kb, test_info_kb
 from utils.states import ContactAdmin
@@ -23,7 +24,8 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     uid       = message.from_user.id
     uname     = message.from_user.username
-    name      = message.from_user.full_name or (f"@{uname}" if uname else f"User{uid}")
+    # Ism: first_name → (bo'lmasa) last_name → username; reyting ham shu nomni ko'rsatadi
+    name      = user_display_name(message.from_user, max_len=40)
     chat_type = message.chat.type   # "private" | "group" | "supergroup" | "channel"
 
     # ── GURUHDA /start — parametrsiz bo'lsa ma'lumot, parametrli bo'lsa davom ──
