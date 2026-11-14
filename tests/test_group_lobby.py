@@ -1,4 +1,4 @@
-"""Lobby ("✋ Tayyorman" → "▶️ Boshlash") va ism qoidasi testlari.
+"""Lobby ("✋ Tayyorman" → 2 kishi tayyor bo'lsa avto-start) va ism qoidasi testlari.
 
 Haqiqiy handlers/group.py chaqiriladi; Telegram bot soxta (fake) obyekt bilan almashtirilgan.
 Ishga tushirish:  python -I -m pytest -q <this file>
@@ -195,7 +195,8 @@ def test_start_opens_lobby_and_does_not_start_test(monkeypatch):
         assert "Tayyor" in text
         assert "Matematika &lt;1-bob&gt; &amp; algebra" in text   # sarlavha HTML-escape qilingan
         cbs = [b.callback_data for row in kw["reply_markup"].inline_keyboard for b in row]
-        assert f"gl_ready_{CHAT}" in cbs and f"gl_go_{CHAT}" in cbs and f"gl_cancel_{CHAT}" in cbs
+        assert f"gl_ready_{CHAT}" in cbs and f"gl_cancel_{CHAT}" in cbs
+        assert not any(c.startswith("gl_go_") for c in cbs)      # "Boshlash" tugmasi yo'q
         await _drain()
         g._lobby_sessions.clear()
     asyncio.run(run())
@@ -221,43 +222,81 @@ def test_ready_presses_update_list_and_are_deduplicated(monkeypatch):
     asyncio.run(run())
 
 
-def test_only_host_or_admin_can_start_and_double_press_is_safe(monkeypatch):
+def test_autostart_when_two_ready(monkeypatch):
     bot = _setup(monkeypatch)
+    monkeypatch.setattr(g, "LOBBY_START_DELAY_SEC", 0.2)
 
     async def run():
         await g._start_group_test(bot, CHAT, HOST, TID, "poll")
-        # Oddiy a'zo boshlay olmaydi
-        cb = FakeCB(bot, f"gl_go_{CHAT}", ALI, "Ali")
-        await g.lobby_go(cb)
-        assert cb.answers[0][1] is True and "Faqat" in cb.answers[0][0]
-        assert CHAT in g._lobby_sessions and bot.polls == [] and CHAT not in g._group_sessions
-
-        # Boshlovchi boshlaydi
-        await g.lobby_go(FakeCB(bot, f"gl_go_{CHAT}", HOST, "Host"))
+        # 1 kishi — boshlanmaydi
+        await g.lobby_ready(FakeCB(bot, f"gl_ready_{CHAT}", ALI, "Ali"))
+        await asyncio.sleep(0.4)
+        assert CHAT in g._lobby_sessions and CHAT not in g._group_sessions
+        assert not g._lobby_sessions[CHAT].get("start_task")
+        # 2-kishi bosadi — kechikishdan keyin test o'zi boshlanadi
+        await g.lobby_ready(FakeCB(bot, f"gl_ready_{CHAT}", VALI, "Vali"))
+        assert g._lobby_sessions[CHAT]["start_task"]
+        assert CHAT not in g._group_sessions                      # darhol emas
+        # 3-kishi kechikkan — ikkinchi start ochilmaydi
+        await g.lobby_ready(FakeCB(bot, f"gl_ready_{CHAT}", ADMIN, "Admin"))
+        for _ in range(40):                                       # sanoq tugashini kutamiz
+            await asyncio.sleep(0.2)
+            if any("QUIZ POLL BOSHLANDI" in t for _, t, _ in bot.sent):
+                break
         assert CHAT not in g._lobby_sessions
-        assert CHAT in g._group_sessions                          # test boshlandi
+        assert CHAT in g._group_sessions
         assert g._group_sessions[CHAT]["host_id"] == HOST
-        assert any("QUIZ POLL BOSHLANDI" in t for _, t, _ in bot.sent)
-        assert bot.deleted                                        # lobby xabari o'chirildi
-
-        # Ikkinchi marta bosilsa — yangi test boshlanmaydi
-        dup = FakeCB(bot, f"gl_go_{CHAT}", HOST, "Host")
-        await g.lobby_go(dup)
-        assert "allaqachon yopilgan" in dup.answers[0][0]
         assert sum(1 for _, t, _ in bot.sent if "QUIZ POLL BOSHLANDI" in t) == 1
+        assert bot.deleted                                        # lobby xabari o'chirildi
         g._group_sessions.clear()
         await _drain()
     asyncio.run(run())
 
 
-def test_admin_can_start_lobby_of_someone_else(monkeypatch):
+def test_same_user_twice_does_not_trigger_autostart(monkeypatch):
     bot = _setup(monkeypatch)
+    monkeypatch.setattr(g, "LOBBY_START_DELAY_SEC", 0.1)
 
     async def run():
         await g._start_group_test(bot, CHAT, HOST, TID, "poll")
-        await g.lobby_go(FakeCB(bot, f"gl_go_{CHAT}", ADMIN, "Admin"))
-        assert CHAT in g._group_sessions
-        g._group_sessions.clear()
+        await g.lobby_ready(FakeCB(bot, f"gl_ready_{CHAT}", ALI, "Ali"))
+        await g.lobby_ready(FakeCB(bot, f"gl_ready_{CHAT}", ALI, "Ali"))
+        await asyncio.sleep(0.3)
+        assert CHAT in g._lobby_sessions and CHAT not in g._group_sessions
+        g._cancel_lobby_task(g._lobby_sessions[CHAT])
+        g._lobby_sessions.clear()
+    asyncio.run(run())
+
+
+def test_cancel_during_countdown_prevents_start(monkeypatch):
+    bot = _setup(monkeypatch)
+    monkeypatch.setattr(g, "LOBBY_START_DELAY_SEC", 0.2)
+
+    async def run():
+        await g._start_group_test(bot, CHAT, HOST, TID, "poll")
+        await g.lobby_ready(FakeCB(bot, f"gl_ready_{CHAT}", ALI, "Ali"))
+        await g.lobby_ready(FakeCB(bot, f"gl_ready_{CHAT}", VALI, "Vali"))
+        await g.lobby_cancel(FakeCB(bot, f"gl_cancel_{CHAT}", HOST, "Host"))
+        await asyncio.sleep(0.5)
+        assert CHAT not in g._lobby_sessions and CHAT not in g._group_sessions
+        assert not any("QUIZ POLL BOSHLANDI" in t for _, t, _ in bot.sent)
+    asyncio.run(run())
+
+
+def test_lobby_text_shows_need_and_countdown(monkeypatch):
+    bot = _setup(monkeypatch)
+    monkeypatch.setattr(g, "LOBBY_START_DELAY_SEC", 5)
+
+    async def run():
+        await g._start_group_test(bot, CHAT, HOST, TID, "poll")
+        lobby = g._lobby_sessions[CHAT]
+        assert "yana 2 kishi kerak" in g._lobby_text(lobby)
+        await g.lobby_ready(FakeCB(bot, f"gl_ready_{CHAT}", ALI, "Ali"))
+        assert "yana 1 kishi kerak" in g._lobby_text(lobby)
+        await g.lobby_ready(FakeCB(bot, f"gl_ready_{CHAT}", VALI, "Vali"))
+        assert "5 soniyadan keyin boshlanadi" in g._lobby_text(lobby)
+        g._cancel_lobby_task(lobby)
+        g._lobby_sessions.clear()
         await _drain()
     asyncio.run(run())
 
