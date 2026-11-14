@@ -118,48 +118,11 @@ def parse_file(path: str) -> list:
     return result
 
 
-def _q_valid(q: dict) -> bool:
-    """Savol haqiqatan ishlatsa bo'ladimi (matn + kamida 2 ta haqiqiy variant)."""
-    if not str((q or {}).get("question", "")).strip():
-        return False
-    if q.get("type", "multiple_choice") != "multiple_choice":
-        return bool(q.get("correct") or q.get("accepted_answers"))
-    real = [o for o in (q.get("options") or [])
-            if re.search(r"\w", re.sub(r"^\s*[A-Ha-h]\s*[\).]\s*", "", str(o)))]
-    return len(real) >= 2
-
-
-def _score_questions(qs: list) -> int:
-    """Parser natijasi sifati: belgilangan javobli savol > belgilanmagan > yaroqsiz.
-    (_guessed — "hammasi bir xil belgi" holatida birinchisi olingan: belgilangandan sal past.)"""
-    score = 0
-    for q in qs or []:
-        if not _q_valid(q):
-            continue
-        marked = bool(q.get("_marked", bool(q.get("correct"))))
-        score += (5 if q.get("_guessed") else 6) if marked else 4
-    return score
-
-
-def _pick_best(cands: list) -> tuple:
-    """cands: [(nom, savollar)] → (nom, savollar). Teng bo'lsa — birinchisi (unified)."""
-    best = None
-    for name, qs in cands:
-        sc = _score_questions(qs)
-        if best is None or sc > best[0]:
-            best = (sc, name, qs)
-    return best[1], best[2]
-
-
 def _parse_file_impl(path: str) -> list:
-    """Yangi (unified) parser VA eski ixtisoslashgan parserlar — ikkalasi ham ishlaydi,
-    natijasi yaxshisi (ko'proq savol + ko'proq belgilangan to'g'ri javob) tanlanadi.
-    Avval unified natijasi (qisman/javobsiz bo'lsa ham) qabul qilinib, eski formatlar
-    (? = , ====, jadval ...) jim yo'qolardi."""
-    global LAST_PDF_IMAGE_REPORT
     ext = Path(path).suffix.lower()
+    # 1) Yagona matn parseri — TXT/PDF/DOCX uchun bir xil natija (rasmsiz hujjatlar)
+    global LAST_PDF_IMAGE_REPORT
     LAST_PDF_IMAGE_REPORT = {}
-    cands = []
     if ext in (".txt", ".pdf", ".docx", ".doc", ".xlsx", ".xlsm"):
         try:
             has_img = False
@@ -167,27 +130,14 @@ def _parse_file_impl(path: str) -> list:
                 has_img = bool((check_images_in_file(path) or {}).get("has_images"))
             if not has_img:
                 from utils.quiz_text import parse_file_unified
-                uq, _rep = parse_file_unified(path)
-                if uq:
-                    cands.append(("unified", uq))
+                uq, rep = parse_file_unified(path)
+                blocks = max(1, rep.get("blocks", 0))
+                if uq and len(rep.get("dropped", [])) <= 0.2 * blocks:
+                    log.info(f"parse_file unified: {len(uq)} savol ({ext})")
+                    return uq
         except Exception as e:
-            log.warning(f"unified parser ishlamadi: {e}")
-    legacy = _parse_file_legacy(path)
-    if legacy:
-        cands.append(("legacy", legacy))
-    if not cands:
-        return []
-    name, qs = _pick_best(cands)
-    if name == "unified":
-        LAST_PDF_IMAGE_REPORT = {}          # rasm hisoboti faqat eski (rasmli) yo'ldan
-    log.info("parse_file: %s tanlandi (%d savol; %s)", name, len(qs),
-             ", ".join(f"{n}={_score_questions(q)}" for n, q in cands))
-    return qs
-
-
-def _parse_file_legacy(path: str) -> list:
-    """Eski ixtisoslashgan parserlar (rasmli DOCX, jadval, ? = , ==== va boshqa maxsus formatlar)."""
-    ext = Path(path).suffix.lower()
+            log.warning(f"unified parser ishlamadi, eski yo'lga o'tildi: {e}")
+    # 2) Eski ixtisoslashgan parserlar (rasmli DOCX, jadval, maxsus formatlar)
     try:
         # .doc → matn/docx konvertatsiya (sof Python, LibreOffice yo'q)
         if ext == ".doc":
@@ -1251,15 +1201,6 @@ _VAR_STARTS = (
 )
 
 
-# Prefiksda uchrashi mumkin bo'lgan belgilar: variant belgilari + bo'sh joy + "to'g'ri" belgilari
-_PREFIX_CHARS = frozenset(_VAR_STARTS) | frozenset(" \t\u00a0✅☑✔✓√+!")
-
-# Hamma variant bir xil belgi bilan kelganda (hammasi "= ..."): birinchi variantni
-# to'g'ri deb olish (test banki konventsiyasi: birinchi chiqqan = to'g'ri javob).
-# Faqat FAYLDA birorta ham farqli belgi topilmasa ishlaydi. False — eski xulq (belgilanmagan).
-EQ_ALLSAME_FIRST_CORRECT = True
-
-
 def _extract_prefix(line: str) -> tuple:
     """
     Qatordan prefiks (marker) va toza matnni ajratadi.
@@ -1282,15 +1223,12 @@ def _extract_prefix(line: str) -> tuple:
     if not starts_with_marker:
         return None, None
     
-    # Prefiks = boshidagi BELGI-simvollar va bo'sh joylar ketma-ketligi.
-    # («», "", (, [ kabi matn belgilari prefiksga kirmaydi — aks holda
-    #  "= «Toshkent»" va "= Samarqand" noto'g'ri "farqli" bo'lib qolardi.)
+    # Prefiksni olish: harf yoki raqam kelguncha
     prefix = ""
     for ch in s:
-        if ch in _PREFIX_CHARS:
-            prefix += ch
-        else:
+        if ch.isalpha() or ch.isdigit():
             break
+        prefix += ch
     
     clean = s[len(prefix):].strip()
     if not clean:
@@ -1299,7 +1237,7 @@ def _extract_prefix(line: str) -> tuple:
     return prefix, clean
 
 
-def _find_correct_by_diff(raw_variants: list, guess_first: bool = False) -> tuple:
+def _find_correct_by_diff(raw_variants: list) -> tuple:
     """
     Differential analysis bilan to'g'ri javobni topadi.
     
@@ -1343,10 +1281,6 @@ def _find_correct_by_diff(raw_variants: list, guess_first: bool = False) -> tupl
                     correct_idx = i
                     break
     
-    # Hammasi bir xil belgi: (faqat so'ralsa) birinchi variant to'g'ri
-    if correct_idx < 0 and guess_first and len(counts) == 1 and len(parsed) >= 2:
-        correct_idx = 0
-
     # Toza variantlarni qaytaramiz
     clean_variants = [clean for _, clean in parsed]
     return clean_variants, correct_idx
@@ -1387,7 +1321,6 @@ def _parse_question_eq(text: str) -> list:
     """
     LBL = ["A", "B", "C", "D", "E", "F", "G", "H"]
     questions = []
-    blocks = []     # [(savol_matni, [xom variantlar])]
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     i = 0
 
@@ -1423,27 +1356,12 @@ def _parse_question_eq(text: str) -> list:
 
         if not raw_variants:
             continue
-        blocks.append((q_text, raw_variants))
 
-    # 1-o'tish: differential tahlil
-    results = []
-    for q_text, raw in blocks:
-        cv, ci = _find_correct_by_diff(raw)
-        if cv:
-            results.append([q_text, raw, cv, ci])
+        # Differential analysis
+        clean_variants, correct_idx = _find_correct_by_diff(raw_variants)
 
-    # 2-o'tish: faylda birorta ham farqli belgi topilmagan bo'lsa (hammasi "= ...") —
-    # har savolning birinchi varianti to'g'ri. Aralash faylda (ba'zi savollar belgilangan)
-    # belgisizlari BELGILANMAGAN qoladi — muallif javobni belgilagan, bu yerda unutgan.
-    file_has_marks = any(ci >= 0 for _, _, _, ci in results)
-    guess_all = EQ_ALLSAME_FIRST_CORRECT and not file_has_marks
-    for r in results:
-        q_text, raw, clean_variants, correct_idx = r
-        guessed = False
-        if guess_all and correct_idx < 0:
-            _, g_idx = _find_correct_by_diff(raw, guess_first=True)
-            if g_idx >= 0:
-                correct_idx, guessed = g_idx, True
+        if not clean_variants:
+            continue
 
         # A) B) C) D) label qo'shish
         opts = []
@@ -1451,7 +1369,7 @@ def _parse_question_eq(text: str) -> list:
             lbl = LBL[j] if j < len(LBL) else str(j + 1)
             opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
 
-        q = {
+        questions.append({
             "type":             "multiple_choice",
             "question":         q_text,
             "options":          opts,
@@ -1460,10 +1378,7 @@ def _parse_question_eq(text: str) -> list:
             "accepted_answers": [],
             "points":           1,
             "_marked":          correct_idx >= 0,
-        }
-        if guessed:
-            q["_guessed"] = True
-        questions.append(q)
+        })
 
     return questions
 
@@ -1515,32 +1430,11 @@ def _read_txt(path: str) -> str:
 #  FORMAT A — STANDART RAQAMLI (mavjud logika saqlanadi)
 # ═══════════════════════════════════════════════════════════
 
-def _parse_text_legacy(text: str) -> list:
-    """Eski FORMAT A mantig'i (_parse_block) — to'g'ri javob belgilarini aniq taniydi."""
-    text = text.replace("\r\n", "\n")
-    blocks = re.split(r"\n(?=\d+[\.)] *\S)", "\n" + text.strip())
-    result = []
-    for b in blocks:
-        q = _parse_block(b.strip())
-        if q:
-            result.append(q)
-    return result
-
-
 def parse_text(text: str) -> list:
-    """Matn parseri: yangi (utils.quiz_text) va eski (_parse_block) — yaxshisi tanlanadi."""
-    cands = []
-    try:
-        from utils.quiz_text import parse_quiz_text
-        uq, _rep = parse_quiz_text(text)
-        if uq:
-            cands.append(("unified", uq))
-    except Exception as e:
-        log.warning(f"parse_text: unified ishlamadi: {e}")
-    lq = _parse_text_legacy(text)
-    if lq:
-        cands.append(("legacy", lq))
-    return _pick_best(cands)[1] if cands else []
+    """Yagona matn parseri (utils.quiz_text) — eski qoidalar bilan bir xil natija shakli."""
+    from utils.quiz_text import parse_quiz_text
+    qs, _rep = parse_quiz_text(text)
+    return qs
 
 
 def _clean_dup_label(text: str) -> str:

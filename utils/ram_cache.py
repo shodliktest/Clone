@@ -757,6 +757,7 @@ def update_group_leaderboard(uid_str, name, score, correct, total):
     found = False
     for row in lb:
         if row["uid"] == uid_str:
+            row["name"] = name[:20]          # ism o'zgargan bo'lsa (masalan, familiyadan) yangilanadi
             if score > row["best_score"]:
                 row["best_score"] = score
                 row["correct"]    = correct

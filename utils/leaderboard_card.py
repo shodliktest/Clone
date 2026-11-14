@@ -55,19 +55,10 @@ def _th(draw, t, f):
     b = draw.textbbox((0,0), t, font=f); return b[3]-b[1]
 
 def _clean_name(name: str, max_len: int) -> str:
-    """Emoji, maxsus Unicode (𒐫 kabi), nazorat belgilarini olib tashlaydi, keyin qisqartiradi."""
-    import unicodedata
-    result = []
-    for ch in name:
-        cat = unicodedata.category(ch)
-        if cat.startswith(('L', 'N', 'P', 'Z')) and ord(ch) < 0x10000:
-            result.append(ch)
-    cleaned = ''.join(result).strip()
-    if not cleaned:
-        cleaned = "NoName"
-    if len(cleaned) > max_len:
-        cleaned = cleaned[:max_len] + "…"
-    return cleaned
+    """Ismni tozalaydi (NFKC: fancy yozuv ham o'qiladi). Harf bo'lmasa — NoName."""
+    from utils.display_name import clean_text, has_letters, FALLBACK
+    cleaned = clean_text(name, max_len)
+    return cleaned if has_letters(cleaned) else FALLBACK
 
 def generate_leaderboard_image(
     quiz_title, results, passing_score=60.0, total_questions=0

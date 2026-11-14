@@ -45,6 +45,9 @@ async def get_or_create_user(tg_id, name, username=None):
     now  = str(datetime.now(UTC))
     if user:
         user["last_active"] = now
+        # Ism o'zgargan bo'lsa (masalan, eski "🙂 Karimov" → "Karimov") reyting uchun yangilaymiz
+        if name and user.get("name") != name:
+            user["name"] = name
         ram.upsert_user(tg_id, user)
         return user
     # Yangi user
