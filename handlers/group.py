@@ -84,10 +84,12 @@ _group_sessions: Dict[int, dict] = {}
 # Inline sessiyasi: {chat_id: {...}}
 _inline_sessions: Dict[int, dict] = {}
 
-# Lobby (tayyorgarlik): {chat_id: {...}} — test "Tayyorman"/"Boshlash" kutadi
+# Lobby (tayyorgarlik): {chat_id: {...}} — test "Tayyorman" bosilishini kutadi
 _lobby_sessions: Dict[int, dict] = {}
 LOBBY_TIMEOUT_SEC      = 600   # shu vaqt ichida boshlanmasa lobby yopiladi
 LOBBY_EDIT_MIN_SEC     = 2.0   # lobby xabarini tahrirlash orasidagi minimal vaqt
+LOBBY_MIN_READY        = 2     # shuncha kishi "Tayyorman" bossa test avtomatik boshlanadi
+LOBBY_START_DELAY_SEC  = 10    # kamida LOBBY_MIN_READY yig'ilgach, boshlanishgacha kutish (kechikkanlar ulgursin)
 
 # ─── Bitta guruhda bir vaqtda faqat BITTA faol test ━━━━━━━━━━━━━━
 # _starting — test boshlanish jarayonidagi chatlar (ikki kishi bir vaqtda
@@ -145,7 +147,7 @@ async def _warn_busy(bot, chat_id: int, callback: CallbackQuery = None):
             f"⏳ <b>Guruhda test tayyorlanmoqda!</b>\n\n"
             f"📝 <b>{title}</b>\n\n"
             f"Yangi test boshlash uchun avval joriy lobbyni yoping yoki "
-            f"boshlovchi «▶️ Boshlash» tugmasini bosguncha kuting.\n\n"
+            f"test boshlanguncha kuting.\n\n"
             f"{STOP_HINT}"
         )
         b = InlineKeyboardBuilder()
@@ -1333,12 +1335,14 @@ async def cmd_quiz_start_inline(message: Message):
 
 
 # ══════════════════════════════════════════════════════════════
-# LOBBY — "✋ Tayyorman" → "▶️ Boshlash" (test darhol boshlanmaydi)
+# LOBBY — "✋ Tayyorman" (Native QuizBot kabi: test darhol boshlanmaydi)
 # ══════════════════════════════════════════════════════════════
 # Guruhda test chaqirilganda avval lobby ochiladi: ishtirokchilar
-# "✋ Tayyorman" bosib tayyorligini bildiradi. Test faqat boshlovchi
-# (yoki guruh admini) "▶️ Boshlash" bosganda sanoq bilan boshlanadi.
-# Boshlanmasa, LOBBY_TIMEOUT_SEC dan keyin lobby avtomatik yopiladi.
+# "✋ Tayyorman" bosib tayyorligini bildiradi. Kamida LOBBY_MIN_READY kishi
+# tayyor bo'lgach, LOBBY_START_DELAY_SEC soniyadan keyin test AVTOMATIK
+# (sanoq bilan) boshlanadi. "Boshlash" tugmasi yo'q; "❌ Bekor qilish" —
+# boshlovchi yoki admin. Yetarli odam yig'ilmasa, LOBBY_TIMEOUT_SEC dan
+# keyin lobby avtomatik yopiladi.
 
 _bg_tasks: set = set()   # fon tasklari ustidan GC ketmasligi uchun
 
@@ -1348,6 +1352,16 @@ def _spawn(coro):
     _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
     return task
+
+
+def _lobby_hint(lobby: dict) -> str:
+    n = len(lobby["ready"])
+    if lobby.get("start_task"):
+        return f"🚀 <b>Test {LOBBY_START_DELAY_SEC} soniyadan keyin boshlanadi!</b>\n✋ Ulgurmaganlar tezroq «Tayyorman» ni bosing."
+    need = max(LOBBY_MIN_READY - n, 0)
+    return (f"👉 Tayyor bo'lganlar «✋ Tayyorman» ni bosing.\n"
+            f"⏳ Test kamida {LOBBY_MIN_READY} kishi tayyor bo'lganda boshlanadi"
+            f"{f' (yana {need} kishi kerak)' if need else ''}.")
 
 
 def _lobby_text(lobby: dict) -> str:
@@ -1368,18 +1382,14 @@ def _lobby_text(lobby: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"✋ <b>Tayyor: {len(names)} kishi</b>\n"
         f"{rows}{more}\n\n"
-        f"👉 Tayyor bo'lganlar «✋ Tayyorman» ni bosing.\n"
-        f"▶️ Boshlovchi yoki admin «Boshlash» ni bossa, test boshlanadi."
+        f"{_lobby_hint(lobby)}"
     )
 
 
 def _lobby_kb(chat_id: int):
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text="✋ Tayyorman", callback_data=f"gl_ready_{chat_id}"))
-    b.row(
-        InlineKeyboardButton(text="▶️ Boshlash", callback_data=f"gl_go_{chat_id}"),
-        InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"gl_cancel_{chat_id}"),
-    )
+    b.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"gl_cancel_{chat_id}"))
     return b.as_markup()
 
 
@@ -1391,9 +1401,11 @@ def _chat_from_cb(data: str, prefix: str) -> Optional[int]:
 
 
 def _cancel_lobby_task(lobby: dict):
-    task = lobby.get("task")
-    if task and not task.done():
-        task.cancel()
+    """Lobbining timeout va avto-start tasklarini bekor qiladi."""
+    for key in ("task", "start_task"):
+        task = lobby.get(key)
+        if task and not task.done():
+            task.cancel()
 
 
 async def _close_lobby_message(bot, chat_id: int, lobby: dict, text: str):
@@ -1503,7 +1515,8 @@ async def _open_lobby(bot, chat_id: int, uid: int, tid: str) -> bool:
         "msg_id":    None,
         "last_edit": 0.0,
         "pending":   False,
-        "task":      None,
+        "task":      None,        # timeout
+        "start_task": None,       # avto-start (LOBBY_MIN_READY yig'ilgach)
     }
     _lobby_sessions[chat_id] = lobby
     try:
@@ -1520,9 +1533,31 @@ async def _open_lobby(bot, chat_id: int, uid: int, tid: str) -> bool:
     return True
 
 
+async def _lobby_autostart(bot, chat_id: int, lobby: dict):
+    """Kamida LOBBY_MIN_READY kishi tayyor bo'lgach — kutib, testni avtomatik boshlaydi."""
+    try:
+        await asyncio.sleep(LOBBY_START_DELAY_SEC)
+    except asyncio.CancelledError:
+        return
+    if _lobby_sessions.get(chat_id) is not lobby:          # bekor qilingan/yopilgan
+        return
+    # Lobbyni shu zahoti yopamiz (await dan oldin) — test faqat bir marta boshlanadi
+    _lobby_sessions.pop(chat_id, None)
+    lobby["start_task"] = None                             # o'zini bekor qilib yubormaslik uchun
+    _cancel_lobby_task(lobby)                              # timeout taskni to'xtatadi
+    _starting.add(chat_id)
+    try:
+        await _delete_quiet(bot, chat_id, lobby.get("msg_id"))
+        await _start_group_test_impl(bot, chat_id, lobby["host_id"], lobby["tid"], "poll")
+    except Exception as e:
+        log.error("lobby avto-start xato chat=%s: %s", chat_id, e, exc_info=True)
+    finally:
+        _starting.discard(chat_id)
+
+
 @router.callback_query(F.data.startswith("gl_ready_"))
 async def lobby_ready(callback: CallbackQuery):
-    """'✋ Tayyorman' — ishtirokchi tayyorligini bildiradi (test hali boshlanmaydi)."""
+    """'✋ Tayyorman' — tayyorlik belgisi. LOBBY_MIN_READY kishi yig'ilsa test avto-boshlanadi."""
     chat_id = _chat_from_cb(callback.data, "gl_ready_")
     lobby   = _lobby_sessions.get(chat_id) if chat_id is not None else None
     if not lobby:
@@ -1533,32 +1568,9 @@ async def lobby_ready(callback: CallbackQuery):
         return await callback.answer(f"✅ Siz allaqachon tayyorsiz! ({len(lobby['ready'])} kishi)")
     lobby["ready"][uid_str] = user_display_name(user, max_len=25)
     await callback.answer(f"✅ Tayyor! Hozir {len(lobby['ready'])} kishi tayyor.")
+    if len(lobby["ready"]) >= LOBBY_MIN_READY and not lobby.get("start_task"):
+        lobby["start_task"] = _spawn(_lobby_autostart(callback.bot, chat_id, lobby))
     await _refresh_lobby(callback.bot, chat_id, lobby)
-
-
-@router.callback_query(F.data.startswith("gl_go_"))
-async def lobby_go(callback: CallbackQuery):
-    """'▶️ Boshlash' — faqat boshlovchi yoki admin. Test shu yerdan boshlanadi."""
-    chat_id = _chat_from_cb(callback.data, "gl_go_")
-    lobby   = _lobby_sessions.get(chat_id) if chat_id is not None else None
-    if not lobby:
-        return await callback.answer("⌛ Bu lobby allaqachon yopilgan.", show_alert=True)
-    uid = callback.from_user.id
-    if uid != lobby["host_id"] and not await _is_admin(callback.bot, chat_id, uid):
-        return await callback.answer("⚠️ Faqat boshlovchi yoki admin boshlashi mumkin!",
-                                     show_alert=True)
-    if _lobby_sessions.get(chat_id) is not lobby:          # await vaqtida yopilgan bo'lishi mumkin
-        return await callback.answer("⌛ Bu lobby allaqachon yopilgan.", show_alert=True)
-    # Lobbyni shu zahoti yopamiz (await dan oldin) — ikki marta bosilsa ham test bir marta boshlanadi
-    _lobby_sessions.pop(chat_id, None)
-    _cancel_lobby_task(lobby)
-    _starting.add(chat_id)
-    try:
-        await callback.answer("🚀 Boshlanmoqda...")
-        await _delete_quiet(callback.bot, chat_id, lobby.get("msg_id"))
-        await _start_group_test_impl(callback.bot, chat_id, lobby["host_id"], lobby["tid"], "poll")
-    finally:
-        _starting.discard(chat_id)
 
 
 @router.callback_query(F.data.startswith("gl_cancel_"))
@@ -1603,7 +1615,7 @@ async def _group_test_access(tid: str, uid: int, test: dict | None = None) -> bo
 
 async def _start_group_test(bot, chat_id: int, uid: int, tid: str, mode: str, lobby: bool = True):
     """Guruhda test chaqirish. start.py va cmd_quiz_start ishlatadi (lobby=True):
-    avval "✋ Tayyorman" lobbisi ochiladi, test boshlovchi "▶️ Boshlash" bosgach boshlanadi.
+    avval "✋ Tayyorman" lobbisi ochiladi, kamida 2 kishi tayyor bo'lgach test o'zi boshlanadi.
     Scheduler lobby=False bilan chaqiradi — rejalashtirilgan test darhol boshlanadi.
     Guruhda faqat BITTA faol test bo'lishi mumkin. Majburiy obuna guruhda TEKSHIRILMAYDI.
     Guruhda faqat Poll rejimi bor: eski "inline" so'rovlari Poll ga aylantiriladi."""
