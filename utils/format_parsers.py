@@ -136,6 +136,29 @@ def _finish_block(out, rep, no, q_text, opts, ci):
 
 
 # ── 2) XLSX: ustunli jadval ─────────────────────────────────
+_KEY_CELL = re.compile(r"^\s*([A-Ja-j]|\d{1,2})\s*[\)\.]?\s*$")
+
+
+def _key_index(cell, n_opts: int):
+    """"To'g'ri javob" katagi harf/raqam bo'lsa ("B", "b)", "3") — variant tartib raqami (0-dan).
+    Matn bo'lsa yoki chegaradan chiqsa — None."""
+    m = _KEY_CELL.match(_clean(cell))
+    if not m:
+        return None
+    t = m.group(1)
+    i = (ord(t.upper()) - 65) if t.isalpha() else int(t) - 1
+    return i if 0 <= i < n_opts else None
+
+
+def _is_key_column(rows, hdr_i: int, col: int) -> bool:
+    """Ustunning (deyarli) barcha to'ldirilgan katagi harf/raqam kalit ekanligini tekshiradi."""
+    vals = [_clean(r[col]) for r in rows[hdr_i + 1:] if col < len(r) and _clean(r[col])]
+    if not vals:
+        return False
+    ok = sum(1 for v in vals if _KEY_CELL.match(v))
+    return ok >= max(2, int(len(vals) * 0.8)) if len(vals) >= 2 else ok == len(vals)
+
+
 def parse_xlsx_table(path: str) -> tuple[list[dict], dict]:
     import openpyxl
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
@@ -150,6 +173,12 @@ def parse_xlsx_table(path: str) -> tuple[list[dict], dict]:
         q_col = cols["question"]
         corr_col = cols.get("correct")
         opt_cols = cols["options"]
+        # "To'g'ri javob" ustuni harf/raqam kalit (B, 3) bo'lsa — u variant EMAS:
+        # variantlar orasiga qo'shilmaydi (aks holda "F) B" kabi soxta variant paydo bo'ladi).
+        key_col = None
+        if corr_col is not None and _is_key_column(rows, hdr_i, corr_col):
+            key_col = corr_col
+            opt_cols = [c for c in opt_cols if c != corr_col]
         for r in rows[hdr_i + 1:]:
             q = _clean(r[q_col]) if q_col < len(r) else ""
             if not q:
@@ -158,13 +187,24 @@ def parse_xlsx_table(path: str) -> tuple[list[dict], dict]:
             rep["blocks"] += 1
             vals = [_clean(r[c]) if c < len(r) else "" for c in opt_cols]
             ci = None
-            if corr_col is not None:
+            if key_col is not None:
+                ki = _key_index(r[key_col] if key_col < len(r) else "", len(vals))
+                if ki is not None and vals[ki]:
+                    ci = sum(1 for v in vals[:ki] if v)        # bo'sh kataklar olib tashlangach indeks
+            elif corr_col is not None:
                 cv = _clean(r[corr_col]) if corr_col < len(r) else ""
-                if cv and cv in vals:
+                others = [v for c, v in zip(opt_cols, vals) if c != corr_col]
+                if cv and cv in others:
+                    # "Javob" ustunidagi matn boshqa variant ustunlarida ham bor — takrorlanmaydi
+                    vals = others
+                    ci = vals.index(cv)
+                elif cv and cv in vals:
                     ci = vals.index(cv)
                 elif cv:
                     vals = vals + [cv]
                     ci = len(vals) - 1
+            if ci is not None and ci < len(vals):
+                ci = sum(1 for v in vals[:ci] if v) if vals[ci] else None
             vals = [v for v in vals if v]
             if ci is not None and ci >= len(vals):
                 ci = None
@@ -188,8 +228,12 @@ def _find_header(rows):
                 continue
             if "savol" in c or "topshir" in c or c.startswith("test"):
                 cols.setdefault("question", j)
+            elif "noto" in c or "xato" in c:
+                cols["options"].append(j)           # "Noto'g'ri 1" — xato variant ustuni
             elif "to'g'ri" in c or "to’g’ri" in c or "tog'ri" in c:
                 cols["correct"] = j
+            elif c in ("javob", "javoblar", "answer", "correct", "kalit", "ответ", "жавоб"):
+                cols.setdefault("correct", j)           # yagona "Javob" ustuni — to'g'ri javob kaliti
             elif "muqobil" in c or len(c) == 1 and c.isalpha() or c.startswith(("variant", "javob")):
                 cols["options"].append(j)
         if "question" in cols:

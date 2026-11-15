@@ -118,11 +118,139 @@ def parse_file(path: str) -> list:
     return result
 
 
+def _has_label(lbl: str, v: str) -> bool:
+    """Variant matni allaqachon KUTILGAN harf bilan ("B) ...", "B. ...") boshlanganmi.
+    Faqat shu pozitsiyaning harfi hisoblanadi: "E. coli", "A.S. Pushkin", "(a) ..." kabi
+    matnlar label deb adashilmaydi."""
+    return bool(re.match(rf"^{re.escape(str(lbl))}\s*[).]\s*\S", str(v), re.I))
+
+
+_OPT_LABEL = re.compile(r"^\s*([A-Ja-j])\s*[\).]\s*")
+
+
+def _norm_cmp(t: str) -> str:
+    return re.sub(r"[\s?:.!]+$", "", re.sub(r"\s+", " ", str(t or "")).strip().lower())
+
+
+def _sanitize_question(q: dict) -> dict:
+    """Parser ishlatganda paydo bo'lishi mumkin bo'lgan SOXTA variantlarni tozalaydi:
+      • bitta harfli variant ("A", "B") — jadvaldagi "to'g'ri javob" kalit harfi variant bo'lib qolgan;
+        u to'g'ri deb belgilangan bo'lsa, haqiqiy variantlardan harfga mos kelganini to'g'ri deb oladi;
+      • savol matnining aynan o'zi bo'lgan variant.
+    Soxta variant yo'q bo'lsa — savol o'zgarmaydi."""
+    if not isinstance(q, dict) or q.get("type", "multiple_choice") != "multiple_choice":
+        return q
+    opts = [str(o) for o in (q.get("options") or [])]
+    if len(opts) < 3:
+        return q
+    texts = [_OPT_LABEL.sub("", o, count=1).strip() for o in opts]
+    qn = _norm_cmp(q.get("question"))
+    long_cnt = sum(1 for t in texts if len(t) >= 6)
+
+    corr = q.get("correct") or ""
+    ci = None
+    if corr:
+        for i, o in enumerate(opts):
+            if o == corr:
+                ci = i
+                break
+        if ci is None:
+            ci = next((i for i, t in enumerate(texts) if t and t == _OPT_LABEL.sub("", corr, count=1).strip()), None)
+
+    junk, key_letter = set(), {}
+    for i, t in enumerate(texts):
+        if qn and _norm_cmp(t) == qn:
+            junk.add(i)
+        # Bitta harf FAQAT to'g'ri deb belgilangan bo'lsa soxta (jadvaldagi kalit harfi):
+        # oddiy "Vitamin: A, B1, C" kabi haqiqiy bir harfli variantga tegilmaydi.
+        elif (i == ci and re.fullmatch(r"[A-Ja-j]", t)
+              and long_cnt >= 2 and long_cnt >= len(opts) - 2):
+            junk.add(i)
+            key_letter[i] = ord(t.upper()) - 65
+    if not junk:
+        return q
+
+    keep = [i for i in range(len(opts)) if i not in junk]
+    if len(keep) < 2:
+        return q
+    new_ci = None
+    if ci is not None:
+        if ci not in junk:
+            new_ci = keep.index(ci)
+        elif ci in key_letter and 0 <= key_letter[ci] < len(keep):
+            new_ci = key_letter[ci]                    # "A" kalit → 1-haqiqiy variant
+
+    labeled = any(_OPT_LABEL.match(o) for o in opts)
+    new_texts = [texts[i] for i in keep]
+    new_opts = [f"{chr(65 + j)}) {t}" for j, t in enumerate(new_texts)] if labeled else new_texts
+    q = dict(q)
+    q["options"] = new_opts
+    marked_before = bool(q.get("_marked", bool(corr)))
+    if new_ci is not None:
+        q["correct"] = new_opts[new_ci]
+        if "correct_index" in q:
+            q["correct_index"] = new_ci
+        q["_marked"] = True
+    else:
+        if ci is not None or marked_before:           # javob soxta variant bo'lgan edi — ishonchsiz
+            q["correct"] = "" if q.get("correct") is not None else None
+            if "correct_index" in q:
+                q["correct_index"] = None
+            q["_marked"] = False
+    return q
+
+
+def _sanitize_questions(qs: list) -> list:
+    return [_sanitize_question(q) for q in (qs or [])]
+
+
+def _q_valid(q: dict) -> bool:
+    """Savol haqiqatan ishlatsa bo'ladimi (matn + kamida 2 ta haqiqiy variant)."""
+    if not str((q or {}).get("question", "")).strip():
+        return False
+    if q.get("type", "multiple_choice") != "multiple_choice":
+        return bool(q.get("correct") or q.get("accepted_answers"))
+    real = [o for o in (q.get("options") or [])
+            if re.search(r"\w", re.sub(r"^\s*[A-Ha-h]\s*[\).]\s*", "", str(o)))]
+    return len(real) >= 2
+
+
+def _score_questions(qs: list) -> int:
+    """Parser natijasi sifati: belgilangan javobli savol > belgilanmagan > yaroqsiz.
+    (_guessed — "hammasi bir xil belgi" holatida birinchisi olingan: belgilangandan sal past.)"""
+    score = 0
+    for q in qs or []:
+        if not _q_valid(q):
+            continue
+        marked = bool(q.get("_marked", bool(q.get("correct"))))
+        sc = (5 if q.get("_guessed") else 6) if marked else 4
+        # Variant matni boshida o'qilmagan belgi ("= Javob", "+ Javob") qolgan — parser belgini tanimagan
+        if any(re.match(r"^[=+*#✓✔√☑]+\s*\S", _OPT_LABEL.sub("", str(o), count=1).strip())
+               for o in (q.get("options") or [])):
+            sc -= 3
+        score += sc
+    return score
+
+
+def _pick_best(cands: list) -> tuple:
+    """cands: [(nom, savollar)] → (nom, savollar). Teng bo'lsa — birinchisi (unified)."""
+    best = None
+    for name, qs in cands:
+        sc = _score_questions(qs)
+        if best is None or sc > best[0]:
+            best = (sc, name, qs)
+    return best[1], best[2]
+
+
 def _parse_file_impl(path: str) -> list:
-    ext = Path(path).suffix.lower()
-    # 1) Yagona matn parseri — TXT/PDF/DOCX uchun bir xil natija (rasmsiz hujjatlar)
+    """Yangi (unified) parser VA eski ixtisoslashgan parserlar — ikkalasi ham ishlaydi,
+    natijasi yaxshisi (ko'proq savol + ko'proq belgilangan to'g'ri javob) tanlanadi.
+    Avval unified natijasi (qisman/javobsiz bo'lsa ham) qabul qilinib, eski formatlar
+    (? = , ====, jadval ...) jim yo'qolardi."""
     global LAST_PDF_IMAGE_REPORT
+    ext = Path(path).suffix.lower()
     LAST_PDF_IMAGE_REPORT = {}
+    cands = []
     if ext in (".txt", ".pdf", ".docx", ".doc", ".xlsx", ".xlsm"):
         try:
             has_img = False
@@ -130,14 +258,28 @@ def _parse_file_impl(path: str) -> list:
                 has_img = bool((check_images_in_file(path) or {}).get("has_images"))
             if not has_img:
                 from utils.quiz_text import parse_file_unified
-                uq, rep = parse_file_unified(path)
-                blocks = max(1, rep.get("blocks", 0))
-                if uq and len(rep.get("dropped", [])) <= 0.2 * blocks:
-                    log.info(f"parse_file unified: {len(uq)} savol ({ext})")
-                    return uq
+                uq, _rep = parse_file_unified(path)
+                if uq:
+                    cands.append(("unified", uq))
         except Exception as e:
-            log.warning(f"unified parser ishlamadi, eski yo'lga o'tildi: {e}")
-    # 2) Eski ixtisoslashgan parserlar (rasmli DOCX, jadval, maxsus formatlar)
+            log.warning(f"unified parser ishlamadi: {e}")
+    legacy = _parse_file_legacy(path)
+    if legacy:
+        cands.append(("legacy", legacy))
+    cands = [(n, _sanitize_questions(q)) for n, q in cands]
+    if not cands:
+        return []
+    name, qs = _pick_best(cands)
+    if name == "unified":
+        LAST_PDF_IMAGE_REPORT = {}          # rasm hisoboti faqat eski (rasmli) yo'ldan
+    log.info("parse_file: %s tanlandi (%d savol; %s)", name, len(qs),
+             ", ".join(f"{n}={_score_questions(q)}" for n, q in cands))
+    return qs
+
+
+def _parse_file_legacy(path: str) -> list:
+    """Eski ixtisoslashgan parserlar (rasmli DOCX, jadval, ? = , ==== va boshqa maxsus formatlar)."""
+    ext = Path(path).suffix.lower()
     try:
         # .doc → matn/docx konvertatsiya (sof Python, LibreOffice yo'q)
         if ext == ".doc":
@@ -449,7 +591,7 @@ def _parse_table_double_col(tables) -> list:
             opts = []
             for i, o in enumerate(all_opts):
                 lbl = LBL[i] if i < len(LBL) else str(i+1)
-                opts.append(o if re.match(r"^[A-Ha-h]\s*[).]", o) else f"{lbl}) {o}")
+                opts.append(o if _has_label(lbl, o) else f"{lbl}) {o}")
             questions.append({
                 "type":"multiple_choice","question":q_text,
                 "options":opts,"correct":opts[0],
@@ -503,7 +645,7 @@ def _parse_abcd_table(tables) -> list:
             opts = []
             for i, v in enumerate(variants):
                 lbl = LBL[i] if i < len(LBL) else str(i+1)
-                opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
+                opts.append(v if _has_label(lbl, v) else f"{lbl}) {v}")
             questions.append({
                 "type": "multiple_choice", "question": q_text,
                 "options": opts, "correct": "",  # Belgi yo'q — A variant TO'G'RI DEB OLINMAYDI
@@ -537,7 +679,7 @@ def _parse_5x1_tables(tables) -> list:
         opts = []
         for i, v in enumerate(variants[:8]):
             lbl = LBL[i] if i < len(LBL) else str(i+1)
-            opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
+            opts.append(v if _has_label(lbl, v) else f"{lbl}) {v}")
 
         questions.append({
             "type":"multiple_choice","question":q_text,
@@ -981,7 +1123,7 @@ def _parse_table_multicol(tables) -> list:
             opts = []
             for i, o in enumerate(all_opts):
                 lbl = LBL[i] if i < len(LBL) else str(i+1)
-                opts.append(o if re.match(r"^[A-Ha-h]\s*[).]", o) else f"{lbl}) {o}")
+                opts.append(o if _has_label(lbl, o) else f"{lbl}) {o}")
             questions.append({
                 "type": "multiple_choice", "question": q_text,
                 "options": opts, "correct": opts[0],
@@ -1096,7 +1238,7 @@ def _parse_eq_hash(lines: list) -> list:
         opts = []
         for i, ans in enumerate(clean_answers):
             lbl = LBL[i] if i < len(LBL) else str(i + 1)
-            opts.append(ans if re.match(r"^[A-Ha-h]\s*[).]", ans) else f"{lbl}) {ans}")
+            opts.append(ans if _has_label(lbl, ans) else f"{lbl}) {ans}")
 
         questions.append({
             "type":             "multiple_choice",
@@ -1201,6 +1343,18 @@ _VAR_STARTS = (
 )
 
 
+# Prefiksda uchrashi mumkin bo'lgan belgilar: variant belgilari + bo'sh joy + "to'g'ri" belgilari
+_PREFIX_CHARS = frozenset(_VAR_STARTS) | frozenset(" \t\u00a0✅☑✔✓√+!")
+
+# Hamma variant bir xil belgi bilan kelganda (hammasi "= ..."): odatda BELGILANMAGAN
+# (admin Seryalik/AI bilan hal qiladi). True qilinsa — birinchi variant to'g'ri deb olinadi
+# (faqat faylda birorta ham farqli belgi bo'lmasa). Standart: False.
+EQ_ALLSAME_FIRST_CORRECT = False   # DOIMIY "birinchisi to'g'ri" deb OLINMAYDI: belgisiz savol — belgilanmagan
+
+# "To'g'ri" ma'nosini beruvchi kuchli belgilar (tire/bo'sh joy esa oddiy matn bo'lishi mumkin)
+_STRONG_MARKS = frozenset("+*✓✔√☑★✅")
+
+
 def _extract_prefix(line: str) -> tuple:
     """
     Qatordan prefiks (marker) va toza matnni ajratadi.
@@ -1223,12 +1377,15 @@ def _extract_prefix(line: str) -> tuple:
     if not starts_with_marker:
         return None, None
     
-    # Prefiksni olish: harf yoki raqam kelguncha
+    # Prefiks = boshidagi BELGI-simvollar va bo'sh joylar ketma-ketligi.
+    # («», "", (, [ kabi matn belgilari prefiksga kirmaydi — aks holda
+    #  "= «Toshkent»" va "= Samarqand" noto'g'ri "farqli" bo'lib qolardi.)
     prefix = ""
     for ch in s:
-        if ch.isalpha() or ch.isdigit():
+        if ch in _PREFIX_CHARS:
+            prefix += ch
+        else:
             break
-        prefix += ch
     
     clean = s[len(prefix):].strip()
     if not clean:
@@ -1237,7 +1394,7 @@ def _extract_prefix(line: str) -> tuple:
     return prefix, clean
 
 
-def _find_correct_by_diff(raw_variants: list) -> tuple:
+def _find_correct_by_diff(raw_variants: list, guess_first: bool = False) -> tuple:
     """
     Differential analysis bilan to'g'ri javobni topadi.
     
@@ -1273,6 +1430,12 @@ def _find_correct_by_diff(raw_variants: list) -> tuple:
         min_count = min(counts.values())
         rarest = [p for p, c in counts.items() if c == min_count]
         
+        # Teng kam uchragan prefikslar bo'lsa (masalan "- 5 daraja" kabi tire bilan boshlangan
+        # oddiy variant ham "farqli" ko'rinadi): faqat KUCHLI belgi (+ * ✓ ✔ √ ☑ ★ ✅) borini olamiz
+        if len(rarest) > 1:
+            strong = [p for p in rarest if any(ch in _STRONG_MARKS for ch in p)]
+            if len(strong) == 1:
+                rarest = strong
         # Faqat bitta farqli prefiks bo'lsa — o'sha to'g'ri
         if len(rarest) == 1:
             rare_prefix = rarest[0]
@@ -1281,6 +1444,10 @@ def _find_correct_by_diff(raw_variants: list) -> tuple:
                     correct_idx = i
                     break
     
+    # Hammasi bir xil belgi: (faqat so'ralsa) birinchi variant to'g'ri
+    if correct_idx < 0 and guess_first and len(counts) == 1 and len(parsed) >= 2:
+        correct_idx = 0
+
     # Toza variantlarni qaytaramiz
     clean_variants = [clean for _, clean in parsed]
     return clean_variants, correct_idx
@@ -1321,6 +1488,7 @@ def _parse_question_eq(text: str) -> list:
     """
     LBL = ["A", "B", "C", "D", "E", "F", "G", "H"]
     questions = []
+    blocks = []     # [(savol_matni, [xom variantlar])]
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     i = 0
 
@@ -1331,7 +1499,8 @@ def _parse_question_eq(text: str) -> list:
             continue
 
         # Savol matni
-        q_parts = [lines[i][1:].strip()]
+        # Savol belgisi bitta "?" ham, "???" ham bo'lishi mumkin — hammasi olib tashlanadi
+        q_parts = [lines[i].lstrip("?").strip()]
         i += 1
         while i < len(lines):
             if lines[i].startswith("?"):
@@ -1356,20 +1525,35 @@ def _parse_question_eq(text: str) -> list:
 
         if not raw_variants:
             continue
+        blocks.append((q_text, raw_variants))
 
-        # Differential analysis
-        clean_variants, correct_idx = _find_correct_by_diff(raw_variants)
+    # 1-o'tish: differential tahlil
+    results = []
+    for q_text, raw in blocks:
+        cv, ci = _find_correct_by_diff(raw)
+        if cv:
+            results.append([q_text, raw, cv, ci])
 
-        if not clean_variants:
-            continue
+    # 2-o'tish: faylda birorta ham farqli belgi topilmagan bo'lsa (hammasi "= ...") —
+    # har savolning birinchi varianti to'g'ri. Aralash faylda (ba'zi savollar belgilangan)
+    # belgisizlari BELGILANMAGAN qoladi — muallif javobni belgilagan, bu yerda unutgan.
+    file_has_marks = any(ci >= 0 for _, _, _, ci in results)
+    guess_all = EQ_ALLSAME_FIRST_CORRECT and not file_has_marks
+    for r in results:
+        q_text, raw, clean_variants, correct_idx = r
+        guessed = False
+        if guess_all and correct_idx < 0:
+            _, g_idx = _find_correct_by_diff(raw, guess_first=True)
+            if g_idx >= 0:
+                correct_idx, guessed = g_idx, True
 
         # A) B) C) D) label qo'shish
         opts = []
         for j, v in enumerate(clean_variants):
             lbl = LBL[j] if j < len(LBL) else str(j + 1)
-            opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
+            opts.append(v if _has_label(lbl, v) else f"{lbl}) {v}")
 
-        questions.append({
+        q = {
             "type":             "multiple_choice",
             "question":         q_text,
             "options":          opts,
@@ -1378,7 +1562,10 @@ def _parse_question_eq(text: str) -> list:
             "accepted_answers": [],
             "points":           1,
             "_marked":          correct_idx >= 0,
-        })
+        }
+        if guessed:
+            q["_guessed"] = True
+        questions.append(q)
 
     return questions
 
@@ -1430,11 +1617,33 @@ def _read_txt(path: str) -> str:
 #  FORMAT A — STANDART RAQAMLI (mavjud logika saqlanadi)
 # ═══════════════════════════════════════════════════════════
 
+def _parse_text_legacy(text: str) -> list:
+    """Eski FORMAT A mantig'i (_parse_block) — to'g'ri javob belgilarini aniq taniydi."""
+    text = text.replace("\r\n", "\n")
+    blocks = re.split(r"\n(?=\d+[\.)] *\S)", "\n" + text.strip())
+    result = []
+    for b in blocks:
+        q = _parse_block(b.strip())
+        if q:
+            result.append(q)
+    return result
+
+
 def parse_text(text: str) -> list:
-    """Yagona matn parseri (utils.quiz_text) — eski qoidalar bilan bir xil natija shakli."""
-    from utils.quiz_text import parse_quiz_text
-    qs, _rep = parse_quiz_text(text)
-    return qs
+    """Matn parseri: yangi (utils.quiz_text) va eski (_parse_block) — yaxshisi tanlanadi."""
+    cands = []
+    try:
+        from utils.quiz_text import parse_quiz_text
+        uq, _rep = parse_quiz_text(text)
+        if uq:
+            cands.append(("unified", uq))
+    except Exception as e:
+        log.warning(f"parse_text: unified ishlamadi: {e}")
+    lq = _parse_text_legacy(text)
+    if lq:
+        cands.append(("legacy", lq))
+    cands = [(n, _sanitize_questions(q)) for n, q in cands]
+    return _pick_best(cands)[1] if cands else []
 
 
 def _clean_dup_label(text: str) -> str:
@@ -1670,7 +1879,7 @@ def _parse_question_no_marker(lines: list) -> list:
         opts = []
         for j, v in enumerate(variants):
             lbl = LBL[j] if j < len(LBL) else str(j+1)
-            opts.append(f"{lbl}) {v}" if not re.match(r"^[A-Ha-h]\s*[).]", v) else v)
+            opts.append(v if _has_label(lbl, v) else f"{lbl}) {v}")
         questions.append({
             "type": "multiple_choice", "question": q_text,
             "options": opts, "correct": "",  # Belgi yo'q — A variant TO'G'RI DEB OLINMAYDI
@@ -1733,10 +1942,25 @@ def _parse_xlsx_sheet(df) -> list:
                 corr_col = i
             elif any(k in h for k in BAD_KW) or h in ('a','b','c','d','e','f'):
                 opt_cols.append(i)
+            elif h in ("javob", "javoblar", "kalit") and corr_col == -1:
+                corr_col = i            # yagona "Javob" ustuni — to'g'ri javob (harf/raqam/matn)
     if q_col == -1: q_col = 0
     if corr_col == -1 and not opt_cols:
-        corr_col = 1
-        opt_cols = list(range(2, min(df.shape[1], 7)))
+        # Sarlavhasiz jadval: variantlar orasida aniq belgi (+ * ✓ =) bo'lsa — belgi rejimi
+        # (aks holda 2-ustun "to'g'ri javob" deb olinardi va belgilangan variant e'tiborsiz qolardi)
+        _mk_start = ("+", "*", "✓", "✔", "√", "☑", "=")
+        _scan = 0
+        for _ri in range(min(10, len(df))):
+            for _ci in range(q_col + 1, df.shape[1]):
+                _v = str(df.iat[_ri, _ci]).strip()
+                if _v and _v != "nan" and _v.startswith(_mk_start) and _is_correct_marker(_v)[0]:
+                    _scan += 1
+        if _scan >= 2:
+            opt_cols = list(range(q_col + 1, min(df.shape[1], q_col + 8)))
+        else:
+            # Sarlavhasiz va belgisiz jadval: to'g'ri javob NOMA'LUM — birinchi/2-ustun
+            # "to'g'ri" deb TAXMIN QILINMAYDI, savollar belgilanmagan qoladi.
+            opt_cols = list(range(q_col + 1, min(df.shape[1], q_col + 8)))
 
     data_start = (header_row + 1) if header_row is not None else 0
     questions  = []
@@ -1746,14 +1970,34 @@ def _parse_xlsx_sheet(df) -> list:
         q_text = re.sub(r"^\d+[\.\)\t]\s*", "", vals[q_col] if q_col < len(vals) else "").strip()
         if not q_text or len(q_text) < 3: continue
         marked = False; correct = ""; variants = []
+        key_cidx = -1
         if corr_col >= 0:
             correct = vals[corr_col] if corr_col < len(vals) else ""
             if not correct: continue
-            is_c, clean = _is_correct_marker(correct)
-            if is_c: correct = clean
-            wrong = [vals[i] for i in opt_cols if i < len(vals) and vals[i]]
-            variants = [correct] + wrong
-            marked = True
+            # Harf/raqam kalit ("B", "3") — alohida variant EMAS, variantlar ichidan tanlanadi
+            km = re.fullmatch(r"\s*([A-Ja-j]|\d{1,2})\s*[\).]?\s*", correct)
+            pool_all = [vals[i] if i < len(vals) else "" for i in opt_cols if i != corr_col]
+            if km and len([v for v in pool_all if v]) >= 2:
+                t = km.group(1)
+                ki = (ord(t.upper()) - 65) if t.isalpha() else int(t) - 1
+                if 0 <= ki < len(pool_all) and pool_all[ki]:
+                    key_cidx = sum(1 for v in pool_all[:ki] if v)
+                    variants = [v for v in pool_all if v]
+                    marked = True
+                else:
+                    continue            # kalit variantga to'g'ri kelmadi — savol belgilanmagan qoladi
+            else:
+                is_c, clean = _is_correct_marker(correct)
+                if is_c: correct = clean
+                wrong = [vals[i] for i in opt_cols if i < len(vals) and vals[i] and i != corr_col]
+                norm = lambda t: re.sub(r"\s+", " ", t).strip().lower()
+                hit = [j for j, w in enumerate(wrong) if norm(w) == norm(correct)]
+                if hit and len(wrong) >= 2:       # to'g'ri javob matni variantlar ichida bor — takrorlanmaydi
+                    variants = wrong
+                    key_cidx = hit[0]
+                else:
+                    variants = [correct] + wrong
+                marked = True
         else:
             opt_pool = [vals[i] for i in opt_cols if i < len(vals) and vals[i]]
             if not opt_pool:
@@ -1765,8 +2009,9 @@ def _parse_xlsx_sheet(df) -> list:
                 else: clean_pool.append(v)
             opt_pool = clean_pool
             if cidx >= 0:
+                variants = opt_pool          # asl tartib saqlanadi (to'g'ri javob A ga ko'chirilmaydi)
+                key_cidx = cidx
                 correct = opt_pool[cidx]
-                variants = [opt_pool[cidx]] + [v for i,v in enumerate(opt_pool) if i != cidx]
                 marked = True
             else:
                 if not opt_pool: continue
@@ -1775,10 +2020,11 @@ def _parse_xlsx_sheet(df) -> list:
         opts = []
         for i, v in enumerate(variants):
             lbl = LBL[i] if i < len(LBL) else str(i+1)
-            opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
+            opts.append(v if _has_label(lbl, v) else f"{lbl}) {v}")
         questions.append({
             "type": "multiple_choice", "question": q_text,
-            "options": opts, "correct": opts[0] if marked else "",
+            "options": opts,
+            "correct": (opts[key_cidx] if key_cidx >= 0 else opts[0]) if marked else "",
             "explanation": "", "accepted_answers": [], "points": 1,
             "_marked": marked,
         })
@@ -1840,7 +2086,7 @@ def _parse_docx_with_images(doc) -> list:
         opts = []
         for j, v in enumerate(variants):
             lbl = LBL[j] if j < len(LBL) else str(j+1)
-            opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
+            opts.append(v if _has_label(lbl, v) else f"{lbl}) {v}")
         has_mark = correct_idx >= 0
         q = {
             "type": "multiple_choice", "question": q_text,
@@ -2040,7 +2286,7 @@ def _parse_docx_via_zip(path: str) -> list:
                 opts = []
                 for j, v in enumerate(variants):
                     lbl = LBL[j] if j < len(LBL) else str(j+1)
-                    opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
+                    opts.append(v if _has_label(lbl, v) else f"{lbl}) {v}")
                 has_mark = correct_idx >= 0
                 q = {
                     "type": "multiple_choice", "question": q_text,
@@ -2170,7 +2416,7 @@ def _parse_pdf_with_images(path: str) -> list:
                 opts = []
                 for j, v in enumerate(variants):
                     lbl = LBL[j] if j < len(LBL) else str(j+1)
-                    opts.append(v if re.match(r"^[A-Ha-h]\s*[).]", v) else f"{lbl}) {v}")
+                    opts.append(v if _has_label(lbl, v) else f"{lbl}) {v}")
                 has_mark = correct_idx >= 0
                 q = {
                     "type": "multiple_choice", "question": q_text,
