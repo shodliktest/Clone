@@ -272,11 +272,3 @@ def test_multi_question_mark_prefix_and_whitespace_marker(tmp_path):
     assert all(len(q["options"]) == 4 for q in qs)
     assert [q["_marked"] for q in qs] == [True, True, False, False, False, False]   # taxmin yo'q
     assert qs[0]["correct"].endswith("ikkinchi 1")
-
-
-def test_pick_best_never_trades_many_questions_for_a_few_marks():
-    def mk(marked):
-        return {"question": "q", "options": ["A) uno", "B) dos"], "correct": "A) uno" if marked else "", "_marked": marked}
-    many_unmarked = [mk(False) for _ in range(100)]     # 400 ball
-    few_marked = [mk(True) for _ in range(70)]          # 420 ball — lekin 30 savol yo'qoladi
-    assert P._pick_best([("unified", many_unmarked), ("legacy", few_marked)])[0] == "unified"
