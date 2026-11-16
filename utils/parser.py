@@ -234,14 +234,8 @@ def _score_questions(qs: list) -> int:
 
 def _pick_best(cands: list) -> tuple:
     """cands: [(nom, savollar)] → (nom, savollar). Teng bo'lsa — birinchisi (unified)."""
-    # Savollarni YO'QOTMASLIK: eng ko'p yaroqli savol topgan parserning 90% idan kam
-    # topgani tanlovga kirmaydi (ko'proq belgi topgani bilan ham ko'p savolni tashlab yubormasin).
-    counts = [sum(1 for q in qs if _q_valid(q)) for _, qs in cands]
-    top = max(counts) if counts else 0
     best = None
-    for (name, qs), cnt in zip(cands, counts):
-        if cnt < top * 0.9:
-            continue
+    for name, qs in cands:
         sc = _score_questions(qs)
         if best is None or sc > best[0]:
             best = (sc, name, qs)
