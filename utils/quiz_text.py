@@ -38,7 +38,7 @@ _OPT_LABEL_CHARS = r"[A-Ja-jА-Яа-яёЁ]"
 
 # Prefix to'g'ri javob belgilari: ===, ==, --, *, +, #, ✅, ✔, ✓, ~, •, ►, →, ■, ●, ▶, ◆, ★, ☑
 _MARK_PREFIX_PATTERN = re.compile(
-    r"^\s*(?:={1,}|[-]{2,}|[*+#•►→✓✔√■●▶◆★☑~]|✅|✔️)\s*"
+    r"^\s*(?:={1,}|[-]{2,}|\(\s*[✓✔☑✅]\ufe0f?\s*\)|[*+#•►→✓✔√■●▶◆★☑~]|✅|✔️)\ufe0f?\s*"
 )
 
 # Variant boshlanishi: A) , A. , A: , A - (Lotin va Krill)
@@ -48,7 +48,7 @@ _OPT_START = re.compile(rf"^\s*({_OPT_LABEL_CHARS})\s*[\)\.:\-]\s*(.*)$")
 _PLUS_MINUS_OPT = re.compile(r"^\s*([+\-])\s+(\S.*)$")
 
 # Variant oxiridagi yoki ichidagi to'g'ri javob belgilari
-_MARK_SUFFIX = re.compile(r"\s*([*+#•►→✓✔√■●▶◆★☑~]|✅|✔|✓|✔️)\s*$")
+_MARK_SUFFIX = re.compile(r"\s*(\(\s*[✓✔☑✅]\ufe0f?\s*\)|[*+#•►→✓✔√■●▶◆★☑~]|✅|✔|✓|✔️)\ufe0f?\s*$")
 
 _ANSWER = re.compile(
     r"^\s*(?:to['’ʻ`‘]?g['’ʻ`‘]?ri\s+javob|javob|correct(?:\s+answer)?|answer|kalit)\s*[:：\-–]\s*(.+?)\s*$",
@@ -446,6 +446,9 @@ def _is_new_question(mq, expected_no: int, cur: dict) -> bool:
     if expected_no <= no <= expected_no + 5:
         return True
     if cur is not None and no > cur.get("no", 0):
+        return True
+    # Mavzu/bo'lim almashganda raqamlash 1 dan QAYTA boshlanadi ("1-MAVZU ... 30", keyin yana "1.")
+    if no == 1 and cur is not None and len(cur.get("opts", [])) >= 2:
         return True
     return False
 

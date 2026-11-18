@@ -132,7 +132,48 @@ def _norm_cmp(t: str) -> str:
     return re.sub(r"[\s?:.!]+$", "", re.sub(r"\s+", " ", str(t or "")).strip().lower())
 
 
+_CHECK_CH = "✓✔☑✅"
+_CHECK_LEAD = re.compile(rf"^\s*(?:\(\s*[{_CHECK_CH}]\ufe0f?\s*\)|[{_CHECK_CH}]\ufe0f?(?:\s*[{_CHECK_CH}]\ufe0f?)*|√(?=\s))\s*")
+_CHECK_TRAIL = re.compile(rf"\s*(?:\(\s*[{_CHECK_CH}]\ufe0f?\s*\)|[{_CHECK_CH}]\ufe0f?(?:\s*[{_CHECK_CH}]\ufe0f?)*)\s*$")
+
+
+def _strip_check_marks(q: dict) -> dict:
+    """Variant matnida qolib ketgan to'g'ri-javob belgisini (✓ ✔ ☑ ✅, "(✓)") olib tashlaydi.
+    Belgilangan variant aniq bitta bo'lib, savol hali belgilanmagan bo'lsa — uni to'g'ri deb oladi."""
+    if not isinstance(q, dict) or q.get("type", "multiple_choice") != "multiple_choice":
+        return q
+    opts = [str(o) for o in (q.get("options") or [])]
+    if not opts or not any(re.search(rf"[{_CHECK_CH}]|√\s", o) for o in opts + [str(q.get("correct") or "")]):
+        return q
+    new_opts, hit = [], []
+    for i, o in enumerate(opts):
+        m = _OPT_LABEL.match(o)
+        label, body = (o[:m.end()], o[m.end():]) if m else ("", o)
+        nb = _CHECK_TRAIL.sub("", _CHECK_LEAD.sub("", body)).strip()
+        if nb != body.strip() and nb:
+            hit.append(i)
+            body = nb
+        new_opts.append((label + body.strip()) if m else body.strip())
+    if not hit:
+        return q
+    q = dict(q)
+    corr = str(q.get("correct") or "")
+    old_ci = opts.index(corr) if corr in opts else None
+    q["options"] = new_opts
+    if old_ci is not None:
+        q["correct"] = new_opts[old_ci]
+    elif not corr and len(hit) == 1 and not q.get("_marked"):
+        q["correct"] = new_opts[hit[0]]               # yagona ✓ — to'g'ri javob
+        q["_marked"] = True
+        if "correct_index" in q:
+            q["correct_index"] = hit[0]
+    elif corr:
+        q["correct"] = _CHECK_TRAIL.sub("", _CHECK_LEAD.sub("", corr)).strip()
+    return q
+
+
 def _sanitize_question(q: dict) -> dict:
+    q = _strip_check_marks(q)
     """Parser ishlatganda paydo bo'lishi mumkin bo'lgan SOXTA variantlarni tozalaydi:
       • bitta harfli variant ("A", "B") — jadvaldagi "to'g'ri javob" kalit harfi variant bo'lib qolgan;
         u to'g'ri deb belgilangan bo'lsa, haqiqiy variantlardan harfga mos kelganini to'g'ri deb oladi;
@@ -228,14 +269,23 @@ def _score_questions(qs: list) -> int:
         if any(re.match(r"^[=+*#✓✔√☑]+\s*\S", _OPT_LABEL.sub("", str(o), count=1).strip())
                for o in (q.get("options") or [])):
             sc -= 3
+        # Variant/savol matni ichida yangi qator — bloklar chegarasi noto'g'ri aniqlangan (savol variantga qo'shilgan)
+        if any("\n" in str(o).strip() for o in (q.get("options") or [])):
+            sc -= 3
         score += sc
     return score
 
 
 def _pick_best(cands: list) -> tuple:
     """cands: [(nom, savollar)] → (nom, savollar). Teng bo'lsa — birinchisi (unified)."""
+    # Savollarni YO'QOTMASLIK: eng ko'p yaroqli savol topgan parserning 90% idan kam
+    # topgani tanlovga kirmaydi (ko'proq belgi topgani bilan ham ko'p savolni tashlab yubormasin).
+    counts = [sum(1 for q in qs if _q_valid(q)) for _, qs in cands]
+    top = max(counts) if counts else 0
     best = None
-    for name, qs in cands:
+    for (name, qs), cnt in zip(cands, counts):
+        if cnt < top * 0.9:
+            continue
         sc = _score_questions(qs)
         if best is None or sc > best[0]:
             best = (sc, name, qs)
@@ -325,6 +375,20 @@ def _convert_doc(path: str) -> str:
     except Exception:
         pass
 
+    # 1b. Haqiqiy ikkilik .doc (Word 97-2003, OLE2) — o'z sof-Python o'quvchimiz
+    #     (docx2txt/mammoth faqat .docx ni o'qiydi, shuning uchun bu fayllar "o'qilmadi" berardi)
+    try:
+        from utils.doc_reader import extract_doc_text
+        txt = extract_doc_text(path)
+        if txt and len(txt.strip()) > 50:
+            txt_path = os.path.join(outdir, Path(path).stem + ".txt")
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(txt)
+            log.info(f"DOC → TXT (doc_reader): {Path(path).name}")
+            return txt_path
+    except Exception as e:
+        log.warning(f"doc_reader xato: {e}")
+
     # 2. docx2txt — eng ishonchli sof-Python yechim eski .doc uchun
     try:
         import docx2txt
@@ -351,6 +415,20 @@ def _convert_doc(path: str) -> str:
             return txt_path
     except Exception as e:
         log.warning(f"mammoth xato: {e}")
+
+    # 4. Zaxira: serverda LibreOffice bo'lsa (majburiy emas)
+    try:
+        import shutil, subprocess
+        office = shutil.which("soffice") or shutil.which("libreoffice")
+        if office:
+            subprocess.run([office, "--headless", "--convert-to", "txt:Text", path, "--outdir", outdir],
+                           capture_output=True, timeout=120)
+            txt_path = os.path.join(outdir, Path(path).stem + ".txt")
+            if os.path.exists(txt_path) and os.path.getsize(txt_path) > 50:
+                log.info(f"DOC → TXT (LibreOffice): {Path(path).name}")
+                return txt_path
+    except Exception as e:
+        log.warning(f"LibreOffice zaxirasi xato: {e}")
 
     log.error(f"DOC o'qilmadi (eski .doc formati juda eski/buzilgan bo'lishi mumkin): {path}")
     return ""
@@ -511,29 +589,34 @@ def _parse_docx(path: str) -> list:
         except Exception as _e:
             log.warning(f"_parse_docx_with_images: {_e}")
 
-    # FORMAT G: Har paragraf = 1 savol (ichida \n bilan variantlar)
+    # FORMAT G / I / F: bular erkin (belgi-tuzilmasiz) formatlar, birinchisi mos kelsa qolganlari
+    # ko'rilmay qolardi (masalan, standart "1.Savol / *A)..." faylini FORMAT I noto'g'ri,
+    # belgisiz o'qib yuborardi). Endi uchalasi ham sinaladi va eng yaxshisi tanlanadi
+    # (teng bo'lsa — eski tartib: G, I, F).
+    cands = []
     if any('\n' in l for l in lines):
         q = _parse_paragraph_per_question(lines)
         if q:
-            return q
+            cands.append(("G", q))
 
     # FORMAT I: Har QATOR = alohida paragraf (raqamsiz, prefikssiz),
     # savol so'roq/ikki nuqta/bo'sh joy bilan, variantlar ketma-ket,
     # to'g'ri javob "+" bilan belgilangan (label A)/B)/C)/D) bo'lishi shart emas).
-    # Paragraf ichida "\n" bo'lsa ham (FORMAT G mos kelmagan holatlar uchun)
-    # avval qatorlarga yoyamiz, keyin FORMAT I logikasi ishlaydi.
     flat_lines = []
     for l in lines:
         flat_lines.extend(s.strip() for s in l.split('\n') if s.strip())
     q = _parse_loose_paragraphs(flat_lines)
     if q:
-        return q
+        cands.append(("I", q))
 
     # FORMAT F: Standart raqamli
     full_text = "\n".join(lines)
     q = parse_text(full_text)
     if q:
-        return q
+        cands.append(("F", q))
+
+    if cands:
+        return _pick_best([(n, _sanitize_questions(c)) for n, c in cands])[1]
 
     # FORMAT F2: Variantsiz
     return _parse_question_list_only(lines)
@@ -1178,6 +1261,25 @@ def _clean_table_block(block: str) -> str:
     return '\n'.join(cells)
 
 
+def _split_merged_block(parts: list) -> list:
+    """FORMAT B: savollar orasidagi "++++" yozilmagan bo'lsa, ikki savol bir blokka tushadi
+    (birinchi savol + variantlar, so'ng 2-savol matni + variantlar; ikkalasida '#' bor).
+    Aniq belgi: '#' siz, '?' bilan tugaydigan element — o'zidan oldin ham, keyin ham '#' bor.
+    Aks holda blok o'zgarishsiz qaytariladi."""
+    if len(parts) < 7:
+        return [parts]
+    hashes = [i for i, p_ in enumerate(parts) if i > 0 and p_.lstrip().startswith("#")]
+    if len(hashes) < 2:
+        return [parts]
+    for j in range(3, len(parts) - 2):
+        p_ = parts[j].strip()
+        if p_.startswith("#") or not p_.endswith("?") or len(p_) < 12:
+            continue
+        if any(h < j for h in hashes) and any(h > j for h in hashes):
+            return _split_merged_block(parts[:j]) + _split_merged_block(parts[j:])
+    return [parts]
+
+
 def _parse_eq_hash(lines: list) -> list:
     """
     Asosiy logika (hujjatdan):
@@ -1195,13 +1297,17 @@ def _parse_eq_hash(lines: list) -> list:
     blocks = re.split(r'\+{3,}', content)
     blocks = [b.strip() for b in blocks if b.strip()]
 
+    groups = []
     for block in blocks:
         block = _clean_table_block(block)
 
         # 2-QADAM: ==== bo'yicha parts ga ajratish
         parts = re.split(r'={3,}', block)
         parts = [p.strip() for p in parts if p.strip()]
+        # "++++" unutilgan bo'lsa, ikki savol bitta blokka qo'shilib qoladi — ajratamiz
+        groups.extend(_split_merged_block(parts))
 
+    for parts in groups:
         if len(parts) < 2:
             continue
         if not _is_valid_block(parts):
@@ -1639,7 +1745,7 @@ def parse_text(text: str) -> list:
             cands.append(("unified", uq))
     except Exception as e:
         log.warning(f"parse_text: unified ishlamadi: {e}")
-    lq = _parse_text_legacy(text)
+    lq = [q for q in _parse_text_legacy(text) if _q_valid(q)]     # variantsiz/1 variantli axlat olinmaydi
     if lq:
         cands.append(("legacy", lq))
     cands = [(n, _sanitize_questions(q)) for n, q in cands]
